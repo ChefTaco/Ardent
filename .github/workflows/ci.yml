@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ardent-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy:
+    name: Secrets and private data
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/scan-secrets.sh
+      - run: bash scripts/check-private-data.sh
+      # The release-workflow tests need the YAML dependency and run in verify after npm ci.
+      - run: node --test scripts/test-privacy-policy.mjs scripts/test-publish-environment.mjs
+
+  verify:
+    name: Verify (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [24.22.1, 26.13.0]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Put node on the system PATH
+        # Ardent starts Codex and its test fixtures with a minimal system PATH.
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node && /usr/bin/node --version
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Privacy, typecheck, lint, test, build, OpenAPI and package checks
+        run: npm run verify
+      - name: End-to-end CLI checks against the built package
+        run: |
+          node scripts/check-cli.mjs
+          node scripts/check-chat.mjs
+          node scripts/check-schedule.mjs
+          node scripts/check-native.mjs

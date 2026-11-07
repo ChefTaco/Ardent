@@ -1,0 +1,2667 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Magnus Ardent API",
+    "version": "2.1.1"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+          },
+          "caller": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string",
+            "enum": [
+              "direct",
+              "peer",
+              "scheduled"
+            ]
+          },
+          "session_id": {
+            "nullable": true,
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "nullable": true,
+            "type": "string"
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "llamacpp",
+              "codex"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "input_required",
+              "completed",
+              "partial",
+              "failed",
+              "cancelled",
+              "unknown"
+            ]
+          },
+          "result": {
+            "nullable": true,
+            "type": "string"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "deadline_ms": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "created_ms": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "updated_ms": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "caller",
+          "context",
+          "session_id",
+          "prompt",
+          "content_hash",
+          "idempotency_key",
+          "backend",
+          "state",
+          "result",
+          "error",
+          "deadline_ms",
+          "created_ms",
+          "updated_ms"
+        ]
+      },
+      "TaskEvent": {
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "detail": {},
+          "created_ms": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "sequence",
+          "task_id",
+          "kind",
+          "created_ms"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "responses": {
+          "200": {
+            "description": "Process is running"
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "responses": {
+          "200": {
+            "description": "Configured runtime ready"
+          },
+          "503": {
+            "description": "Runtime dependency unavailable"
+          }
+        }
+      }
+    },
+    "/a2a/rest/extendedAgentCard": {
+      "get": {
+        "operationId": "a2aGetExtendedAgentCard",
+        "description": "Authenticated A2A v1 extended Agent Card on the separate A2A listener.",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/message:send": {
+      "post": {
+        "operationId": "a2aSendMessage",
+        "description": "Canonical A2A v1 HTTP+JSON send operation on the separate A2A listener.",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "example": {
+                "message": {
+                  "messageId": "request-1",
+                  "role": "user",
+                  "parts": [
+                    {
+                      "kind": "text",
+                      "text": "Research the current update"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/message:stream": {
+      "post": {
+        "operationId": "a2aStreamMessage",
+        "description": "Canonical A2A v1 HTTP+JSON streaming send.",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "example": {
+                "message": {
+                  "messageId": "request-1",
+                  "role": "user",
+                  "parts": [
+                    {
+                      "kind": "text",
+                      "text": "Research the current update"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A2A task/status/artifact SSE events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks": {
+      "get": {
+        "operationId": "a2aListTasks",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks/{taskId}": {
+      "get": {
+        "operationId": "a2aGetTask",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "historyLength",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks/{taskId}:cancel": {
+      "post": {
+        "operationId": "a2aCancelTask",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks/{taskId}:subscribe": {
+      "get": {
+        "operationId": "a2aSubscribeTask",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A task/status/artifact SSE events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      },
+      "post": {
+        "operationId": "a2aResumeTaskStream",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A task/status/artifact SSE events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks/{taskId}/pushNotificationConfigs": {
+      "post": {
+        "operationId": "a2aSetPushConfig",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created push configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task absent"
+          }
+        }
+      },
+      "get": {
+        "operationId": "a2aListPushConfigs",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      }
+    },
+    "/a2a/rest/tasks/{taskId}/pushNotificationConfigs/{configId}": {
+      "get": {
+        "operationId": "a2aGetPushConfig",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "configId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A2A v1 task or message; see the pinned A2A protocol contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid A2A request"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Task or configuration absent"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "a2aDeletePushConfig",
+        "servers": [
+          {
+            "url": "http://localhost:9901",
+            "description": "Example A2A listener. Use the HTTP+JSON interface URL advertised by the Agent Card."
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "A2A-Version",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1.0"
+              ]
+            },
+            "description": "Negotiated A2A protocol version"
+          },
+          {
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "configId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Push configuration deleted"
+          },
+          "401": {
+            "description": "Peer authentication failed"
+          },
+          "404": {
+            "description": "Configuration absent"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks": {
+      "post": {
+        "operationId": "submitTask",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16000
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "prompt"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "prompt": "Research today's topic",
+                "idempotency_key": "topic-2026-09-26"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted durable task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state"
+                  ]
+                },
+                "example": {
+                  "task_id": "11111111-1111-4111-8111-111111111111",
+                  "state": "queued"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Conflicting idempotency key"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listTasks",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum number of recent tasks",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "tasks"
+                  ],
+                  "properties": {
+                    "tasks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                          },
+                          "caller": {
+                            "type": "string"
+                          },
+                          "context": {
+                            "type": "string",
+                            "enum": [
+                              "direct",
+                              "peer",
+                              "scheduled"
+                            ]
+                          },
+                          "session_id": {
+                            "nullable": true,
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                          },
+                          "prompt": {
+                            "type": "string"
+                          },
+                          "content_hash": {
+                            "type": "string"
+                          },
+                          "idempotency_key": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string",
+                            "enum": [
+                              "llamacpp",
+                              "codex"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "running",
+                              "input_required",
+                              "completed",
+                              "partial",
+                              "failed",
+                              "cancelled",
+                              "unknown"
+                            ]
+                          },
+                          "result": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "error": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "deadline_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "updated_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "caller",
+                          "context",
+                          "session_id",
+                          "prompt",
+                          "content_hash",
+                          "idempotency_key",
+                          "backend",
+                          "state",
+                          "result",
+                          "error",
+                          "deadline_ms",
+                          "created_ms",
+                          "updated_ms"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "tasks": [
+                    {
+                      "id": "11111111-1111-4111-8111-111111111111",
+                      "caller": "management",
+                      "context": "direct",
+                      "session_id": null,
+                      "prompt": "Research the current update",
+                      "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                      "idempotency_key": "research-1",
+                      "backend": "llamacpp",
+                      "state": "queued",
+                      "result": null,
+                      "error": null,
+                      "deadline_ms": 1790438400000,
+                      "created_ms": 1790431200000,
+                      "updated_ms": 1790431200000
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Caller sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                          },
+                          "caller": {
+                            "type": "string"
+                          },
+                          "context": {
+                            "type": "string",
+                            "enum": [
+                              "direct",
+                              "peer",
+                              "scheduled"
+                            ]
+                          },
+                          "key": {
+                            "type": "string"
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "updated_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "caller",
+                          "context",
+                          "key",
+                          "created_ms",
+                          "updated_ms"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "sessions"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "openSession",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "reset": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing or new session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "caller": {
+                      "type": "string"
+                    },
+                    "context": {
+                      "type": "string",
+                      "enum": [
+                        "direct",
+                        "peer",
+                        "scheduled"
+                      ]
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "created_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "updated_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "caller",
+                    "context",
+                    "key",
+                    "created_ms",
+                    "updated_ms"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/messages": {
+      "get": {
+        "operationId": "getSessionMessages",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent caller session messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messages": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "session_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                          },
+                          "task_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "user",
+                              "assistant"
+                            ]
+                          },
+                          "content": {
+                            "type": "string"
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "sequence",
+                          "session_id",
+                          "task_id",
+                          "role",
+                          "content",
+                          "created_ms"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "messages"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session absent"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}": {
+      "get": {
+        "operationId": "getTask",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "caller": {
+                      "type": "string"
+                    },
+                    "context": {
+                      "type": "string",
+                      "enum": [
+                        "direct",
+                        "peer",
+                        "scheduled"
+                      ]
+                    },
+                    "session_id": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "prompt": {
+                      "type": "string"
+                    },
+                    "content_hash": {
+                      "type": "string"
+                    },
+                    "idempotency_key": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "backend": {
+                      "type": "string",
+                      "enum": [
+                        "llamacpp",
+                        "codex"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    },
+                    "result": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "error": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "deadline_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "created_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "updated_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "caller",
+                    "context",
+                    "session_id",
+                    "prompt",
+                    "content_hash",
+                    "idempotency_key",
+                    "backend",
+                    "state",
+                    "result",
+                    "error",
+                    "deadline_ms",
+                    "created_ms",
+                    "updated_ms"
+                  ]
+                },
+                "example": {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "caller": "management",
+                  "context": "direct",
+                  "session_id": null,
+                  "prompt": "Research the current update",
+                  "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "idempotency_key": "research-1",
+                  "backend": "llamacpp",
+                  "state": "queued",
+                  "result": null,
+                  "error": null,
+                  "deadline_ms": 1790438400000,
+                  "created_ms": 1790431200000,
+                  "updated_ms": 1790431200000
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/events": {
+      "get": {
+        "operationId": "getTaskEvents",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Return events with sequence greater than this cursor",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Journal events after the supplied sequence cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "events"
+                  ],
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "detail": {},
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "sequence",
+                          "task_id",
+                          "kind",
+                          "created_ms"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "events": [
+                    {
+                      "sequence": 1,
+                      "task_id": "11111111-1111-4111-8111-111111111111",
+                      "kind": "task_accepted",
+                      "detail": {
+                        "backend": "llamacpp"
+                      },
+                      "created_ms": 1790431200000
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/stream": {
+      "get": {
+        "operationId": "streamTaskEvents",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "description": "Resume after a journal sequence",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE task.event carries TaskEvent JSON; task.done carries Task JSON",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "event: task.event\nid: 1\ndata: {\"sequence\":1,\"task_id\":\"11111111-1111-4111-8111-111111111111\",\"kind\":\"task_accepted\",\"detail\":{\"backend\":\"llamacpp\"},\"created_ms\":1790431200000}\n\n"
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/cancel": {
+      "post": {
+        "operationId": "cancelTask",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation requested"
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{id}": {
+      "get": {
+        "operationId": "getArtifact",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact bytes"
+          },
+          "404": {
+            "description": "Artifact absent"
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "getOperationalStatus",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active profile summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string"
+                    },
+                    "profile": {
+                      "type": "string"
+                    },
+                    "backend": {
+                      "type": "string",
+                      "enum": [
+                        "llamacpp",
+                        "codex"
+                      ]
+                    },
+                    "tasks": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "profile",
+                    "backend",
+                    "tasks"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/definitions/status": {
+      "get": {
+        "operationId": "getJobDefinitionsStatus",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active profile job definition revision, digest, and redacted window status"
+          },
+          "503": {
+            "description": "Job engine unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/profile": {
+      "get": {
+        "operationId": "getProfile",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile identity and path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "product": {
+                      "type": "string"
+                    },
+                    "timezone": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "profile",
+                    "name",
+                    "product",
+                    "timezone",
+                    "path"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config": {
+      "get": {
+        "operationId": "getConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw YAML and revision; secrets remain references",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "text"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "saveConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "text",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; activation required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "string"
+                    },
+                    "activation_required": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "activation_required"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/config/validate": {
+      "post": {
+        "operationId": "validateConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validation result"
+          },
+          "400": {
+            "description": "Invalid YAML or configuration"
+          }
+        }
+      }
+    },
+    "/api/v1/config/schema": {
+      "get": {
+        "operationId": "getConfigSchema",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated JSON Schema for versioned YAML configuration"
+          }
+        }
+      }
+    },
+    "/api/v1/identity/{kind}": {
+      "get": {
+        "operationId": "getIdentity",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "soul",
+                "identity"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity text and revision"
+          }
+        }
+      },
+      "put": {
+        "operationId": "saveIdentity",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "soul",
+                "identity"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 131072
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "text",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved identity revision"
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/identity/{kind}/history": {
+      "get": {
+        "operationId": "getIdentityHistory",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "soul",
+                "identity"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Previous versions"
+          }
+        }
+      }
+    },
+    "/api/v1/identity/{kind}/restore": {
+      "post": {
+        "operationId": "restoreIdentity",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "soul",
+                "identity"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "history_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "history_name",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Restored identity revision"
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/providers": {
+      "get": {
+        "operationId": "getProviders",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured providers and Codex account mode"
+          }
+        }
+      }
+    },
+    "/api/v1/providers/test": {
+      "post": {
+        "operationId": "testProvider",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Selected provider probe"
+          },
+          "503": {
+            "description": "Provider unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/channels": {
+      "get": {
+        "operationId": "getChannels",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel configuration and credential presence"
+          }
+        }
+      }
+    },
+    "/api/v1/channels/{name}/test": {
+      "post": {
+        "operationId": "testChannel",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "telegram",
+                "mattermost"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only channel connection probe"
+          },
+          "503": {
+            "description": "Channel unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/peers": {
+      "get": {
+        "operationId": "getPeers",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured peer inventory"
+          }
+        }
+      }
+    },
+    "/api/v1/peers/config": {
+      "get": {
+        "operationId": "getPeersConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Peer YAML and revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text",
+                    "revision"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "savePeersConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "text",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved peer configuration; restart required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "string"
+                    },
+                    "activation_required": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "activation_required"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/peers/validate": {
+      "post": {
+        "operationId": "validatePeersConfig",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validated peer count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "valid": {
+                      "type": "boolean"
+                    },
+                    "peers": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "valid",
+                    "peers"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid peer configuration"
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{id}/test": {
+      "post": {
+        "operationId": "testPeer",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Peer card discovery result"
+          },
+          "503": {
+            "description": "Peer unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/skills": {
+      "get": {
+        "operationId": "listSkills",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile skill index"
+          }
+        }
+      }
+    },
+    "/api/v1/skills/{name}": {
+      "put": {
+        "operationId": "setSkillEnabled",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved skill selection revision"
+          },
+          "409": {
+            "description": "Revision conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/search": {
+      "post": {
+        "operationId": "searchMemory",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Permitted memories"
+          },
+          "503": {
+            "description": "HiveMem unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/status": {
+      "get": {
+        "operationId": "getMemoryStatus",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HiveMem readiness and capability summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "degraded"
+                      ]
+                    },
+                    "agent_id": {
+                      "type": "string"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    },
+                    "retrieval": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "storage": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "reason": {
+                      "nullable": true,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "agent_id",
+                    "workspace_id",
+                    "retrieval",
+                    "storage",
+                    "reason"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

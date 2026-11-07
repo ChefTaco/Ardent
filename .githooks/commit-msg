@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Installed by `npm run hooks:install`. Keeps private names out of commit messages.
+set -euo pipefail
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+bash "$ROOT_DIR/scripts/check-private-data.sh" --message "$1"

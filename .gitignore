@@ -1,0 +1,46 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+.npmrc
+
+# Keys, certificates, databases and profile state
+certs/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
+*.sqlite-*
+.ardent/
+state/
+backups/
+
+# Python interop fixtures
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local privacy denylist and private agent notes (never commit)
+.private-terms
+AGENTS.local.md
+CLAUDE.local.md
+*.local.md
+output/
+.claude/

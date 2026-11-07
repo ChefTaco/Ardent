@@ -1,0 +1,9 @@
+{
+  "observed_cli_version": "0.157.1",
+  "installed_profile_cli_version": "0.156.1",
+  "generated_command": "codex app-server generate-ts --out <directory>",
+  "source": "https://developers.openai.com/codex/app-server/",
+  "dynamic_tools_in_observed_thread_start_schema": false,
+  "required_capability": "capabilities.experimentalApi",
+  "verification": "2026-09-26 local ChatGPT OAuth wire probe: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. A production profile CLI remains separately unverified."
+}

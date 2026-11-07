@@ -1,0 +1,88 @@
+# Ardent profile, schema 1. `ardent init` copies this template.
+# Keep credential values in the environment or the profile's .env file;
+# `${NAME}` references are resolved from the environment at runtime.
+schema_version: 1
+profile: assistant
+name: Assistant
+product: Ardent
+# IANA timezone for schedules and dates. `ardent init` fills in the host zone.
+# timezone: UTC
+identity:
+  soul_file: SOUL.md
+  identity_file: IDENTITY.md
+execution:
+  backend: llamacpp            # llamacpp | codex
+  max_model_steps: 40
+  max_tool_calls: 80
+  max_parallel_tools: 3
+  deadline_seconds: 3600
+  max_delegation_depth: 2
+providers:
+  llamacpp:
+    # Any OpenAI-compatible chat completions server (llama.cpp, vLLM, ...).
+    base_url: ${ARDENT_LLAMA_BASE_URL}
+    model: ${ARDENT_LLAMA_MODEL}
+    api_key_env: ARDENT_LLAMA_API_KEY
+    request_timeout_seconds: 120
+    # Set only when the endpoint cannot report its real context window.
+    # context_window_tokens: 32768
+    # max_output_tokens: 4096
+  codex:
+    command: codex
+    model: ${ARDENT_CODEX_MODEL}
+    auth_mode: chatgpt         # chatgpt | api_key
+    approval_policy: never
+    sandbox: read-only
+# Long-term memory is optional. Default: none.
+memory:
+  provider: none
+  # provider: hivemem
+  # base_url: ${HIVEMEM_API_URL}
+  # token_env: HIVEMEM_TOKEN
+  # agent_id: assistant
+  # workspace_id: ${HIVEMEM_WORKSPACE}
+  # default_scope: private
+# Optional news research tools (SearXNG search + Firecrawl extraction).
+research:
+  enabled: false
+  searxng_url: ${ARDENT_SEARXNG_URL}
+  firecrawl_url: ${ARDENT_FIRECRAWL_URL}
+  firecrawl_token_env: FIRECRAWL_API_KEY
+skills:
+  directories: [skills]
+  enabled: [grounded-answers]
+a2a:
+  enabled: false
+  protocol_version: '1.0'
+  bindings: [jsonrpc, http-json]
+  public_url: ${ARDENT_A2A_PUBLIC_URL}
+  listen_host: 127.0.0.1
+  # listen_port: 9900
+  peers_file: peers.yaml
+  hermes_compat: false
+channels:
+  telegram:
+    enabled: false
+    token_env: TELEGRAM_BOT_TOKEN
+    allowed_user_ids: []
+    allowed_chat_ids: []
+    receive_mode: polling
+  mattermost:
+    enabled: false
+    base_url: ${MATTERMOST_URL}
+    token_env: MATTERMOST_TOKEN
+    allowed_user_ids: []
+    allowed_channel_ids: []
+    require_mention: true
+    reply_mode: thread
+integrations:
+  magnus_control:
+    enabled: false
+    base_url: ${ARDENT_MAGNUS_API_URL}
+    token_env: ARDENT_MAGNUS_READ_TOKEN
+# Plugin modules: npm package names, absolute paths, or file:// URLs.
+plugins: []
+api:
+  host: 127.0.0.1
+  port: 9910
+  token_env: ARDENT_API_TOKEN

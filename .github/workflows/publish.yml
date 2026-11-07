@@ -1,0 +1,77 @@
+name: Publish to npm
+
+# Publishes @hivemagnus/ardent with provenance when its version is not on npm yet.
+# - Push a tag vX.Y.Z (matching package.json) to publish.
+# - Run it by hand (Actions > Publish to npm > Run workflow) for a dry run.
+# Publishing waits for approval on the `npm-publish` environment, then authenticates to npm
+# through trusted publishing (OIDC). No npm token is stored in this repository.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack and validate only; publish nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: npm-publish
+    permissions:
+      contents: read
+      actions: read # read environment protection before any publication
+      id-token: write # trusted publishing and provenance
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require protected publication environment
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-publish-environment.mjs
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Put node on the system PATH
+        # Ardent starts Codex and its test fixtures with a minimal system PATH.
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node && /usr/bin/node --version
+
+      - name: Check npm supports provenance and trusted publishing
+        run: |
+          npm --version
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error("npm >= 11.5.1 is required"); process.exit(1) }' "$(npm --version)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Gates
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm run verify
+          node scripts/check-cli.mjs
+          node scripts/check-chat.mjs
+          node scripts/check-schedule.mjs
+          node scripts/check-native.mjs
+
+      - name: Publish
+        run: node scripts/publish-package.mjs

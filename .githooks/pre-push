@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Installed by `npm run hooks:install`. Final check of every tracked file and outgoing commit messages.
+set -euo pipefail
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+bash "$ROOT_DIR/scripts/check-private-data.sh"
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [[ "$local_sha" == "$zero" ]] && continue
+  if [[ "$remote_sha" == "$zero" ]]; then range="$local_sha"; else range="$remote_sha..$local_sha"; fi
+  msg_file="$(mktemp)"
+  git log --format='%B' "$range" > "$msg_file"
+  bash "$ROOT_DIR/scripts/check-private-data.sh" --message "$msg_file" || { rm -f "$msg_file"; exit 1; }
+  rm -f "$msg_file"
+done

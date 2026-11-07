@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "primary": {
+    "codex": { "model": "gpt-5-codex", "reasoning_effort": "medium" },
+    "llamacpp": { "mode": "profile" }
+  },
+  "compaction": {
+    "enabled": false,
+    "routes": [
+      { "backend": "codex", "model": "gpt-5-codex-mini", "reasoning_effort": "medium" },
+      { "backend": "codex", "model": "gpt-5-codex", "reasoning_effort": "medium" }
+    ],
+    "prompt_budget_tokens": 32000,
+    "output_reserve_tokens": 8000,
+    "checkpoint_max_tokens": 4000,
+    "recent_max_tokens": 8000,
+    "trigger_ratio": 0.7
+  }
+}

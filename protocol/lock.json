@@ -1,0 +1,9 @@
+{
+  "specification": "A2A v1.0.1",
+  "source_repository": "https://github.com/a2aproject/A2A",
+  "source_commit": "3303592588e388e62e0f69f701af531d2f4e3991",
+  "protobuf_path": "specification/a2a.proto",
+  "protobuf_sha256": "e195bf96ab630c69797851970203e1b2b6b19528f2e9803b7d904b91a5104016",
+  "protocol_library": "@a2a-js/sdk@1.2.1",
+  "protocol_library_commit": "11cbb295a7933ecb459d4e2af0740bf4570e71b2"
+}

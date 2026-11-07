@@ -1,0 +1,12 @@
+# A2A peers this profile may call and accept calls from.
+# Each peer uses either one shared `token_env` or both directional
+# `inbound_token_env` / `outbound_token_env` references.
+schema_version: 1
+peers: []
+# peers:
+#   - id: research
+#     url: https://research.example.com:9900/
+#     inbound_token_env: ARDENT_A2A_INBOUND_RESEARCH_TOKEN
+#     outbound_token_env: ARDENT_A2A_OUTBOUND_RESEARCH_TOKEN
+#     enabled: true
+#     transport_ports: [9901]

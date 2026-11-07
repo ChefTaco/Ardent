@@ -1,0 +1,10 @@
+Ardent
+Copyright 2026 ChefTaco and contributors
+
+This product includes software developed by ChefTaco and contributors
+(https://github.com/ChefTaco/Ardent), originally in the Magnus repository
+(https://github.com/ChefTaco/magnus).
+
+protocol/a2a.proto is the A2A protocol definition from
+https://github.com/a2aproject/A2A, licensed under the Apache License 2.0;
+see protocol/LICENSE-A2A.txt.
