@@ -14,6 +14,14 @@
 - The typed management client used by the tests is generated in this repository
   (`test/generated/ardent-openapi.ts`); Magnus generates its own from the published package.
 
+### Maintenance
+
+- Pin the installed `@a2a-js/sdk@1.3.0` (tag commit `29417a5`) in `protocol/lock.json`; the
+  dependency moved from 1.2.1 without a lock update, so `npm run protocol:check` failed. The
+  release adds database-backed stores only, and the interop results are the same on 1.2.1 and
+  1.3.0. `npm run verify` now runs `protocol:check`.
+- Mark the Python interop fixtures as detectable so CodeQL analyzes them.
+
 ## 2.1.1 and earlier
 
 Released from the Magnus monorepo. See the
