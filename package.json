@@ -67,7 +67,7 @@
     "check:private": "bash scripts/check-private-data.sh",
     "privacy:test": "node --test scripts/test-privacy-policy.mjs scripts/test-publish-environment.mjs scripts/test-publish-package.mjs",
     "hooks:install": "git config core.hooksPath .githooks",
-    "verify": "npm run privacy:test && npm run scan:secrets && npm run check:private && npm run typecheck && npm run lint && npm test && npm run build && npm run openapi:check && npm run pack:check"
+    "verify": "npm run privacy:test && npm run scan:secrets && npm run check:private && npm run protocol:check && npm run typecheck && npm run lint && npm test && npm run build && npm run openapi:check && npm run pack:check"
   },
   "dependencies": {
     "@hivemagnus/emberfold": "0.1.0",

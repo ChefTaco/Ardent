@@ -1,0 +1,3 @@
+# The Python A2A and Hermes interop fixtures are first-party code: keep them visible to
+# language detection so CodeQL default setup analyzes them.
+test/fixtures/*.py linguist-vendored=false linguist-detectable=true
