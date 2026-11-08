@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Live reply streaming on `GET /api/v1/tasks/{id}/stream`. While a task runs, `task.text` and
+  `task.delta` events carry the visible text of the current model step as the model writes it,
+  for every task and backend. The text is not journaled and has no event id; reconnecting clients
+  receive a `task.text` snapshot. Structured output is never streamed. `ardent chat` and the API
+  share one filter for this.
+
 ## 2.1.2 - 2026-11-07
 
 The first release published from this repository.

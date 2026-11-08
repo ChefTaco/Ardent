@@ -33,6 +33,7 @@ import { loadPlugins, pluginContext, pluginJobHandlers, validationContext, type 
 
 import { ARDENT_VERSION } from './version.js';
 import { acceptRuntime, readProtectedFile } from './acceptance.js';
+import { PlainTextFilter } from './live-text.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
 function args(argv: string[]): Parsed {
@@ -584,27 +585,17 @@ async function main(): Promise<void> {
             }
           };
           const progress = setInterval(showProgress, 150);
-          const streamState: { text: string; step: number; mode: 'pending' | 'plain' | 'structured' } = { text: '', step: -1, mode: 'pending' };
+          const visible = new PlainTextFilter();
           const writeModelText = (chunk: string, step: number) => {
-            if (step !== streamState.step) { streamState.step = step; streamState.text = ''; streamState.mode = 'pending'; }
-            if (streamState.mode === 'structured') return;
-            if (streamState.mode === 'pending') {
-              const first = chunk.trimStart()[0];
-              if (!first) { streamState.text += chunk; return; }
-              streamState.mode = first === '{' || first === '[' ? 'structured' : 'plain';
-              if (streamState.mode === 'structured') { streamState.text = ''; return; }
-              showProgress();
-              answerStarted = true;
-              if (streamState.text) stdout.write(streamState.text);
-            }
-            streamState.text += chunk;
-            stdout.write(chunk);
+            const out = visible.push(chunk, step);
+            if (out.started) { showProgress(); answerStarted = true; }
+            if (out.text) stdout.write(out.text);
           };
           try {
             const result = await runtime.run(task.id, env, writeModelText);
             showProgress();
-            if (streamState.mode !== 'plain' || streamState.text.trim() !== result.answer.trim()) stdout.write(`${result.answer}\n`);
-            else if (!streamState.text.endsWith('\n')) stdout.write('\n');
+            if (visible.mode !== 'plain' || visible.text.trim() !== result.answer.trim()) stdout.write(`${result.answer}\n`);
+            else if (!visible.text.endsWith('\n')) stdout.write('\n');
           }
           catch (error: unknown) { showProgress(); stderr.write(`${error instanceof Error ? error.message : 'Task failed'}\n`); }
           finally { clearInterval(progress); activeTask = undefined; }
