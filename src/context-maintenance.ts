@@ -6,11 +6,15 @@ import Database from 'better-sqlite3';
 import { parse } from 'dotenv';
 import { z } from 'zod';
 import { ContextCheckpoints, type CompactionCall } from './context-checkpoints.js';
-import { TaskContext, TaskStore } from './store.js';
+import { TaskStore } from './store.js';
 import { loadConfig } from './config.js';
 import { loadModelPolicy } from './model-policy.js';
 import { compactWithCodex } from './codex.js';
 import { resolveSources, validateCheckpoint } from '@hivemagnus/emberfold';
+
+// Context-only adoption overlays this module on an older installed runtime, so it may import from
+// that runtime's base modules only what every supported release exports (test/context-overlay-imports.test.ts).
+const SessionContext = z.enum(['direct', 'peer', 'scheduled', 'mission', 'preview']);
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const tableName = z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/);
@@ -173,7 +177,7 @@ export async function contextMaintenance(input: unknown): Promise<Record<string,
       const current = new ContextCheckpoints(store, forbidden);
       const { ContextCheckpoints: Previous } = previousReaderSchema.parse(await import(pathToFileURL(request.previous_module).href) as unknown);
       const previous = new Previous(store, forbidden);
-      const sessions = z.array(z.object({ id: z.string(), caller: z.string(), context: TaskContext })).max(10000)
+      const sessions = z.array(z.object({ id: z.string(), caller: z.string(), context: SessionContext })).max(10000)
         .parse(store.db.prepare('SELECT s.id,s.caller,s.context FROM sessions s JOIN context_checkpoint_heads h ON h.session_id=s.id').all());
       for (const session of sessions) {
         const status = current.status(session.id, session.caller, session.context);
