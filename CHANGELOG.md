@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 - 2026-11-08
 
 ### Added
 
@@ -10,11 +10,6 @@
   gateway's shared environment so every later HiveMem request uses it without a restart. Answers
   `{reloaded, token_env, changed}`, `409` when memory is not `hivemem`, `422` when the credential
   is missing or malformed (the previous one stays in use). The token is never returned.
-
-## 2.2.0 - 2026-11-08
-
-### Added
-
 - Live reply streaming on `GET /api/v1/tasks/{id}/stream`. While a task runs, `task.text` and
   `task.delta` events carry the visible text of the current model step as the model writes it,
   for every task and backend. The text is not journaled and has no event id; reconnecting clients
