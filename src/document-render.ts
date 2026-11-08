@@ -2,23 +2,35 @@ import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
 import pdfMake from 'pdfmake';
 import type { Content, TDocumentDefinitions } from 'pdfmake/interfaces.js';
+import { documentSchema, exportDocx, WordCodecError } from '@hivemagnus/canvas-word-codec';
+import { markdownToWordDocument } from './markdown-docx.js';
 import { ProvenNoEffectError } from './tools.js';
 
 /** Renders Markdown to DOCX bytes. */
 export type DocxWriter = (markdown: string, options: { title: string }) => Promise<Uint8Array>;
 
 /**
- * The DOCX writer. This build has none: `document_render` with `format: 'docx'`
- * fails with DOCX_UNAVAILABLE and no effect. Assign the canvas-word codec writer
- * here once that package is published; nothing else needs to change.
+ * The DOCX writer: Markdown is mapped to a Word exchange document and written by the
+ * canvas-word codec. The codec writes no document properties, so the title is not stored.
  */
-const docxWriter = undefined as DocxWriter | undefined;
+const docxWriter: DocxWriter = async markdown => {
+  const { document, assets } = markdownToWordDocument(markdown);
+  const issue = documentSchema.safeParse(document).error?.issues[0];
+  if (issue) throw new ProvenNoEffectError(`The Markdown is too large or complex for DOCX (${issue.path.join('.')}: ${issue.message})`, 'DOCX_RENDER_FAILED');
+  return new Uint8Array(await exportDocx(document, 'final', assets));
+};
 
 export const MAX_RENDER_SOURCE_CHARS = 200_000;
 
+/** Render Markdown to DOCX. Rendering is local computation, so a failure has no effect. */
 export async function renderDocx(markdown: string, title: string): Promise<Uint8Array> {
-  if (!docxWriter) throw new ProvenNoEffectError('DOCX rendering is not available in this build', 'DOCX_UNAVAILABLE');
-  return docxWriter(markdown, { title });
+  try {
+    return await docxWriter(markdown, { title });
+  } catch (error) {
+    if (error instanceof ProvenNoEffectError) throw error;
+    const reason = error instanceof WordCodecError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : 'unknown error';
+    throw new ProvenNoEffectError(`The Markdown could not be rendered as DOCX (${reason.slice(0, 300)})`, 'DOCX_RENDER_FAILED');
+  }
 }
 
 const fontRoot = join(dirname(createRequire(import.meta.url).resolve('pdfmake/package.json')), 'build', 'fonts', 'Roboto');

@@ -96,7 +96,7 @@ export function registerMissionTools(registry: ToolRegistry, deps: MissionToolDe
         source: 'artifact_write', revisesSha256: input.revises_sha256 }));
     } }));
   if (has('development_note')) registerDevelopmentNoteTool(registry, deps, ['mission']);
-  if (has('document_render')) registry.register(defineTool({ name: 'document_render', description: 'Render Markdown (with ```svg blocks for vector figures) to a PDF or DOCX deliverable and save it as an artifact.',
+  if (has('document_render')) registry.register(defineTool({ name: 'document_render', description: 'Render Markdown to a PDF or DOCX deliverable and save it as an artifact. ```svg blocks become vector figures in PDF only; images are embedded in DOCX only from PNG or JPEG data: URIs.',
     input: z.object({ source_markdown: z.string().min(1).max(MAX_RENDER_SOURCE_CHARS), format: z.enum(['pdf', 'docx']), name: safeName, revises_sha256: digest.optional() }).strict(),
     output: Registered, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 60_000, handler: async input => {
       const extension = `.${input.format}`;

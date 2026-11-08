@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { importDocx, paragraphsOf } from '@hivemagnus/canvas-word-codec';
 import { loadConfig, parseConfig } from '../src/config.js';
 import { ArdentRuntime } from '../src/runtime.js';
 import { createArdentApi } from '../src/api.js';
@@ -102,7 +103,7 @@ describe('artifact_write', () => {
 });
 
 describe('document_render', () => {
-  it('renders Markdown to PDF and reports DOCX as unavailable with no effect', async () => {
+  it('renders Markdown to PDF', async () => {
     const { runtime, task, call } = await fixture();
     try {
       const pdf = await call('document_render', { source_markdown: '# Report\n\nSome **bold** text.\n\n- one\n- two\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>\n```\n', format: 'pdf', name: 'report' });
@@ -110,8 +111,27 @@ describe('document_render', () => {
       const sha = (pdf as { value: { sha256: string } }).value.sha256;
       expect(Buffer.from(await runtime.artifacts.get(sha)).subarray(0, 5).toString()).toBe('%PDF-');
       expect(runtime.artifactManifests.forTask(task.id)[0]!.manifest).toMatchObject({ preview: { mode: 'download_only' }, provenance: { source_id: 'document_render' } });
+    } finally { runtime.close(); }
+  });
+
+  it('renders Markdown to a DOCX artifact that the codec reads back', async () => {
+    const { runtime, task, call } = await fixture();
+    try {
+      const docx = await call('document_render', { source_markdown: '# Report\n\nSome **bold** text.\n\n- one\n- two\n', format: 'docx', name: 'report' });
+      expect(docx).toMatchObject({ ok: true, value: { name: 'report.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' } });
+      const bytes = Buffer.from(await runtime.artifacts.get((docx as { value: { sha256: string } }).value.sha256));
+      const { document } = await importDocx(bytes);
+      expect(paragraphsOf(document).map(paragraph => [paragraph.runs.map(run => run.text).join(''), paragraph.style.heading ?? paragraph.style.list ?? null]))
+        .toEqual([['Report', 1], ['Some bold text.', null], ['one', 'bullet'], ['two', 'bullet']]);
+      expect(runtime.artifactManifests.forTask(task.id)[0]!.manifest).toMatchObject({ preview: { mode: 'download_only' }, provenance: { source_id: 'document_render' } });
+    } finally { runtime.close(); }
+  });
+
+  it('refuses a DOCX over artifacts.max_bytes with no effect', async () => {
+    const { runtime, call } = await fixture(1024);
+    try {
       expect(await call('document_render', { source_markdown: '# Report', format: 'docx', name: 'report' }))
-        .toEqual({ ok: false, code: 'DOCX_UNAVAILABLE', message: 'DOCX rendering is not available in this build', effect: 'none' });
+        .toMatchObject({ ok: false, code: 'ARTIFACT_TOO_LARGE', effect: 'none' });
     } finally { runtime.close(); }
   });
 
