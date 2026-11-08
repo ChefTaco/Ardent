@@ -155,6 +155,15 @@ Direct conversations then get `hivemem_status`, `hivemem_search`,
 validated team mission may grant read access to one shared `project:<id>`
 scope.
 
+To rotate the HiveMem credential without a restart, write the new token into the
+profile environment file (`.env`, or the `--env-file` the gateway started with)
+and call `POST /api/v1/memory/credential/reload` with no body or `{}`. The
+gateway re-reads only the `token_env` variable, checks that it is a well-formed
+JWT, and uses it for every later HiveMem request; requests in flight finish
+with the previous token. It answers `{"reloaded": true, "token_env": "...",
+"changed": true|false}`, `409` when memory is not `hivemem`, and `422` (the old
+token stays in use) when the new value is missing or malformed.
+
 ### Chat channels
 
 ```yaml

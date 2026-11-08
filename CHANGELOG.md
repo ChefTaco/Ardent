@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `POST /api/v1/memory/credential/reload` (`reloadMemoryCredential`): re-reads only the
+  `memory.token_env` variable from the profile environment file the gateway started from (`.env`
+  or the protected `--env-file`), checks that it is a well-formed JWT, and swaps it into the
+  gateway's shared environment so every later HiveMem request uses it without a restart. Answers
+  `{reloaded, token_env, changed}`, `409` when memory is not `hivemem`, `422` when the credential
+  is missing or malformed (the previous one stays in use). The token is never returned.
+
 ## 2.2.0 - 2026-11-08
 
 ### Added

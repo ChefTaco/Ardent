@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, readdir, lstat } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import type { Server as HttpServer } from 'node:http';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout, stderr } from 'node:process';
-import { parse } from 'dotenv';
 import { z } from 'zod';
 import { ardentHome, ConfigSchema, DEFAULT_PROFILE, initProfile, loadConfig, profilePath, redactedConfig, resolveReference, runtimeProblems } from './config.js';
 import { ArdentRuntime } from './runtime.js';
@@ -32,7 +31,8 @@ import { loadModelPolicy } from './model-policy.js';
 import { loadPlugins, pluginContext, pluginJobHandlers, validationContext, type ArdentPlugin } from './plugins.js';
 
 import { ARDENT_VERSION } from './version.js';
-import { acceptRuntime, readProtectedFile } from './acceptance.js';
+import { acceptRuntime } from './acceptance.js';
+import { readProfileEnv } from './profile-env.js';
 import { PlainTextFilter } from './live-text.js';
 import { developmentQuery, missionSubmitInput, previewInput } from './cli-commands.js';
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
@@ -64,12 +64,7 @@ function value(options: Parsed['options'], name: string): string | undefined {
 }
 async function environment(dir: string, explicitFile?: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  try {
-    const data = parse(explicitFile ? await readProtectedFile(explicitFile) : await readFile(join(dir, '.env')));
-    for (const [name, val] of Object.entries(data)) if (env[name] === undefined) env[name] = val;
-  } catch (error: unknown) {
-    if (explicitFile || !(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
-  }
+  for (const [name, val] of Object.entries(await readProfileEnv(dir, explicitFile))) if (env[name] === undefined) env[name] = val;
   return env;
 }
 function print(value: unknown): void { stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
@@ -397,7 +392,9 @@ async function main(): Promise<void> {
         const jobEngine = hasJobs ? new JobEngine(runtime.store.db, dir, loaded.config.profile, jobRegistry, ownership) : undefined;
         if (jobEngine) await jobEngine.load();
         if (jobEngine) await jobEngine.recoverAfterRestart();
-        const api = createArdentApi(runtime, loaded, env, jobEngine);
+        // The API reloads rotated credentials from the same file the gateway started from.
+        const envFile = value(parsed.options, 'env-file');
+        const api = createArdentApi(runtime, loaded, env, jobEngine, envFile ? { envFile: resolvePath(envFile) } : {});
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
         let a2aHttp: HttpServer | undefined;
