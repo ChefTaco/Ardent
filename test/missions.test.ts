@@ -203,6 +203,37 @@ describe('mission execution', () => {
     } finally { runtime.close(); }
   });
 
+  it('keeps a written file out of the model history and the journal once it is stored', async () => {
+    const png = Buffer.alloc(3 * 1024 * 1024, 7);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+    const large = png.toString('base64');
+    const small = '# Notes\n\nShort.';
+    const model = await llama([
+      { calls: [{ name: 'artifact_write', args: { name: 'poster.png', mime: 'image/png', base64: large } }] },
+      { calls: [{ name: 'artifact_write', args: { name: 'notes.md', mime: 'text/markdown', text: small } }] },
+      { text: 'Poster and notes are stored.' },
+    ]);
+    const { runtime, app, headers } = await setup(model.url, loaded => { loaded.config.artifacts.max_bytes = 64 * 1024 * 1024; });
+    try {
+      const response = await app.request('/api/v1/missions', { method: 'POST', headers, body: JSON.stringify({
+        objective: 'Make the poster', mission: mission({ resources: ['tool:artifact_write'] }), idempotency_key: 'm-large' }) });
+      const taskId = ((await response.json()) as { task_id: string }).task_id;
+      await waitDone(runtime, taskId);
+      expect(runtime.store.get(taskId)!.state).toBe('completed');
+      // Later steps carry a note with the stored reference instead of three megabytes of base64.
+      const later = JSON.stringify(model.requests[1]!.messages);
+      expect(later.length).toBeLessThan(64 * 1024);
+      expect(later).toMatch(/characters omitted, sha256 [a-f0-9]{64}; stored as ardent-artifact:[a-f0-9]{64}/);
+      // A small file stays as written.
+      const last = model.requests[2]!.messages.at(-2)!.tool_calls![0]! as { function: { arguments: string } };
+      expect(JSON.parse(last.function.arguments)).toEqual({ name: 'notes.md', mime: 'text/markdown', text: small });
+      const attempts = runtime.store.events(taskId).filter(event => event.kind === 'tool_attempt');
+      expect(JSON.stringify(attempts).length).toBeLessThan(16 * 1024);
+      const stored = runtime.store.events(taskId).find(event => event.kind === 'artifact_registered')!.detail as { size: number };
+      expect(stored.size).toBe(3 * 1024 * 1024);
+    } finally { runtime.close(); }
+  });
+
   it('offers development_note, but no other mission tool, to direct tasks', async () => {
     const model = await llama([{ text: 'Hello.' }]);
     const { runtime, app, headers } = await setup(model.url);
