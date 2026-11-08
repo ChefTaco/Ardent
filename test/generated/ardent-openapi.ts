@@ -199,6 +199,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/missions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Accept a team mission as a durable task in context mission. Tools come from mission.resources with the peer mission rule; mission tools (team_handoff, team_ask_user, team_propose_decision, artifact_write, development_note, document_render) need a tool:<name> resource. Memory reads use private scope plus one project:<id> grant. The task result is a TeamResult JSON document. The task streams on /api/v1/tasks/{id}/stream like any task. */
+        post: operations["submitMission"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions": {
         parameters: {
             query?: never;
@@ -289,6 +306,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["cancelTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listTaskArtifacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/{sha256}/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getArtifactManifest"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -656,7 +705,7 @@ export interface components {
             id: string;
             caller: string;
             /** @enum {string} */
-            context: "direct" | "peer" | "scheduled";
+            context: "direct" | "peer" | "scheduled" | "mission";
             /** Format: uuid */
             session_id: string | null;
             prompt: string;
@@ -1387,7 +1436,7 @@ export interface operations {
                             id: string;
                             caller: string;
                             /** @enum {string} */
-                            context: "direct" | "peer" | "scheduled";
+                            context: "direct" | "peer" | "scheduled" | "mission";
                             /** Format: uuid */
                             session_id: string | null;
                             prompt: string;
@@ -1475,9 +1524,93 @@ export interface operations {
             };
         };
     };
-    listSessions: {
+    submitMission: {
         parameters: {
             query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: uuid */
+                    session_id?: string;
+                    objective: string;
+                    mission: {
+                        id: string;
+                        revision: number;
+                        parent_task: string | null;
+                        constraints: string[];
+                        allowed_actions: ("observe" | "analyze" | "create_artifact" | "create_draft" | "reversible_change" | "deploy" | "external_publish" | "destructive_response")[];
+                        resources: string[];
+                        deadline: number;
+                        acceptance_criteria: string[];
+                        expected_artifacts: string[];
+                    };
+                    context_items?: {
+                        title: string;
+                        mime?: string;
+                        text: string;
+                    }[];
+                    labels?: {
+                        [key: string]: string;
+                    };
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted durable mission task */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        task_id: string;
+                        /** @enum {string} */
+                        state: "queued" | "running" | "input_required" | "completed" | "partial" | "failed" | "cancelled" | "unknown";
+                    };
+                };
+            };
+            /** @description Invalid mission, context items over 64 KiB, or deadline passed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Session absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Conflicting idempotency key */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listSessions: {
+        parameters: {
+            query?: {
+                /** @description Session context (default direct) */
+                context?: "direct" | "mission";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1496,7 +1629,7 @@ export interface operations {
                             id: string;
                             caller: string;
                             /** @enum {string} */
-                            context: "direct" | "peer" | "scheduled";
+                            context: "direct" | "peer" | "scheduled" | "mission";
                             key: string;
                             created_ms: number;
                             updated_ms: number;
@@ -1518,6 +1651,8 @@ export interface operations {
                 "application/json": {
                     key: string;
                     reset?: boolean;
+                    /** @enum {string} */
+                    context?: "direct" | "mission";
                 };
             };
         };
@@ -1533,7 +1668,7 @@ export interface operations {
                         id: string;
                         caller: string;
                         /** @enum {string} */
-                        context: "direct" | "peer" | "scheduled";
+                        context: "direct" | "peer" | "scheduled" | "mission";
                         key: string;
                         created_ms: number;
                         updated_ms: number;
@@ -1623,7 +1758,7 @@ export interface operations {
                         id: string;
                         caller: string;
                         /** @enum {string} */
-                        context: "direct" | "peer" | "scheduled";
+                        context: "direct" | "peer" | "scheduled" | "mission";
                         /** Format: uuid */
                         session_id: string | null;
                         prompt: string;
@@ -1756,6 +1891,146 @@ export interface operations {
         responses: {
             /** @description Cancellation requested */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listTaskArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current manifests of artifacts the task registered, oldest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        artifacts: {
+                            task_id: string;
+                            superseded_by_sha256: string | null;
+                            manifest: {
+                                /** @enum {string} */
+                                schema_version: "1.0";
+                                revision: number;
+                                source_revision: string;
+                                /** @enum {string} */
+                                visibility: "private" | "gm" | "player";
+                                license: string;
+                                preview: {
+                                    /** @enum {string} */
+                                    mode: "inline" | "thumbnail" | "download_only" | "none";
+                                    mime: string;
+                                };
+                                supersedes_sha256: string | null;
+                                /** @enum {string} */
+                                acceptance_status: "unreviewed" | "approved" | "partial" | "rejected";
+                                name: string;
+                                mime: string;
+                                sha256: string;
+                                size: number;
+                                created_at: number;
+                                expires_at: number;
+                                provenance: {
+                                    producer: string;
+                                    source_id: string;
+                                    producer_task_id: string;
+                                    lineage: {
+                                        producer: string;
+                                        source_id: string;
+                                    }[];
+                                };
+                                recovery: {
+                                    /** @enum {string} */
+                                    on_expiry: "request_verified_reexport";
+                                };
+                                artifact_id: string;
+                            };
+                        }[];
+                    };
+                };
+            };
+            /** @description Task absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getArtifactManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest current manifest registered for the digest */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        task_id: string;
+                        superseded_by_sha256: string | null;
+                        manifest: {
+                            /** @enum {string} */
+                            schema_version: "1.0";
+                            revision: number;
+                            source_revision: string;
+                            /** @enum {string} */
+                            visibility: "private" | "gm" | "player";
+                            license: string;
+                            preview: {
+                                /** @enum {string} */
+                                mode: "inline" | "thumbnail" | "download_only" | "none";
+                                mime: string;
+                            };
+                            supersedes_sha256: string | null;
+                            /** @enum {string} */
+                            acceptance_status: "unreviewed" | "approved" | "partial" | "rejected";
+                            name: string;
+                            mime: string;
+                            sha256: string;
+                            size: number;
+                            created_at: number;
+                            expires_at: number;
+                            provenance: {
+                                producer: string;
+                                source_id: string;
+                                producer_task_id: string;
+                                lineage: {
+                                    producer: string;
+                                    source_id: string;
+                                }[];
+                            };
+                            recovery: {
+                                /** @enum {string} */
+                                on_expiry: "request_verified_reexport";
+                            };
+                            artifact_id: string;
+                        };
+                    };
+                };
+            };
+            /** @description No current manifest */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

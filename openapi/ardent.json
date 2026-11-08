@@ -33,7 +33,8 @@
             "enum": [
               "direct",
               "peer",
-              "scheduled"
+              "scheduled",
+              "mission"
             ]
           },
           "session_id": {
@@ -1100,7 +1101,8 @@
                             "enum": [
                               "direct",
                               "peer",
-                              "scheduled"
+                              "scheduled",
+                              "mission"
                             ]
                           },
                           "session_id": {
@@ -1209,12 +1211,243 @@
         }
       }
     },
+    "/api/v1/missions": {
+      "post": {
+        "operationId": "submitMission",
+        "description": "Accept a team mission as a durable task in context mission. Tools come from mission.resources with the peer mission rule; mission tools (team_handoff, team_ask_user, team_propose_decision, artifact_write, development_note, document_render) need a tool:<name> resource. Memory reads use private scope plus one project:<id> grant. The task result is a TeamResult JSON document. The task streams on /api/v1/tasks/{id}/stream like any task.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                  },
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16000
+                  },
+                  "mission": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2147483647
+                      },
+                      "parent_task": {
+                        "nullable": true,
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+                      },
+                      "constraints": {
+                        "minItems": 0,
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "allowed_actions": {
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "observe",
+                            "analyze",
+                            "create_artifact",
+                            "create_draft",
+                            "reversible_change",
+                            "deploy",
+                            "external_publish",
+                            "destructive_response"
+                          ]
+                        }
+                      },
+                      "resources": {
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "deadline": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 253402300799
+                      },
+                      "acceptance_criteria": {
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "expected_artifacts": {
+                        "minItems": 0,
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "revision",
+                      "parent_task",
+                      "constraints",
+                      "allowed_actions",
+                      "resources",
+                      "deadline",
+                      "acceptance_criteria",
+                      "expected_artifacts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "context_items": {
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "title": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mime": {
+                          "type": "string",
+                          "maxLength": 100,
+                          "pattern": "^[a-z]+\\/[A-Za-z0-9.+-]+$"
+                        },
+                        "text": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "title",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string",
+                      "maxLength": 256
+                    }
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "objective",
+                  "mission",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted durable mission task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid mission, context items over 64 KiB, or deadline passed"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Session absent"
+          },
+          "409": {
+            "description": "Conflicting idempotency key"
+          }
+        }
+      }
+    },
     "/api/v1/sessions": {
       "get": {
         "operationId": "listSessions",
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "context",
+            "description": "Session context (default direct)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "direct",
+                "mission"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1243,7 +1476,8 @@
                             "enum": [
                               "direct",
                               "peer",
-                              "scheduled"
+                              "scheduled",
+                              "mission"
                             ]
                           },
                           "key": {
@@ -1301,6 +1535,13 @@
                   },
                   "reset": {
                     "type": "boolean"
+                  },
+                  "context": {
+                    "type": "string",
+                    "enum": [
+                      "direct",
+                      "mission"
+                    ]
                   }
                 },
                 "required": [
@@ -1332,7 +1573,8 @@
                       "enum": [
                         "direct",
                         "peer",
-                        "scheduled"
+                        "scheduled",
+                        "mission"
                       ]
                     },
                     "key": {
@@ -1490,7 +1732,8 @@
                       "enum": [
                         "direct",
                         "peer",
-                        "scheduled"
+                        "scheduled",
+                        "mission"
                       ]
                     },
                     "session_id": {
@@ -1760,6 +2003,472 @@
         "responses": {
           "200": {
             "description": "Cancellation requested"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/artifacts": {
+      "get": {
+        "operationId": "listTaskArtifacts",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current manifests of artifacts the task registered, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "superseded_by_sha256": {
+                            "nullable": true,
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "manifest": {
+                            "type": "object",
+                            "properties": {
+                              "schema_version": {
+                                "type": "string",
+                                "enum": [
+                                  "1.0"
+                                ]
+                              },
+                              "revision": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              "source_revision": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "visibility": {
+                                "type": "string",
+                                "enum": [
+                                  "private",
+                                  "gm",
+                                  "player"
+                                ]
+                              },
+                              "license": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "preview": {
+                                "type": "object",
+                                "properties": {
+                                  "mode": {
+                                    "type": "string",
+                                    "enum": [
+                                      "inline",
+                                      "thumbnail",
+                                      "download_only",
+                                      "none"
+                                    ]
+                                  },
+                                  "mime": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "required": [
+                                  "mode",
+                                  "mime"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "supersedes_sha256": {
+                                "nullable": true,
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "acceptance_status": {
+                                "type": "string",
+                                "enum": [
+                                  "unreviewed",
+                                  "approved",
+                                  "partial",
+                                  "rejected"
+                                ]
+                              },
+                              "name": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+                              },
+                              "mime": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "size": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 67108864
+                              },
+                              "created_at": {
+                                "type": "number"
+                              },
+                              "expires_at": {
+                                "type": "number"
+                              },
+                              "provenance": {
+                                "type": "object",
+                                "properties": {
+                                  "producer": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "source_id": {
+                                    "type": "string"
+                                  },
+                                  "producer_task_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "lineage": {
+                                    "minItems": 1,
+                                    "maxItems": 4,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "producer": {
+                                          "type": "string",
+                                          "minLength": 1
+                                        },
+                                        "source_id": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "producer",
+                                        "source_id"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "producer",
+                                  "source_id",
+                                  "producer_task_id",
+                                  "lineage"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "recovery": {
+                                "type": "object",
+                                "properties": {
+                                  "on_expiry": {
+                                    "type": "string",
+                                    "enum": [
+                                      "request_verified_reexport"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "on_expiry"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "artifact_id": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{32}$"
+                              }
+                            },
+                            "required": [
+                              "schema_version",
+                              "revision",
+                              "source_revision",
+                              "visibility",
+                              "license",
+                              "preview",
+                              "supersedes_sha256",
+                              "acceptance_status",
+                              "name",
+                              "mime",
+                              "sha256",
+                              "size",
+                              "created_at",
+                              "expires_at",
+                              "provenance",
+                              "recovery",
+                              "artifact_id"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "task_id",
+                          "superseded_by_sha256",
+                          "manifest"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifacts"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{sha256}/manifest": {
+      "get": {
+        "operationId": "getArtifactManifest",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest current manifest registered for the digest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string"
+                    },
+                    "superseded_by_sha256": {
+                      "nullable": true,
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "manifest": {
+                      "type": "object",
+                      "properties": {
+                        "schema_version": {
+                          "type": "string",
+                          "enum": [
+                            "1.0"
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "source_revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "gm",
+                            "player"
+                          ]
+                        },
+                        "license": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "preview": {
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "enum": [
+                                "inline",
+                                "thumbnail",
+                                "download_only",
+                                "none"
+                              ]
+                            },
+                            "mime": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "mode",
+                            "mime"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "supersedes_sha256": {
+                          "nullable": true,
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "acceptance_status": {
+                          "type": "string",
+                          "enum": [
+                            "unreviewed",
+                            "approved",
+                            "partial",
+                            "rejected"
+                          ]
+                        },
+                        "name": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+                        },
+                        "mime": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "size": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 67108864
+                        },
+                        "created_at": {
+                          "type": "number"
+                        },
+                        "expires_at": {
+                          "type": "number"
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "producer": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "producer_task_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "lineage": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "producer": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "source_id": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "producer",
+                                  "source_id"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "producer",
+                            "source_id",
+                            "producer_task_id",
+                            "lineage"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "recovery": {
+                          "type": "object",
+                          "properties": {
+                            "on_expiry": {
+                              "type": "string",
+                              "enum": [
+                                "request_verified_reexport"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "on_expiry"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "artifact_id": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{32}$"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "revision",
+                        "source_revision",
+                        "visibility",
+                        "license",
+                        "preview",
+                        "supersedes_sha256",
+                        "acceptance_status",
+                        "name",
+                        "mime",
+                        "sha256",
+                        "size",
+                        "created_at",
+                        "expires_at",
+                        "provenance",
+                        "recovery",
+                        "artifact_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "superseded_by_sha256",
+                    "manifest"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No current manifest"
           }
         }
       }

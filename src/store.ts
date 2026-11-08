@@ -6,9 +6,12 @@ import { z } from 'zod';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
-export const TaskSchema = z.object({ id: z.string().guid(), caller: z.string(), context: z.enum(['direct', 'peer', 'scheduled']), session_id: z.string().guid().nullable(), prompt: z.string(), content_hash: z.string(), idempotency_key: z.string().nullable(), backend: z.enum(['llamacpp', 'codex']), state: TaskState, result: z.string().nullable(), error: z.string().nullable(), deadline_ms: z.number().int(), created_ms: z.number().int(), updated_ms: z.number().int() });
+/** Execution scope of a task. It selects tools and memory; a session belongs to exactly one context. */
+export const TaskContext = z.enum(['direct', 'peer', 'scheduled', 'mission']);
+export type TaskContext = z.infer<typeof TaskContext>;
+export const TaskSchema = z.object({ id: z.string().guid(), caller: z.string(), context: TaskContext, session_id: z.string().guid().nullable(), prompt: z.string(), content_hash: z.string(), idempotency_key: z.string().nullable(), backend: z.enum(['llamacpp', 'codex']), state: TaskState, result: z.string().nullable(), error: z.string().nullable(), deadline_ms: z.number().int(), created_ms: z.number().int(), updated_ms: z.number().int() });
 export type Task = z.infer<typeof TaskSchema>;
-export const SessionSchema = z.object({ id: z.string().guid(), caller: z.string(), context: z.enum(['direct', 'peer', 'scheduled']), key: z.string(), created_ms: z.number().int(), updated_ms: z.number().int() });
+export const SessionSchema = z.object({ id: z.string().guid(), caller: z.string(), context: TaskContext, key: z.string(), created_ms: z.number().int(), updated_ms: z.number().int() });
 export type Session = z.infer<typeof SessionSchema>;
 export const SessionMessageSchema = z.object({ sequence: z.number().int(), session_id: z.string().guid(), task_id: z.string().guid(), role: z.enum(['user', 'assistant']), content: z.string(), created_ms: z.number().int() });
 export type SessionMessage = z.infer<typeof SessionMessageSchema>;
@@ -121,7 +124,7 @@ export class TaskStore {
           WHERE inbound.task_id IS NULL AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`) };
     })();
   }
-  session(caller: string, context: 'direct' | 'peer' | 'scheduled', key: string): Session {
+  session(caller: string, context: TaskContext, key: string): Session {
     if (!caller || caller.length > 128 || !key || key.length > 256) throw new Error('Invalid session identity');
     return this.db.transaction(() => {
       const previous = this.db.prepare('SELECT * FROM sessions WHERE caller=? AND context=? AND key=?').get(caller, context, key);
@@ -132,14 +135,14 @@ export class TaskStore {
       return value;
     })();
   }
-  resetSession(caller: string, context: 'direct' | 'peer' | 'scheduled', key: string): Session {
+  resetSession(caller: string, context: TaskContext, key: string): Session {
     return this.db.transaction(() => {
       const previous = this.db.prepare('SELECT * FROM sessions WHERE caller=? AND context=? AND key=?').get(caller, context, key);
       if (previous) this.db.prepare('UPDATE sessions SET key=? WHERE id=?').run(`${key}:archived:${randomUUID()}`, SessionSchema.parse(previous).id);
       return this.session(caller, context, key);
     })();
   }
-  listSessions(caller: string, context: 'direct' | 'peer' | 'scheduled', limit = 50): Session[] {
+  listSessions(caller: string, context: TaskContext, limit = 50): Session[] {
     return this.db.prepare('SELECT * FROM sessions WHERE caller=? AND context=? ORDER BY updated_ms DESC LIMIT ?').all(caller, context, Math.max(1, Math.min(limit, 100))).map(row => SessionSchema.parse(row));
   }
   sessionMessages(sessionId: string, caller: string, limit = 100): SessionMessage[] {
@@ -147,9 +150,15 @@ export class TaskStore {
     if (!session || SessionSchema.parse(session).caller !== caller) throw new Error('Session not found');
     return this.db.prepare('SELECT * FROM (SELECT * FROM session_messages WHERE session_id=? ORDER BY sequence DESC LIMIT ?) ORDER BY sequence').all(sessionId, Math.max(1, Math.min(limit, 500))).map(row => SessionMessageSchema.parse(row));
   }
-  accept(input: { caller: string; context: 'direct' | 'peer' | 'scheduled'; sessionId?: string; prompt: string; idempotencyKey?: string; backend: 'llamacpp' | 'codex'; deadlineMs: number }): Task {
+  /**
+   * Record a new task, or return the task already accepted for the same idempotency key.
+   * `content` adds structured input (a mission, context items) to the idempotency digest;
+   * `onAccepted` journals it in the same transaction, only for a newly accepted task.
+   */
+  accept(input: { caller: string; context: TaskContext; sessionId?: string; prompt: string; idempotencyKey?: string; backend: 'llamacpp' | 'codex'; deadlineMs: number;
+    content?: unknown; onAccepted?: (task: Task) => void }): Task {
     if (!input.caller || input.caller.length > 128 || !input.prompt.trim() || input.prompt.length > 16000 || (input.idempotencyKey && input.idempotencyKey.length > 128)) throw new Error('Invalid task input');
-    const hash = createHash('sha256').update(JSON.stringify([input.prompt, input.backend])).digest('hex');
+    const hash = createHash('sha256').update(JSON.stringify(input.content === undefined ? [input.prompt, input.backend] : [input.prompt, input.backend, input.content])).digest('hex');
     return this.db.transaction(() => {
       if (this.admissionFence()) throw new Error('Profile admission is fenced for rollback');
       if (input.sessionId) {
@@ -172,6 +181,7 @@ export class TaskStore {
         VALUES (@id,@caller,@context,@session_id,@prompt,@content_hash,@idempotency_key,@backend,@state,@result,@error,@deadline_ms,@created_ms,@updated_ms)`).run(task);
       if (task.session_id) this.db.prepare('INSERT INTO session_messages(session_id,task_id,role,content,created_ms) VALUES (?,?,?,?,?)').run(task.session_id, task.id, 'user', task.prompt, now);
       this.append(task.id, 'accepted', { caller: input.caller, context: input.context, backend: input.backend });
+      input.onAccepted?.(task);
       return task;
     })();
   }
@@ -182,7 +192,8 @@ export class TaskStore {
       this.db.prepare('UPDATE sessions SET updated_ms=? WHERE id=?').run(Date.now(), task.session_id);
     })();
   }
-  finishWithAssistant(id: string, state: 'completed' | 'partial', content: string): void {
+  /** Settle a task with its result. The session records `sessionContent`, the conversational form of the result. */
+  finishWithAssistant(id: string, state: 'completed' | 'partial', content: string, sessionContent = content): void {
     this.db.transaction(() => {
       const prior = this.get(id);
       if (!prior || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(prior.state))
@@ -192,7 +203,7 @@ export class TaskStore {
       this.append(id, 'state', { from: prior.state, to: state, error: null });
       if (prior.session_id) {
         this.db.prepare('INSERT INTO session_messages(session_id,task_id,role,content,created_ms) VALUES (?,?,?,?,?)')
-          .run(prior.session_id, id, 'assistant', content, now);
+          .run(prior.session_id, id, 'assistant', sessionContent, now);
         this.db.prepare('UPDATE sessions SET updated_ms=? WHERE id=?').run(now, prior.session_id);
       }
     })();

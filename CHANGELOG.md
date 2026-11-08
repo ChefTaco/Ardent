@@ -9,6 +9,19 @@
   for every task and backend. The text is not journaled and has no event id; reconnecting clients
   receive a `task.text` snapshot. Structured output is never streamed. `ardent chat` and the API
   share one filter for this.
+- Team missions: `POST /api/v1/missions` accepts a `TeamMission` with an objective, up to 64 KiB
+  of context items, labels and an idempotency key as a task in the new `mission` context. Tools
+  follow the peer mission rule (`mission.resources`); memory reads use the private scope plus one
+  `project:<id>` grant. The task result is a validated `TeamResult`. Sessions can be opened in
+  the `mission` context (`POST /api/v1/sessions` `context`).
+- Mission tools, each granted by a `tool:<name>` resource: `team_handoff`, `team_ask_user` (ends
+  the turn as `input_required`), `team_propose_decision`, `artifact_write`, `document_render`
+  (Markdown to PDF; DOCX reports that it is unavailable in this build) and `development_note`
+  (also in direct tasks). Each records a journal event.
+- Artifact manifests with revisions and supersession, `GET /api/v1/tasks/{id}/artifacts` and
+  `GET /api/v1/artifacts/{sha256}/manifest`, a media-type allowlist, and the
+  `artifacts.max_bytes` setting (default 2 MiB, at most 64 MiB).
+- An append-only `development_records` table for the agent's development notes.
 
 ## 2.1.2 - 2026-11-07
 

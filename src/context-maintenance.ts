@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { parse } from 'dotenv';
 import { z } from 'zod';
 import { ContextCheckpoints, type CompactionCall } from './context-checkpoints.js';
-import { TaskStore } from './store.js';
+import { TaskContext, TaskStore } from './store.js';
 import { loadConfig } from './config.js';
 import { loadModelPolicy } from './model-policy.js';
 import { compactWithCodex } from './codex.js';
@@ -173,7 +173,7 @@ export async function contextMaintenance(input: unknown): Promise<Record<string,
       const current = new ContextCheckpoints(store, forbidden);
       const { ContextCheckpoints: Previous } = previousReaderSchema.parse(await import(pathToFileURL(request.previous_module).href) as unknown);
       const previous = new Previous(store, forbidden);
-      const sessions = z.array(z.object({ id: z.string(), caller: z.string(), context: z.enum(['direct', 'peer', 'scheduled']) })).max(10000)
+      const sessions = z.array(z.object({ id: z.string(), caller: z.string(), context: TaskContext })).max(10000)
         .parse(store.db.prepare('SELECT s.id,s.caller,s.context FROM sessions s JOIN context_checkpoint_heads h ON h.session_id=s.id').all());
       for (const session of sessions) {
         const status = current.status(session.id, session.caller, session.context);

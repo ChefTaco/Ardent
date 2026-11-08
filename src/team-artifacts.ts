@@ -21,6 +21,8 @@ const Manifest = z.object({
   recovery: z.object({ on_expiry: z.literal('request_verified_reexport') }).strict(), artifact_id: identifier
 }).strict();
 export type TeamArtifactManifest = z.infer<typeof Manifest>;
+/** Artifact manifest schema shared by peer exports and the local artifact registry. */
+export const TeamArtifactManifestSchema = Manifest;
 export const TeamArtifactDescriptorSchema = z.object({ artifact_id: identifier, name: safeName, mime: z.string().min(1), sha256: digest,
   size: z.number().int().min(0).max(2 * 1024 * 1024), producer_task_id: z.string().min(1), artifact_manifest: Manifest }).strict();
 export type TeamArtifactDescriptor = z.infer<typeof TeamArtifactDescriptorSchema>;
