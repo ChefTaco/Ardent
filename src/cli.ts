@@ -34,12 +34,14 @@ import { loadPlugins, pluginContext, pluginJobHandlers, validationContext, type 
 import { ARDENT_VERSION } from './version.js';
 import { acceptRuntime, readProtectedFile } from './acceptance.js';
 import { PlainTextFilter } from './live-text.js';
+import { developmentQuery, missionSubmitInput, previewInput } from './cli-commands.js';
+import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
 function args(argv: string[]): Parsed {
   const words: string[] = [];
   const options = new Map<string, string | true>();
-  const valued = new Set(['env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision']);
+  const valued = new Set(['env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg) continue;
@@ -106,8 +108,12 @@ Commands:
   a2a team-card                            Print the Hermes team card (a2a.hermes_compat)
   openapi export                           Print the management OpenAPI document
   run --prompt TEXT | chat | report        Run a task, chat, or run a scheduled report
+  mission submit --mission-file FILE       Run a team mission (a POST /api/v1/missions body)
+  preview --prompt TEXT [--soul-file F]    Try unsaved soul, identity, --skills or --model changes
+  development list [--after C] [--kind K]  Show the agent's development history
   sessions list | new | reset | show       Manage local CLI sessions
-  tasks list | show | cancel | resume      Inspect local tasks
+  tasks list | show | cancel              Inspect local tasks
+  tasks pause | resume <id>                Hold a queued task, or release and run it
   gateway run                              Serve the management API, A2A, channels and jobs`;
 
 async function main(): Promise<void> {
@@ -267,7 +273,14 @@ async function main(): Promise<void> {
     if (subcommand === 'list') { print(await listSkills(dir, loaded.config)); return; }
     if (!id) throw new Error('Skill name required');
     if (subcommand === 'show') { stdout.write(await readSkill(dir, loaded.config, id)); return; }
-    if (subcommand === 'enable' || subcommand === 'disable') { print({ revision: await setSkillEnabled(dir, id, subcommand === 'enable', loaded.revision) }); return; }
+    if (subcommand === 'enable' || subcommand === 'disable') {
+      const revision = await setSkillEnabled(dir, id, subcommand === 'enable', loaded.revision);
+      const store = new TaskStore(join(dir, 'state', 'ardent.sqlite'));
+      try { recordSkillChange(new DevelopmentRecords(store, loaded.config.profile), id, subcommand === 'enable', loaded.revision, revision); }
+      finally { store.close(); }
+      print({ revision });
+      return;
+    }
     throw new Error('Unknown skills command');
   }
   if (command === 'memory' && subcommand === 'search') {
@@ -347,7 +360,7 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (!['run', 'report', 'chat', 'tasks', 'sessions', 'gateway'].includes(command ?? '')) throw new Error(`Unknown command.\n${USAGE}`);
+  if (!['run', 'report', 'chat', 'tasks', 'sessions', 'gateway', 'mission', 'preview', 'development'].includes(command ?? '')) throw new Error(`Unknown command.\n${USAGE}`);
   if (command === 'gateway' && subcommand === 'run') {
       if (!['127.0.0.1', '::1', 'localhost'].includes(loaded.config.api.host)) throw new Error('Non-local API listener requires verified TLS proxy configuration');
       {
@@ -365,6 +378,11 @@ async function main(): Promise<void> {
         // Legacy scheduled tasks are not replayed by a new gateway generation.
         // The job engine owns its own window recovery and never replays uncertain effects.
         for (const task of runtime.recovered.queued) if (task.caller === 'management') void runtime.run(task.id, env).catch(() => {});
+        // Preview artifacts expire after 24 hours; remove their bytes once nothing else refers to them.
+        const sweepArtifacts = () => { void runtime?.artifactManifests.sweepExpired().catch(() => {}); };
+        sweepArtifacts();
+        const artifactSweep = setInterval(sweepArtifacts, 3_600_000);
+        artifactSweep.unref();
         const jobPath = join(dir, 'jobs', 'active.json');
         const hasJobs = await lstat(jobPath).then(stat => {
           if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Active job definitions are not a regular file');
@@ -440,6 +458,7 @@ async function main(): Promise<void> {
           });
         } finally {
           if (jobTimer) clearInterval(jobTimer);
+          clearInterval(artifactSweep);
           channelAbort.abort();
           shutdownUnsettled = !(await runtime.drain(30_000));
           // Replies and notices admitted before shutdown may still be sending.
@@ -495,14 +514,39 @@ async function main(): Promise<void> {
       if (!id) throw new Error('Task ID required');
       if (subcommand === 'show') { print({ task: runtime.store.get(id), events: runtime.store.events(id) }); return; }
       if (subcommand === 'cancel') { print(runtime.cancel(id)); return; }
+      if (subcommand === 'pause') {
+        const { task, admission } = runtime.pause(id);
+        print({ task_id: task.id, state: task.state, admission });
+        return;
+      }
       if (subcommand === 'resume') {
         const task = runtime.store.get(id);
         if (!task) throw new Error('Task not found');
         if (task.state !== 'queued') throw new Error(`Task is ${task.state}; only unstarted queued work can be resumed without replaying an uncertain effect`);
+        runtime.resume(task.id);
         print(await runtime.run(task.id, env));
         return;
       }
       throw new Error('Unknown tasks command');
+    }
+    if (command === 'mission') {
+      if (subcommand !== 'submit') throw new Error('Use mission submit --mission-file FILE');
+      const task = runtime.acceptMission(await missionSubmitInput(parsed.options, path => readFile(path, 'utf8')), 'local');
+      const result = await runtime.run(task.id, env);
+      print({ task_id: result.task.id, state: result.task.state, team_result: result.team_result ?? null });
+      return;
+    }
+    if (command === 'preview') {
+      const task = runtime.acceptPreview(await previewInput(parsed.options, path => readFile(path, 'utf8')), 'local');
+      const result = await runtime.run(task.id, env);
+      if (parsed.options.has('json')) print(result);
+      else stdout.write(`${result.answer}\n`);
+      return;
+    }
+    if (command === 'development') {
+      if (subcommand !== 'list') throw new Error('Use development list [--after CURSOR] [--limit N] [--kind KIND]');
+      print(await developmentPage({ records: runtime.development, profileDir: dir, config: loaded.config }, developmentQuery(parsed.options)));
+      return;
     }
     if (command === 'sessions') {
       if (subcommand === 'list') { print(runtime.store.listSessions('local', 'direct')); return; }

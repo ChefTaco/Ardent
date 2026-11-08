@@ -22,6 +22,17 @@
   `GET /api/v1/artifacts/{sha256}/manifest`, a media-type allowlist, and the
   `artifacts.max_bytes` setting (default 2 MiB, at most 64 MiB).
 - An append-only `development_records` table for the agent's development notes.
+- `POST /api/v1/tasks/{id}/pause` and `/resume`: hold any queued or running task at its next step
+  boundary, with `pause_requested`, `paused` and `resumed` journal events. Both are idempotent.
+- Preview tasks: `POST /api/v1/preview/tasks` runs a prompt with unsaved soul, identity, skill
+  selection or model overrides in the new `preview` context. Previews have read-only tools, never
+  write memory, development records, identity or configuration, and their artifacts expire after
+  24 hours.
+- Development history: `GET /api/v1/development` merges development notes, operator notes
+  (`POST /api/v1/development`), skill changes, identity edits and method reflections into one
+  cursor-paginated record shape.
+- CLI: `ardent mission submit`, `ardent preview`, `ardent development list`, and
+  `ardent tasks pause` (`tasks resume` also releases a paused task).
 
 ## 2.1.2 - 2026-11-07
 

@@ -22,10 +22,15 @@ import { pluginContext } from './plugins.js';
 import type { LiveTextUpdate } from './live-text.js';
 import { MissionSubmit } from './missions.js';
 import { ArtifactRecordSchema } from './artifact-manifests.js';
+import { PreviewSubmit } from './preview.js';
+import { developmentPage, DevelopmentKind, DevelopmentNoteInput, DevelopmentRecordSchema, recordSkillChange } from './development.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional() }).strict();
 /** Contexts a management caller may open a session in. A session serves tasks of its own context only. */
-const SessionContext = z.enum(['direct', 'mission']);
+const SessionContext = z.enum(['direct', 'mission', 'preview']);
+const Admission = z.object({ task_id: z.string().guid(), state: TaskState, admission: z.enum(['open', 'paused']) });
+const DevelopmentPost = DevelopmentNoteInput.extend({ author: z.enum(['operator', 'agent']).optional() }).strict();
+const DevelopmentPage = z.object({ records: z.array(DevelopmentRecordSchema), next: z.string().nullable() });
 const SessionOpen = z.object({ key: z.string().trim().min(1).max(256), reset: z.boolean().optional(), context: SessionContext.optional() }).strict();
 const Accepted = z.object({ task_id: z.string().guid(), state: TaskState });
 const ConfigEdit = z.object({ text: z.string().min(1).max(200000), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
@@ -87,12 +92,17 @@ export function ardentOpenApi(): object {
         get: { operationId: 'listTasks', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', description: 'Maximum number of recent tasks', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': { description: 'Recent tasks', content: { 'application/json': { schema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array', items: { $ref: '#/components/schemas/Task' } } } }, example: { tasks: [taskExample] } } } } } }
       },
       '/api/v1/missions': { post: { operationId: 'submitMission', description: 'Accept a team mission as a durable task in context mission. Tools come from mission.resources with the peer mission rule; mission tools (team_handoff, team_ask_user, team_propose_decision, artifact_write, development_note, document_render) need a tool:<name> resource. Memory reads use private scope plus one project:<id> grant. The task result is a TeamResult JSON document. The task streams on /api/v1/tasks/{id}/stream like any task.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(MissionSubmit) } } }, responses: { '202': jsonResponse('Accepted durable mission task', Accepted), '400': { description: 'Invalid mission, context items over 64 KiB, or deadline passed' }, '401': { description: 'Unauthorized' }, '404': { description: 'Session absent' }, '409': { description: 'Conflicting idempotency key' } } } },
-      '/api/v1/sessions': { get: { operationId: 'listSessions', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'context', description: 'Session context (default direct)', schema: { type: 'string', enum: ['direct', 'mission'] } }], responses: { '200': jsonResponse('Caller sessions', z.object({ sessions: z.array(SessionSchema) })) } }, post: { operationId: 'openSession', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(SessionOpen) } } }, responses: { '200': jsonResponse('Existing or new session', SessionSchema) } } },
+      '/api/v1/preview/tasks': { post: { operationId: 'submitPreviewTask', description: 'Run a prompt with unsaved soul, identity, skill selection or model overrides in context preview. A preview has read-only direct tools and no mission tools, never writes memory, development records, identity or configuration, and its artifacts expire after 24 hours. It streams on /api/v1/tasks/{id}/stream like any task.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(PreviewSubmit) } } }, responses: { '202': jsonResponse('Accepted preview task', Accepted), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Conflicting idempotency key' } } } },
+      '/api/v1/development': { get: { operationId: 'listDevelopment', description: 'The agent\'s development history in creation order: its development notes, operator notes, skill changes, identity edits and method reflections.', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'after', description: 'Cursor from a previous page (next)', schema: { type: 'string' } }, { in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } }, { in: 'query', name: 'kind', schema: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' } }], responses: { '200': jsonResponse('One page of development records; next is null on the last page', DevelopmentPage), '400': { description: 'Invalid cursor or kind' } } },
+        post: { operationId: 'addDevelopmentNote', description: 'Record an operator note (default) or an agent note relayed by a coordinator.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(DevelopmentPost) } } }, responses: { '201': jsonResponse('Stored development record', DevelopmentRecordSchema), '400': { description: 'Invalid note' } } } },
+      '/api/v1/sessions': { get: { operationId: 'listSessions', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'context', description: 'Session context (default direct)', schema: { type: 'string', enum: ['direct', 'mission', 'preview'] } }], responses: { '200': jsonResponse('Caller sessions', z.object({ sessions: z.array(SessionSchema) })) } }, post: { operationId: 'openSession', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(SessionOpen) } } }, responses: { '200': jsonResponse('Existing or new session', SessionSchema) } } },
       '/api/v1/sessions/{id}/messages': { get: { operationId: 'getSessionMessages', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': jsonResponse('Recent caller session messages', z.object({ messages: z.array(SessionMessageSchema) })), '404': { description: 'Session absent' } } } },
       '/api/v1/tasks/{id}': { get: { operationId: 'getTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Task status', content: { 'application/json': { schema: { $ref: '#/components/schemas/Task' }, example: taskExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/events': { get: { operationId: 'getTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', description: 'Return events with sequence greater than this cursor', schema: { type: 'integer', minimum: 0, default: 0 } }], responses: { '200': { description: 'Journal events after the supplied sequence cursor', content: { 'application/json': { schema: { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { $ref: '#/components/schemas/TaskEvent' } } } }, example: { events: [eventExample] } } } } } } },
       '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/cancel': { post: { operationId: 'cancelTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Cancellation requested' } } } },
+      '/api/v1/tasks/{id}/pause': { post: { operationId: 'pauseTask', description: 'Pause a queued or running task. A queued task does not start; a running task waits at its next step boundary (before a model call, a tool call or settling) and journals paused. Its deadline keeps running. Idempotent.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task admission', Admission), '404': { description: 'Task absent' }, '409': { description: 'Task already finished' } } } },
+      '/api/v1/tasks/{id}/resume': { post: { operationId: 'resumeTask', description: 'Resume a paused task. Idempotent; resuming a task that is not paused changes nothing.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task admission', Admission), '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/artifacts': { get: { operationId: 'listTaskArtifacts', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Current manifests of artifacts the task registered, oldest first', z.object({ artifacts: z.array(ArtifactRecordSchema) })), '404': { description: 'Task absent' } } } },
       '/api/v1/artifacts/{sha256}/manifest': { get: { operationId: 'getArtifactManifest', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'sha256', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': jsonResponse('Newest current manifest registered for the digest', ArtifactRecordSchema), '404': { description: 'No current manifest' } } } },
       '/api/v1/artifacts/{id}': { get: { operationId: 'getArtifact', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Artifact bytes' }, '404': { description: 'Artifact absent' } } } },
@@ -279,6 +289,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const edit = parseJson(await c.req.json() as unknown, SkillEdit);
     const revision = await setSkillEnabled(runtime.profileDir, c.req.param('name'), edit.enabled, edit.revision);
     current = await loadConfig(runtime.profileDir);
+    recordSkillChange(runtime.development, c.req.param('name'), edit.enabled, edit.revision, revision);
     return c.json({ revision, activation_required: true });
   });
   app.post('/api/v1/memory/search', async c => {
@@ -378,6 +389,40 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     });
   });
   app.post('/api/v1/tasks/:id/cancel', c => c.json(runtime.cancel(c.req.param('id'))));
+  for (const action of ['pause', 'resume'] as const) app.post(`/api/v1/tasks/:id/${action}`, c => {
+    const id = c.req.param('id');
+    if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
+    try {
+      const { task, admission } = action === 'pause' ? runtime.pause(id) : runtime.resume(id);
+      return c.json({ task_id: task.id, state: task.state, admission });
+    } catch (error: unknown) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'TASK_TERMINAL')
+        return c.json({ error: { code: 'CONFLICT', message: error instanceof Error ? error.message : 'Task already finished' } }, 409);
+      throw error;
+    }
+  });
+  app.post('/api/v1/preview/tasks', async c => {
+    const input = parseInput(await c.req.json() as unknown, PreviewSubmit);
+    let task;
+    try { task = runtime.acceptPreview(input, 'management'); }
+    catch (error: unknown) {
+      if (error instanceof Error && /Session caller or context mismatch/.test(error.message)) throw new Error('Invalid session: open it with context preview');
+      throw error;
+    }
+    if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
+    return c.json({ task_id: task.id, state: task.state }, 202);
+  });
+  app.get('/api/v1/development', async c => {
+    const limit = c.req.query('limit');
+    const kind = c.req.query('kind');
+    const query = parseInput({ after: c.req.query('after'), limit: limit === undefined ? undefined : Number(limit), kind },
+      z.object({ after: z.string().max(400).optional(), limit: z.number().int().min(1).max(200).optional(), kind: DevelopmentKind.optional() }));
+    return c.json(await developmentPage({ records: runtime.development, profileDir: runtime.profileDir, config: runtime.config }, query));
+  });
+  app.post('/api/v1/development', async c => {
+    const { author, ...note } = parseInput(await c.req.json() as unknown, DevelopmentPost);
+    return c.json(runtime.development.add({ ...note, author: author ?? 'operator', epistemic: author === 'agent' ? 'agent_reported' : 'operator_reported' }), 201);
+  });
   app.get('/api/v1/tasks/:id/artifacts', c => {
     const id = c.req.param('id');
     if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
