@@ -26,6 +26,7 @@ import { DevelopmentRecords } from './development.js';
 import { registerDevelopmentNoteTool, registerMissionTools, type MissionToolDeps } from './mission-tools.js';
 import { acceptPreview, previewOverrides, PREVIEW_ARTIFACT_TTL_SECONDS, type PreviewOverrides, type PreviewSubmit } from './preview.js';
 import { acceptMission, contextItemMessages, missionEnvelope, missionRecord, missionTeamResult, type MissionSubmit } from './missions.js';
+import { compactToolArguments } from './tool-arguments.js';
 
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
@@ -337,7 +338,7 @@ export class ArdentRuntime {
           this.#recordEvidence(name, toolResult, evidence);
         }, () => this.#awaitTeamAdmission(task.id, abort.signal), onBackendEvent, modelPolicy?.policy.primary.codex.reasoning_effort, [], {
           // Same journal shape as the llama.cpp loop: an attempt makes cancellation effect-uncertain.
-          onToolAttempt: attempt => this.store.append(task.id, 'tool_attempt', { id: attempt.callId, name: attempt.tool, args: attempt.arguments })
+          onToolAttempt: attempt => this.store.append(task.id, 'tool_attempt', { id: attempt.callId, name: attempt.tool, args: compactToolArguments(attempt.tool, attempt.arguments) })
         });
         this.store.append(task.id, 'model_result', { backend: 'codex', thread_id: result.threadId, turn_id: result.turnId, tool_calls: result.toolCalls });
         this.store.append(task.id, 'model_final_candidate', { backend: 'codex', text: result.answer.slice(0, 64_000) });
@@ -403,10 +404,13 @@ export class ArdentRuntime {
           catch { args = null; }
           // Pause before the attempt is journaled, so cancelling a paused task leaves no uncertain effect.
           await this.#awaitPause(task.id, abort.signal);
-          this.store.append(task.id, 'tool_attempt', { id: call.id, name: call.function.name, args });
+          this.store.append(task.id, 'tool_attempt', { id: call.id, name: call.function.name, args: compactToolArguments(call.function.name, args) });
           await this.#awaitTeamAdmission(task.id, abort.signal);
           const result = await taskTools.call(call.function.name, args, task.context, abort.signal);
           this.store.append(task.id, 'tool_result', { id: call.id, name: call.function.name, result });
+          // File content is in the artifact store now; later steps see a note, not the bytes.
+          const compacted = compactToolArguments(call.function.name, args, result);
+          if (compacted !== args) call.function.arguments = JSON.stringify(compacted);
           this.#recordEvidence(call.function.name, result, evidence);
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
           if (call.function.name === 'team_ask_user' && result.ok) question = z.object({ question: z.string() }).safeParse(args).data?.question;

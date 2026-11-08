@@ -34,6 +34,13 @@
 - CLI: `ardent mission submit`, `ardent preview`, `ardent development list`, and
   `ardent tasks pause` (`tasks resume` also releases a paused task).
 
+### Fixed
+
+- After `artifact_write` or `document_render` runs, large file content (text, base64 or Markdown
+  over 8 KiB) is replaced in the model history and in `tool_attempt` journal events by a note with
+  its size, digest and stored artifact reference. A multi-megabyte artifact no longer overflows the
+  next model step's context or fills every task event stream and event page.
+
 ## 2.1.2 - 2026-11-07
 
 The first release published from this repository.
