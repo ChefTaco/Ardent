@@ -1,6 +1,6 @@
 {
   "name": "@hivemagnus/ardent",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Headless TypeScript agent runtime with A2A, scheduled jobs, skills, chat channels, and a plugin API",
   "keywords": [
     "agent",
