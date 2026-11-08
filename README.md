@@ -12,7 +12,8 @@ What you get:
   per-task event journal in SQLite. Interrupted work is marked `unknown`,
   never silently replayed.
 - **Management API** (Hono, bearer-token protected) for tasks, sessions,
-  config, identity, skills, peers, channels, and live event streams. The
+  config, identity, skills, peers, channels, and live event streams, including
+  the reply text as the model writes it. The
   OpenAPI document is served at `/openapi.json` and pinned in
   [`openapi/ardent.json`](openapi/ardent.json).
 - **A2A protocol 1.0** server and client over JSON-RPC, HTTP+JSON, and gRPC,
@@ -257,6 +258,26 @@ An optional, owner-only `$ARDENT_HOME/model-policy/active.json` selects the
 Codex model and reasoning effort and configures context compaction for all
 profiles under that home. [`model-policy.default.json`](model-policy.default.json)
 is a starting point; compaction is disabled until you enable it.
+
+### Live task streams
+
+`GET /api/v1/tasks/{id}/stream` is a server-sent event stream. It sends:
+
+| Event | Data | Notes |
+|---|---|---|
+| `task.event` | A journal event | The event `id` is the journal sequence. Resume with `Last-Event-ID` or `?after=` |
+| `task.text` | `{step, text}`: the visible reply text of the current model step | Sent on connect and when a new step starts showing text |
+| `task.delta` | `{step, text}`: text to append | |
+| `task.done` | The finished task | Its `result` is the authoritative answer |
+
+The stream closes after 60 seconds; reconnect to continue.
+
+Live text works the same for every backend and caller:
+- It holds only what a user would see. Structured output, such as tool or research JSON, is never streamed.
+- It is not journaled and has no event id. A reconnect receives a `task.text` snapshot instead of a replay.
+- Codex sends its answer as one piece when the turn completes.
+
+`ardent chat` uses the same rule to print replies as they arrive.
 
 ## Plugins
 

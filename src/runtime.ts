@@ -20,6 +20,7 @@ import { ContextCheckpoints, tokenEstimate } from './context-checkpoints.js';
 import { loadModelPolicy } from './model-policy.js';
 import { BackendEventSchema, type BackendEventSink } from './backend-events.js';
 import { pluginContext, type ArdentPlugin } from './plugins.js';
+import { LiveTextHub } from './live-text.js';
 
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief };
 type SourceEvidence = { url: string; extracted: boolean; title: string; published_at: string | null; retrieved_at: string | null; content_sha256: string | null };
@@ -62,6 +63,8 @@ export class ArdentRuntime {
   readonly store: TaskStore;
   readonly artifacts: ArtifactStore;
   readonly tools = new ToolRegistry();
+  /** Visible reply text of running tasks, for live clients. Never journaled. */
+  readonly liveText = new LiveTextHub();
   readonly #active = new Map<string, AbortController>();
   readonly #queues = new Map<string, PendingRun[]>();
   readonly #roundRobin: string[] = [];
@@ -182,9 +185,14 @@ export class ArdentRuntime {
         this.#jobs.delete(pending.task.id);
         this.#pump();
       };
-      void this.#execute(pending.task.id, pending.env, pending.onText).then(
-        result => { settled(); pending.resolve(result); },
-        error => { settled(); pending.reject(error instanceof Error ? error : new Error('Task failed')); }
+      const taskId = pending.task.id;
+      const onText = (chunk: string, step: number) => {
+        this.liveText.push(taskId, chunk, step);
+        pending.onText?.(chunk, step);
+      };
+      void this.#execute(taskId, pending.env, onText).then(
+        result => { this.liveText.end(taskId); settled(); pending.resolve(result); },
+        error => { this.liveText.end(taskId); settled(); pending.reject(error instanceof Error ? error : new Error('Task failed')); }
       );
     }
   }

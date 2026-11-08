@@ -19,6 +19,7 @@ import { MattermostAdapter } from './mattermost.js';
 import { EventSchema, SessionMessageSchema, SessionSchema, TaskSchema, TaskState } from './store.js';
 import type { JobEngine } from './job-engine.js';
 import { pluginContext } from './plugins.js';
+import type { LiveTextUpdate } from './live-text.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional() }).strict();
 const SessionOpen = z.object({ key: z.string().trim().min(1).max(256), reset: z.boolean().optional() }).strict();
@@ -48,7 +49,7 @@ const a2aBody = { required: true, content: { 'application/json': { schema: { typ
 const a2aResult = { '200': { description: 'A2A v1 task or message; see the pinned A2A protocol contract', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } }, '400': { description: 'Invalid A2A request' }, '401': { description: 'Peer authentication failed' }, '404': { description: 'Task or configuration absent' } };
 const taskExample = { id: '11111111-1111-4111-8111-111111111111', caller: 'management', context: 'direct', session_id: null, prompt: 'Research the current update', content_hash: '0'.repeat(64), idempotency_key: 'research-1', backend: 'llamacpp', state: 'queued', result: null, error: null, deadline_ms: 1790438400000, created_ms: 1790431200000, updated_ms: 1790431200000 };
 const eventExample = { sequence: 1, task_id: taskExample.id, kind: 'task_accepted', detail: { backend: 'llamacpp' }, created_ms: 1790431200000 };
-const sseExample = `event: task.event\nid: 1\ndata: ${JSON.stringify(eventExample)}\n\n`;
+const sseExample = `event: task.event\nid: 1\ndata: ${JSON.stringify(eventExample)}\n\nevent: task.text\ndata: ${JSON.stringify({ step: 0, text: 'The bridge' })}\n\nevent: task.delta\ndata: ${JSON.stringify({ step: 0, text: ' holds.' })}\n\n`;
 
 export function ardentOpenApi(): object {
   return {
@@ -78,7 +79,7 @@ export function ardentOpenApi(): object {
       '/api/v1/sessions/{id}/messages': { get: { operationId: 'getSessionMessages', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': jsonResponse('Recent caller session messages', z.object({ messages: z.array(SessionMessageSchema) })), '404': { description: 'Session absent' } } } },
       '/api/v1/tasks/{id}': { get: { operationId: 'getTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Task status', content: { 'application/json': { schema: { $ref: '#/components/schemas/Task' }, example: taskExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/events': { get: { operationId: 'getTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', description: 'Return events with sequence greater than this cursor', schema: { type: 'integer', minimum: 0, default: 0 } }], responses: { '200': { description: 'Journal events after the supplied sequence cursor', content: { 'application/json': { schema: { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { $ref: '#/components/schemas/TaskEvent' } } } }, example: { events: [eventExample] } } } } } } },
-      '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON; task.done carries Task JSON', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
+      '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/cancel': { post: { operationId: 'cancelTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Cancellation requested' } } } },
       '/api/v1/artifacts/{id}': { get: { operationId: 'getArtifact', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Artifact bytes' }, '404': { description: 'Artifact absent' } } } },
       '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int() })) } } },
@@ -316,20 +317,38 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
     let after = EventCursor.parse(c.req.query('after') ?? c.req.header('Last-Event-ID') ?? 0);
     return streamSSE(c, async stream => {
-      const until = Date.now() + 60_000;
-      while (!stream.aborted && Date.now() < until) {
-        const events = runtime.store.events(id, after, 100);
-        for (const event of events) {
-          await stream.writeSSE({ event: 'task.event', id: String(event.sequence), data: JSON.stringify(event) });
-          after = event.sequence;
+      // Live reply text is not journaled, so its events carry no id and a reconnect
+      // starts from a task.text snapshot of the current step instead of a replay.
+      const live: LiveTextUpdate[] = [];
+      let wake: (() => void) | undefined;
+      const unsubscribe = runtime.liveText.subscribe(id, update => { live.push(update); wake?.(); });
+      const snapshot = runtime.liveText.snapshot(id);
+      if (snapshot) live.push({ kind: 'text', ...snapshot });
+      try {
+        const until = Date.now() + 60_000;
+        while (!stream.aborted && Date.now() < until) {
+          for (const update of live.splice(0)) {
+            if (update.kind !== 'end') await stream.writeSSE({ event: update.kind === 'text' ? 'task.text' : 'task.delta', data: JSON.stringify({ step: update.step, text: update.text }) });
+          }
+          const events = runtime.store.events(id, after, 100);
+          for (const event of events) {
+            await stream.writeSSE({ event: 'task.event', id: String(event.sequence), data: JSON.stringify(event) });
+            after = event.sequence;
+          }
+          const task = runtime.store.get(id);
+          if (!task || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(task.state)) {
+            await stream.writeSSE({ event: 'task.done', data: JSON.stringify(task ?? { id, state: 'missing' }) });
+            break;
+          }
+          if (events.length < 100 && !live.length) {
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(resolve, 250);
+              wake = () => { clearTimeout(timer); resolve(); };
+            });
+            wake = undefined;
+          }
         }
-        const task = runtime.store.get(id);
-        if (!task || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(task.state)) {
-          await stream.writeSSE({ event: 'task.done', data: JSON.stringify(task ?? { id, state: 'missing' }) });
-          break;
-        }
-        await stream.sleep(250);
-      }
+      } finally { unsubscribe(); }
     });
   });
   app.post('/api/v1/tasks/:id/cancel', c => c.json(runtime.cancel(c.req.param('id'))));

@@ -1714,7 +1714,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE task.event carries TaskEvent JSON; task.done carries Task JSON */
+            /** @description SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1724,6 +1724,12 @@ export interface operations {
                      * @example event: task.event
                      *     id: 1
                      *     data: {"sequence":1,"task_id":"11111111-1111-4111-8111-111111111111","kind":"task_accepted","detail":{"backend":"llamacpp"},"created_ms":1790431200000}
+                     *
+                     *     event: task.text
+                     *     data: {"step":0,"text":"The bridge"}
+                     *
+                     *     event: task.delta
+                     *     data: {"step":0,"text":" holds."}
                      */
                     "text/event-stream": string;
                 };
