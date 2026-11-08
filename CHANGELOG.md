@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `document_render` with `format: "docx"` now writes a real DOCX artifact through
+  `@hivemagnus/canvas-word-codec` instead of failing with `DOCX_UNAVAILABLE`. A new Markdown mapper
+  (GFM via `marked`) turns headings, paragraphs, bold, italic, strikethrough, inline code, links,
+  nested bulleted, numbered and task lists, block quotes, code blocks, tables and horizontal rules
+  into the codec's Word exchange document. PNG and JPEG `data:` URI images are embedded; other images
+  and ` ```svg ` figures become visible placeholders. Nothing is fetched or read from disk. A
+  document beyond the exchange format's limits fails with `DOCX_RENDER_FAILED` and no effect; the
+  artifact is still bounded by `artifacts.max_bytes`.
+
 ## 2.2.1 - 2026-11-08
 
 ### Fixed
