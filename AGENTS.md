@@ -78,6 +78,12 @@ pinned document with `npm run openapi:write` and commit `openapi/ardent.json` an
 `test/generated/ardent-openapi.ts`. Magnus generates its own typed client from
 the published package, so a shape change also needs a Magnus update.
 
+Magnus deploys and manages Ardent agents, so **every Ardent release is followed
+by a Magnus update**: bump its `@hivemagnus/ardent` pins, regenerate its typed
+client, allow any new management routes or actions in its node agent, and
+release the agent. Magnus's `ardent:latest:check` fails while it pins an older
+Ardent than the latest published release.
+
 ## Tests and gates
 
 Add or update tests with every behaviour change; security-relevant fixes need a
