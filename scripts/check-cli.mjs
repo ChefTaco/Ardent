@@ -19,6 +19,7 @@ const url = 'https://93.184.216.34/official-update';
 const sourceId = createHash('sha256').update(url).digest('hex').slice(0, 16);
 let calls = 0;
 let sawFollowupHistory = false;
+let lastModel = '';
 const fixture = createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');
   if (request.url?.startsWith('/search')) {
@@ -34,6 +35,7 @@ const fixture = createServer(async (request, response) => {
   for await (const chunk of request) body = (body + chunk.toString()).slice(0, 256_000);
   const parsed = JSON.parse(body);
   calls++;
+  lastModel = parsed.model;
   let delta;
   if (calls === 1) {
     delta = { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-collect', type: 'function', function: { name: 'news_collect', arguments: '{"query":"official fixture update","max_articles":1}' } }] } }] };
@@ -91,11 +93,25 @@ try {
   assert.equal(followup.task.state, 'completed');
   assert(followup.answer.includes(sourceId));
   assert(sawFollowupHistory);
+  const missionFile = join(scratch, 'mission.json');
+  await writeFile(missionFile, JSON.stringify({ objective: 'Summarize the source', idempotency_key: 'cli-mission-1', mission: { id: 'cli-1', revision: 1,
+    parent_task: null, constraints: [], allowed_actions: ['observe'], resources: ['tool:development_note'], deadline: Math.floor(Date.now() / 1000) + 600,
+    acceptance_criteria: ['A summary exists'], expected_artifacts: [] } }));
+  const mission = JSON.parse(await command('mission', 'submit', '--mission-file', missionFile));
+  assert.equal(mission.state, 'completed');
+  assert.equal(mission.team_result.outcome, 'partial');
+  assert.equal(mission.team_result.task_id, mission.task_id);
+  const preview = JSON.parse(await command('preview', '--prompt', 'Say hello', '--model', 'preview-model', '--no-skills', '--json'));
+  assert.equal(preview.task.context, 'preview');
+  assert.equal(lastModel, 'preview-model');
+  assert.equal(soul, await readFile(join(profile, 'SOUL.md'), 'utf8'));
+  const development = JSON.parse(await command('development', 'list', '--limit', '10'));
+  assert(Array.isArray(development.records) && development.next === null);
   const invalid = String(doc).replace('schema_version: 1', 'schema_version: 2');
   await writeFile(join(profile, 'config.yaml'), invalid, { mode: 0o600 });
   await assert.rejects(command('config', 'validate'));
   assert((await readFile(join(profile, 'config.yaml'), 'utf8')).includes('schema_version: 2'));
-  process.stdout.write(JSON.stringify({ cliProcess: true, profileComments: true, privateToken: true, invalidConfigRejected: true, researchSearchAndExtraction: true, exactArtifact: true, followupHistory: true, modelCalls: calls }) + '\n');
+  process.stdout.write(JSON.stringify({ cliProcess: true, profileComments: true, privateToken: true, invalidConfigRejected: true, researchSearchAndExtraction: true, exactArtifact: true, followupHistory: true, missionCli: true, previewCli: true, developmentCli: true, modelCalls: calls }) + '\n');
 } finally {
   fixture.closeAllConnections();
   await new Promise((resolve, reject) => fixture.close(error => error ? reject(error) : resolve()));

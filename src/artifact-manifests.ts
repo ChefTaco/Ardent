@@ -59,7 +59,8 @@ export class ArtifactManifests {
       CREATE INDEX IF NOT EXISTS artifact_manifests_sha ON artifact_manifests(sha256, created_ms);
       CREATE INDEX IF NOT EXISTS artifact_manifests_supersedes ON artifact_manifests(supersedes_sha256);
       CREATE TRIGGER IF NOT EXISTS artifact_manifests_immutable BEFORE UPDATE ON artifact_manifests
-        BEGIN SELECT RAISE(ABORT, 'Artifact manifests are immutable'); END;`);
+        BEGIN SELECT RAISE(ABORT, 'Artifact manifests are immutable'); END;
+      CREATE TABLE IF NOT EXISTS artifact_sweeps (sha256 TEXT PRIMARY KEY, outcome TEXT NOT NULL, swept_ms INTEGER NOT NULL);`);
   }
 
   /**
@@ -98,6 +99,26 @@ export class ArtifactManifests {
         sha256: manifest.sha256, size: manifest.size, revision: manifest.revision, supersedes_sha256: manifest.supersedes_sha256, manifest });
     })();
     return { task_id: input.taskId, superseded_by_sha256: null, manifest };
+  }
+
+  /**
+   * Delete the bytes of artifacts whose every manifest has expired, unless a
+   * task outside preview still refers to the digest in its journal.
+   */
+  async sweepExpired(nowMs = Date.now()): Promise<{ deleted: string[]; retained: string[] }> {
+    const candidates = z.array(z.object({ sha256: digest })).parse(this.store.db.prepare(`SELECT DISTINCT m.sha256 FROM artifact_manifests m
+      WHERE m.expires_ms<=? AND NOT EXISTS (SELECT 1 FROM artifact_manifests n WHERE n.sha256=m.sha256 AND n.expires_ms>?)
+        AND NOT EXISTS (SELECT 1 FROM artifact_sweeps s WHERE s.sha256=m.sha256
+          AND s.swept_ms>=(SELECT max(k.created_ms) FROM artifact_manifests k WHERE k.sha256=m.sha256)) LIMIT 100`).all(nowMs, nowMs)).map(row => row.sha256);
+    const result = { deleted: [] as string[], retained: [] as string[] };
+    for (const sha of candidates) {
+      const referenced = this.store.db.prepare(`SELECT 1 FROM events e JOIN tasks t ON t.id=e.task_id
+        WHERE t.context!='preview' AND instr(e.detail_json, ?)>0 LIMIT 1`).get(sha);
+      if (!referenced) await this.artifacts.delete(sha);
+      this.store.db.prepare('INSERT OR REPLACE INTO artifact_sweeps(sha256,outcome,swept_ms) VALUES (?,?,?)').run(sha, referenced ? 'retained' : 'deleted', nowMs);
+      (referenced ? result.retained : result.deleted).push(sha);
+    }
+    return result;
   }
 
   /** Current (unexpired) manifests a task registered, oldest first. */

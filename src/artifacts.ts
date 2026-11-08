@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -28,6 +28,13 @@ export class ArtifactStore {
     await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
     await rename(temporary, join(this.directory, digest));
     return { id: digest, sha256: digest, bytes: bytes.length, media_type: mediaType, name };
+  }
+  /** Remove stored bytes. Callers must prove nothing else still references them. */
+  async delete(id: string): Promise<void> {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid artifact ID');
+    await unlink(join(this.directory, id)).catch((error: unknown) => {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+    });
   }
   async get(id: string): Promise<Uint8Array> {
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid artifact ID');

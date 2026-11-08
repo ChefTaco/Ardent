@@ -34,7 +34,8 @@
               "direct",
               "peer",
               "scheduled",
-              "mission"
+              "mission",
+              "preview"
             ]
           },
           "session_id": {
@@ -1102,7 +1103,8 @@
                               "direct",
                               "peer",
                               "scheduled",
-                              "mission"
+                              "mission",
+                              "preview"
                             ]
                           },
                           "session_id": {
@@ -1428,6 +1430,473 @@
         }
       }
     },
+    "/api/v1/preview/tasks": {
+      "post": {
+        "operationId": "submitPreviewTask",
+        "description": "Run a prompt with unsaved soul, identity, skill selection or model overrides in context preview. A preview has read-only direct tools and no mission tools, never writes memory, development records, identity or configuration, and its artifacts expire after 24 hours. It streams on /api/v1/tasks/{id}/stream like any task.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16000
+                  },
+                  "overrides": {
+                    "default": {},
+                    "type": "object",
+                    "properties": {
+                      "soul": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 131072
+                      },
+                      "identity": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 131072
+                      },
+                      "skills_enabled": {
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+                        }
+                      },
+                      "model": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "prompt"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted preview task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Conflicting idempotency key"
+          }
+        }
+      }
+    },
+    "/api/v1/development": {
+      "get": {
+        "operationId": "listDevelopment",
+        "description": "The agent's development history in creation order: its development notes, operator notes, skill changes, identity edits and method reflections.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Cursor from a previous page (next)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of development records; next is null on the last page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^dev_[A-Za-z0-9_-]{1,120}$"
+                          },
+                          "agent_ref": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "author": {
+                            "type": "string",
+                            "enum": [
+                              "agent",
+                              "operator",
+                              "runtime"
+                            ]
+                          },
+                          "epistemic": {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "operator_reported",
+                              "observed"
+                            ]
+                          },
+                          "before_sha256": {
+                            "nullable": true,
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "after_sha256": {
+                            "nullable": true,
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "sources": {
+                            "maxItems": 16,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "task",
+                                    "artifact",
+                                    "memory",
+                                    "url",
+                                    "identity",
+                                    "skill",
+                                    "note"
+                                  ]
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 512
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "ref"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "created_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "agent_ref",
+                          "kind",
+                          "title",
+                          "body",
+                          "author",
+                          "epistemic",
+                          "before_sha256",
+                          "after_sha256",
+                          "sources",
+                          "created_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next": {
+                      "nullable": true,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "next"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or kind"
+          }
+        }
+      },
+      "post": {
+        "operationId": "addDevelopmentNote",
+        "description": "Record an operator note (default) or an agent note relayed by a coordinator.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8000
+                  },
+                  "sources": {
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "task",
+                            "artifact",
+                            "memory",
+                            "url",
+                            "identity",
+                            "skill",
+                            "note"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 512
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "author": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "agent"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "title",
+                  "body"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored development record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^dev_[A-Za-z0-9_-]{1,120}$"
+                    },
+                    "agent_ref": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "operator",
+                        "runtime"
+                      ]
+                    },
+                    "epistemic": {
+                      "type": "string",
+                      "enum": [
+                        "agent_reported",
+                        "operator_reported",
+                        "observed"
+                      ]
+                    },
+                    "before_sha256": {
+                      "nullable": true,
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "after_sha256": {
+                      "nullable": true,
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "sources": {
+                      "maxItems": 16,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "task",
+                              "artifact",
+                              "memory",
+                              "url",
+                              "identity",
+                              "skill",
+                              "note"
+                            ]
+                          },
+                          "ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "ref"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "agent_ref",
+                    "kind",
+                    "title",
+                    "body",
+                    "author",
+                    "epistemic",
+                    "before_sha256",
+                    "after_sha256",
+                    "sources",
+                    "created_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid note"
+          }
+        }
+      }
+    },
     "/api/v1/sessions": {
       "get": {
         "operationId": "listSessions",
@@ -1445,7 +1914,8 @@
               "type": "string",
               "enum": [
                 "direct",
-                "mission"
+                "mission",
+                "preview"
               ]
             }
           }
@@ -1477,7 +1947,8 @@
                               "direct",
                               "peer",
                               "scheduled",
-                              "mission"
+                              "mission",
+                              "preview"
                             ]
                           },
                           "key": {
@@ -1540,7 +2011,8 @@
                     "type": "string",
                     "enum": [
                       "direct",
-                      "mission"
+                      "mission",
+                      "preview"
                     ]
                   }
                 },
@@ -1574,7 +2046,8 @@
                         "direct",
                         "peer",
                         "scheduled",
-                        "mission"
+                        "mission",
+                        "preview"
                       ]
                     },
                     "key": {
@@ -1733,7 +2206,8 @@
                         "direct",
                         "peer",
                         "scheduled",
-                        "mission"
+                        "mission",
+                        "preview"
                       ]
                     },
                     "session_id": {
@@ -2003,6 +2477,145 @@
         "responses": {
           "200": {
             "description": "Cancellation requested"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/pause": {
+      "post": {
+        "operationId": "pauseTask",
+        "description": "Pause a queued or running task. A queued task does not start; a running task waits at its next step boundary (before a model call, a tool call or settling) and journals paused. Its deadline keeps running. Idempotent.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task admission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    },
+                    "admission": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "paused"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state",
+                    "admission"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
+          },
+          "409": {
+            "description": "Task already finished"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/resume": {
+      "post": {
+        "operationId": "resumeTask",
+        "description": "Resume a paused task. Idempotent; resuming a task that is not paused changes nothing.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task admission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "input_required",
+                        "completed",
+                        "partial",
+                        "failed",
+                        "cancelled",
+                        "unknown"
+                      ]
+                    },
+                    "admission": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "paused"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "state",
+                    "admission"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
           }
         }
       }

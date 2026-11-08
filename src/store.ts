@@ -7,7 +7,7 @@ import { z } from 'zod';
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
 /** Execution scope of a task. It selects tools and memory; a session belongs to exactly one context. */
-export const TaskContext = z.enum(['direct', 'peer', 'scheduled', 'mission']);
+export const TaskContext = z.enum(['direct', 'peer', 'scheduled', 'mission', 'preview']);
 export type TaskContext = z.infer<typeof TaskContext>;
 export const TaskSchema = z.object({ id: z.string().guid(), caller: z.string(), context: TaskContext, session_id: z.string().guid().nullable(), prompt: z.string(), content_hash: z.string(), idempotency_key: z.string().nullable(), backend: z.enum(['llamacpp', 'codex']), state: TaskState, result: z.string().nullable(), error: z.string().nullable(), deadline_ms: z.number().int(), created_ms: z.number().int(), updated_ms: z.number().int() });
 export type Task = z.infer<typeof TaskSchema>;
@@ -78,7 +78,10 @@ export class TaskStore {
         source_watermark INTEGER, parent_id TEXT, policy_revision INTEGER,
         model TEXT, outcome TEXT NOT NULL, reason TEXT,
         created_ms INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS context_attempts_session ON context_compaction_attempts(session_id,created_ms);`);
+      CREATE INDEX IF NOT EXISTS context_attempts_session ON context_compaction_attempts(session_id,created_ms);
+      CREATE TABLE IF NOT EXISTS task_admission (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id), admission TEXT NOT NULL CHECK(admission IN ('open','paused')),
+        updated_ms INTEGER NOT NULL);`);
     const columns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(tasks)'));
     if (!columns.some(column => column.name === 'session_id')) this.db.exec('ALTER TABLE tasks ADD COLUMN session_id TEXT');
     // Additive lookup indexes for caller listing, session history and recovery.
@@ -268,6 +271,28 @@ export class TaskStore {
   }
   setDelivery(id: string, state: 'sent' | 'failed' | 'unknown', externalId: string | null = null, error: string | null = null): void {
     this.db.prepare('UPDATE channel_deliveries SET state=?,external_id=?,error=?,updated_ms=? WHERE id=?').run(state, externalId, error, Date.now(), id);
+  }
+  /** Whether an operator paused the task. A paused task waits at its next step boundary. */
+  taskAdmission(id: string): 'open' | 'paused' {
+    const row = this.db.prepare('SELECT admission FROM task_admission WHERE task_id=?').get(id);
+    return row ? z.object({ admission: z.enum(['open', 'paused']) }).parse(row).admission : 'open';
+  }
+  /** Pause or resume a queued or running task. Journals the change; an unchanged admission is a no-op. */
+  setTaskAdmission(id: string, admission: 'open' | 'paused'): { task: Task; admission: 'open' | 'paused'; changed: boolean } {
+    return this.db.transaction(() => {
+      const task = this.get(id);
+      if (!task) throw new Error('Task not found');
+      const prior = this.taskAdmission(id);
+      if (prior === admission) return { task, admission, changed: false };
+      if (!['queued', 'running'].includes(task.state)) {
+        if (admission === 'open') return { task, admission: prior, changed: false };
+        throw Object.assign(new Error(`Task is ${task.state}; only queued or running tasks can be paused`), { code: 'TASK_TERMINAL' });
+      }
+      this.db.prepare(`INSERT INTO task_admission(task_id,admission,updated_ms) VALUES (?,?,?)
+        ON CONFLICT(task_id) DO UPDATE SET admission=excluded.admission,updated_ms=excluded.updated_ms`).run(id, admission, Date.now());
+      this.append(id, admission === 'paused' ? 'pause_requested' : 'resumed', { state: task.state });
+      return { task, admission, changed: true };
+    })();
   }
   get(id: string): Task | undefined {
     const row = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);

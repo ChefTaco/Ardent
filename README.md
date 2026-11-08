@@ -69,6 +69,7 @@ ARDENT_LLAMA_MODEL=your-model-name
 EOF
 ardent chat                              # interactive session
 ardent run --prompt "Summarize RFC 9110 in three bullets"
+ardent mission submit --mission-file mission.json   # a team mission, see below
 ardent gateway run                       # management API, A2A, channels, jobs
 ```
 
@@ -334,6 +335,47 @@ the newest manifest for a digest; the bytes stay at `GET /api/v1/artifacts/{id}`
 
 `development_note` stores an append-only development record: the agent's own
 note about how it works (`epistemic: agent_reported`).
+
+### Pause, preview and development history
+
+**Pause and resume.** `POST /api/v1/tasks/{id}/pause` holds a queued or running
+task: a queued task does not start (later tasks run instead), and a running
+task stops at its next step boundary, before a model call, before a tool call
+is journaled, or before it settles. The journal records `pause_requested`,
+`paused` (with the boundary) and `resumed`. Both routes are idempotent, and the
+deadline keeps running while a task is paused. `POST /api/v1/tasks/{id}/resume`
+releases it. Locally, `ardent tasks pause <id>` holds a queued task and
+`ardent tasks resume <id>` releases and runs it.
+
+**Preview.** `POST /api/v1/preview/tasks` `{prompt, overrides: {soul?,
+identity?, skills_enabled?, model?}, session_id?}` runs one task in context
+`preview` with unsaved changes. A preview gets the read-only direct tools, no
+mission tools and no memory tools. It never writes memory, development
+records, identity or configuration, and any artifact it produces expires after
+24 hours. It streams like any task; a session for it is opened with
+`context: "preview"`. `ardent preview --prompt TEXT [--soul-file FILE]
+[--identity-file FILE] [--skills a,b | --no-skills] [--model NAME]` does the
+same locally.
+
+**Development history.** `GET /api/v1/development?after=&limit=&kind=` returns
+the agent's development in one portable record shape, oldest first, with a
+`next` cursor:
+
+```json
+{"id": "dev_...", "agent_ref": "assistant", "kind": "self_understanding", "title": "...", "body": "...",
+ "author": "agent", "epistemic": "agent_reported", "before_sha256": null, "after_sha256": null,
+ "sources": [{"kind": "task", "ref": "..."}], "created_at": "2026-11-08T12:00:00.000Z"}
+```
+
+It merges:
+- the agent's `development_note` records (`agent_reported`);
+- operator notes from `POST /api/v1/development` (`operator_reported`);
+- skill selection changes, with the configuration revisions before and after (`observed`);
+- soul and identity edits from the retained identity history (`observed`);
+- research method reflections (`observed`).
+
+`agent_ref` is the profile name. `ardent development list [--after CURSOR]
+[--limit N] [--kind KIND]` prints the same pages.
 
 ## Plugins
 

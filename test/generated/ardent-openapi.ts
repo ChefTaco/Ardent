@@ -216,6 +216,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/preview/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Run a prompt with unsaved soul, identity, skill selection or model overrides in context preview. A preview has read-only direct tools and no mission tools, never writes memory, development records, identity or configuration, and its artifacts expire after 24 hours. It streams on /api/v1/tasks/{id}/stream like any task. */
+        post: operations["submitPreviewTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/development": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The agent's development history in creation order: its development notes, operator notes, skill changes, identity edits and method reflections. */
+        get: operations["listDevelopment"];
+        put?: never;
+        /** @description Record an operator note (default) or an agent note relayed by a coordinator. */
+        post: operations["addDevelopmentNote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions": {
         parameters: {
             query?: never;
@@ -306,6 +341,40 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["cancelTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Pause a queued or running task. A queued task does not start; a running task waits at its next step boundary (before a model call, a tool call or settling) and journals paused. Its deadline keeps running. Idempotent. */
+        post: operations["pauseTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Resume a paused task. Idempotent; resuming a task that is not paused changes nothing. */
+        post: operations["resumeTask"];
         delete?: never;
         options?: never;
         head?: never;
@@ -705,7 +774,7 @@ export interface components {
             id: string;
             caller: string;
             /** @enum {string} */
-            context: "direct" | "peer" | "scheduled" | "mission";
+            context: "direct" | "peer" | "scheduled" | "mission" | "preview";
             /** Format: uuid */
             session_id: string | null;
             prompt: string;
@@ -1436,7 +1505,7 @@ export interface operations {
                             id: string;
                             caller: string;
                             /** @enum {string} */
-                            context: "direct" | "peer" | "scheduled" | "mission";
+                            context: "direct" | "peer" | "scheduled" | "mission" | "preview";
                             /** Format: uuid */
                             session_id: string | null;
                             prompt: string;
@@ -1605,11 +1674,186 @@ export interface operations {
             };
         };
     };
+    submitPreviewTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    prompt: string;
+                    /** @default {} */
+                    overrides?: {
+                        soul?: string;
+                        identity?: string;
+                        skills_enabled?: string[];
+                        model?: string;
+                    };
+                    /** Format: uuid */
+                    session_id?: string;
+                    idempotency_key?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted preview task */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        task_id: string;
+                        /** @enum {string} */
+                        state: "queued" | "running" | "input_required" | "completed" | "partial" | "failed" | "cancelled" | "unknown";
+                    };
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Conflicting idempotency key */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listDevelopment: {
+        parameters: {
+            query?: {
+                /** @description Cursor from a previous page (next) */
+                after?: string;
+                limit?: number;
+                kind?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of development records; next is null on the last page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        records: {
+                            id: string;
+                            agent_ref: string;
+                            kind: string;
+                            title: string;
+                            body: string;
+                            /** @enum {string} */
+                            author: "agent" | "operator" | "runtime";
+                            /** @enum {string} */
+                            epistemic: "agent_reported" | "operator_reported" | "observed";
+                            before_sha256: string | null;
+                            after_sha256: string | null;
+                            sources: {
+                                /** @enum {string} */
+                                kind: "task" | "artifact" | "memory" | "url" | "identity" | "skill" | "note";
+                                ref: string;
+                            }[];
+                            created_at: string;
+                        }[];
+                        next: string | null;
+                    };
+                };
+            };
+            /** @description Invalid cursor or kind */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    addDevelopmentNote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    kind: string;
+                    title: string;
+                    body: string;
+                    sources?: {
+                        /** @enum {string} */
+                        kind: "task" | "artifact" | "memory" | "url" | "identity" | "skill" | "note";
+                        ref: string;
+                    }[];
+                    /** @enum {string} */
+                    author?: "operator" | "agent";
+                };
+            };
+        };
+        responses: {
+            /** @description Stored development record */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id: string;
+                        agent_ref: string;
+                        kind: string;
+                        title: string;
+                        body: string;
+                        /** @enum {string} */
+                        author: "agent" | "operator" | "runtime";
+                        /** @enum {string} */
+                        epistemic: "agent_reported" | "operator_reported" | "observed";
+                        before_sha256: string | null;
+                        after_sha256: string | null;
+                        sources: {
+                            /** @enum {string} */
+                            kind: "task" | "artifact" | "memory" | "url" | "identity" | "skill" | "note";
+                            ref: string;
+                        }[];
+                        created_at: string;
+                    };
+                };
+            };
+            /** @description Invalid note */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listSessions: {
         parameters: {
             query?: {
                 /** @description Session context (default direct) */
-                context?: "direct" | "mission";
+                context?: "direct" | "mission" | "preview";
             };
             header?: never;
             path?: never;
@@ -1629,7 +1873,7 @@ export interface operations {
                             id: string;
                             caller: string;
                             /** @enum {string} */
-                            context: "direct" | "peer" | "scheduled" | "mission";
+                            context: "direct" | "peer" | "scheduled" | "mission" | "preview";
                             key: string;
                             created_ms: number;
                             updated_ms: number;
@@ -1652,7 +1896,7 @@ export interface operations {
                     key: string;
                     reset?: boolean;
                     /** @enum {string} */
-                    context?: "direct" | "mission";
+                    context?: "direct" | "mission" | "preview";
                 };
             };
         };
@@ -1668,7 +1912,7 @@ export interface operations {
                         id: string;
                         caller: string;
                         /** @enum {string} */
-                        context: "direct" | "peer" | "scheduled" | "mission";
+                        context: "direct" | "peer" | "scheduled" | "mission" | "preview";
                         key: string;
                         created_ms: number;
                         updated_ms: number;
@@ -1758,7 +2002,7 @@ export interface operations {
                         id: string;
                         caller: string;
                         /** @enum {string} */
-                        context: "direct" | "peer" | "scheduled" | "mission";
+                        context: "direct" | "peer" | "scheduled" | "mission" | "preview";
                         /** Format: uuid */
                         session_id: string | null;
                         prompt: string;
@@ -1891,6 +2135,85 @@ export interface operations {
         responses: {
             /** @description Cancellation requested */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pauseTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task admission */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        task_id: string;
+                        /** @enum {string} */
+                        state: "queued" | "running" | "input_required" | "completed" | "partial" | "failed" | "cancelled" | "unknown";
+                        /** @enum {string} */
+                        admission: "open" | "paused";
+                    };
+                };
+            };
+            /** @description Task absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resumeTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task admission */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        task_id: string;
+                        /** @enum {string} */
+                        state: "queued" | "running" | "input_required" | "completed" | "partial" | "failed" | "cancelled" | "unknown";
+                        /** @enum {string} */
+                        admission: "open" | "paused";
+                    };
+                };
+            };
+            /** @description Task absent */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
