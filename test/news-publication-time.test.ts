@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { newsPublicationTime, newsStructuredPublicationTime } from '../src/news.js';
 
 describe('publisher publication times', () => {
-  const url = 'https://publisher.test/story';
+  const url = 'https://publisher.example.com/story';
   const article = (changes: Record<string, unknown> = {}) => ({ '@type': 'NewsArticle',
     mainEntityOfPage: { '@type': 'WebPage', '@id': url }, datePublished: '2026-10-22T04:00:00-05:00', ...changes });
   const script = (value: unknown) => `<script type="application/ld+json">${JSON.stringify(value)}</script>`;
@@ -27,6 +27,22 @@ describe('publisher publication times', () => {
     expect(newsStructuredPublicationTime(script(article({ text: 'x'.repeat(65_537) })), url)).toBeNull();
     expect(newsStructuredPublicationTime(script(Array.from({ length: 65 }, () => article())), url)).toBeNull();
     expect(newsStructuredPublicationTime('x'.repeat(2 * 1024 * 1024 + 1)+script(article()), url)).toBeNull();
+    expect(newsStructuredPublicationTime('<script></script>'.repeat(32)+script(article()), url)).toBeNull();
+    expect(newsStructuredPublicationTime(script(article()).replace('</script>', ''), url)).toBeNull();
+  });
+  it.each(['</script\t\n bar>', '</ScRiPt ignored="value">', '</script/>'])('parses browser-recognized script end tags: %s', end => {
+    const html = `<ScRiPt data-label=">" TYPE=application/ld+json>${JSON.stringify(article())}${end}`;
+    expect(newsStructuredPublicationTime(html, url)).toBe('2026-10-22T04:00:00-05:00');
+  });
+  it('ignores script-like text in comments, raw text, templates and lookalike type attributes', () => {
+    for (const html of [
+      `<!-- ${script(article())} --!>`, `<textarea>${script(article())}</textarea>`,
+      `<style>${script(article())}</style>`, `<template>${script(article())}</template>`,
+      `<script data-type="application/ld+json">${JSON.stringify(article())}</script>`,
+      `<script title='type="application/ld+json"'>${JSON.stringify(article())}</script>`
+    ]) expect(newsStructuredPublicationTime(html, url)).toBeNull();
+    const commented = `<!-- ${script(article({ datePublished: '2026-10-21T04:00:00-05:00' }))} -->`;
+    expect(newsStructuredPublicationTime(commented+script(article()), url)).toBe('2026-10-22T04:00:00-05:00');
   });
   it('recognizes the retained CBC Posted byline without treating an update as publication', () => {
     expect(newsPublicationTime({}, 'CBC News · Posted: Oct 05, 2026 5:00 AM EDT | Last Updated: 1 hour ago'))

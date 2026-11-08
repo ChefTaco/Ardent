@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
+import { parse, type DefaultTreeAdapterTypes } from 'parse5';
 import { z } from 'zod';
 import type { ArdentConfig } from './config.js';
 import { resolveReference } from './config.js';
@@ -136,10 +137,22 @@ export function newsStructuredPublicationTime(html: string, sourceUrl: string): 
     dates.add(new Date(published).toISOString());
     date ??= published;
   };
-  const scripts = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
-  for (let count = 0, match; count < 32 && (match = scripts.exec(html)); count++) {
-    if (!/\btype\s*=\s*["']application\/ld\+json["']/i.test(match[1]!) || Buffer.byteLength(match[2]!) > 65_536) continue;
-    try { visit(JSON.parse(match[2]!) as unknown, 0); } catch { /* Malformed publisher data remains unknown. */ }
+  // Parse actual HTML elements: comments, raw text and lookalike attributes
+  // must not become publisher evidence. Walk iteratively to bound call depth.
+  const pending: DefaultTreeAdapterTypes.Node[] = [parse(html, { sourceCodeLocationInfo: true })];
+  let scripts = 0;
+  while (pending.length && scripts < 32) {
+    const node = pending.pop()!;
+    if ('tagName' in node && node.tagName === 'script') {
+      scripts++;
+      if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml' || !node.sourceCodeLocation?.endTag ||
+          node.attrs.find(attr => attr.name === 'type')?.value.toLowerCase() !== 'application/ld+json') continue;
+      const text = node.childNodes.map(child => 'value' in child ? child.value : '').join('');
+      if (Buffer.byteLength(text) > 65_536) continue;
+      try { visit(JSON.parse(text) as unknown, 0); } catch { /* Malformed publisher data remains unknown. */ }
+    } else if ('childNodes' in node) {
+      for (let index = node.childNodes.length - 1; index >= 0; index--) pending.push(node.childNodes[index]!);
+    }
   }
   return nodes <= 64 && dates.size === 1 ? date : null;
 }

@@ -148,6 +148,28 @@ describe('A2A surface limits', () => {
     expect((await spoof(proxied.base, '192.0.2.1')).status).toBe(429);
   });
 
+  it('limits all six authorization routes before credentials or malformed bodies are processed', async () => {
+    const { base, surface: created } = await surface({ ip_requests_per_minute: 1, ip_burst: 1 });
+    const { token } = created.pushInbox.register('coordinator', 'limited-push');
+    expect((await fetch(`${base}/.well-known/agent-card.json`)).status).toBe(200);
+    const routes = [
+      ['/team/artifacts/missing?context=fixture', 'GET'], ['/.well-known/hermes-team-card.json', 'GET'],
+      ['/a2a/jsonrpc', 'POST'], ['/a2a/rest/message:send', 'POST'], ['/', 'POST'], ['/a2a/push/coordinator', 'POST']
+    ] as const;
+    for (const [path, method] of routes) {
+      for (const valid of [true, false]) {
+        const response = await fetch(`${base}${path}`, { method, headers: {
+          ...auth(valid ? TOKEN : 'wrong-token'), 'X-A2A-Notification-Token': valid ? token : 'wrong-token',
+          'Content-Type': 'application/json'
+        }, ...(method === 'POST' ? { body: '{not json' } : {}) });
+        expect(response.status, `${method} ${path}`).toBe(429);
+        expect(await response.json()).toEqual({ error: 'Too many A2A requests' });
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(Number(response.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
   it('limits each authenticated peer separately on every authenticated route', async () => {
     const { base } = await surface({ ...generous, peer_requests_per_minute: 1, peer_burst: 1 });
     expect((await fetch(`${base}/.well-known/hermes-team-card.json`, { headers: auth() })).status).toBe(200);
