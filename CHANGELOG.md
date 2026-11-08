@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Context maintenance no longer imports the task context enum from `store.js`. Magnus adopts newer
+  context maintenance onto an installed older runtime, whose `store.js` has no such export, so
+  adoption failed to load in 2.2.0. A test now keeps the overlaid modules to base exports that every
+  supported release provides.
+
 ## 2.2.0 - 2026-11-08
 
 ### Added
