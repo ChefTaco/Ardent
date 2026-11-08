@@ -18,6 +18,10 @@ export type ChannelReply = { text: string; taskId: string | null; artifactIds: s
 export type ChannelDelivery = (reply: ChannelReply) => Promise<string | null>;
 export class DeliveryRejectedError extends Error {}
 
+const SourceResult = z.object({ result: z.object({ ok: z.literal(true), value: z.unknown().optional() }) });
+const Source = z.object({ source_id: z.string(), url: z.string().url().optional() }).passthrough();
+const SourceValue = z.object({ results: z.array(Source).optional(), search: z.object({ results: z.array(Source) }).passthrough().optional() }).passthrough();
+
 function eventScope(event: ChannelEvent): { caller: string; key: string } {
   return { caller: `${event.platform}:${event.account}:${event.user}`, key: `${event.platform}:${event.account}:${event.conversation}:${event.thread ?? ''}` };
 }
@@ -28,10 +32,9 @@ function sourceReply(runtime: ArdentRuntime, caller: string): string {
     const sources = new Map<string, string>();
     for (const event of runtime.store.events(task.id, 0, 500)) {
       if (event.kind !== 'tool_result') continue;
-      const result = z.object({ result: z.object({ ok: z.literal(true), value: z.unknown().optional() }) }).safeParse(event.detail);
+      const result = SourceResult.safeParse(event.detail);
       if (!result.success) continue;
-      const source = z.object({ source_id: z.string(), url: z.string().url().optional() }).passthrough();
-      const value = z.object({ results: z.array(source).optional(), search: z.object({ results: z.array(source) }).passthrough().optional() }).passthrough().safeParse(result.data.result.value);
+      const value = SourceValue.safeParse(result.data.result.value);
       if (!value.success) continue;
       for (const item of [...(value.data.results ?? []), ...(value.data.search?.results ?? [])]) if (!sources.has(item.source_id)) sources.set(item.source_id, item.url ?? 'URL unavailable');
     }
