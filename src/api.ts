@@ -24,6 +24,7 @@ import { MissionSubmit } from './missions.js';
 import { ArtifactRecordSchema } from './artifact-manifests.js';
 import { PreviewSubmit } from './preview.js';
 import { developmentPage, DevelopmentKind, DevelopmentNoteInput, DevelopmentRecordSchema, recordSkillChange } from './development.js';
+import { readProfileEnv } from './profile-env.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional() }).strict();
 /** Contexts a management caller may open a session in. A session serves tasks of its own context only. */
@@ -38,6 +39,9 @@ const SkillEdit = z.object({ enabled: z.boolean(), revision: z.string().regex(/^
 const IdentityEdit = z.object({ text: z.string().min(1).max(128 * 1024), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const IdentityRestore = z.object({ history_name: z.string().min(1).max(128), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const PageLimit = z.coerce.number().int().min(1).max(100);
+/** A HiveMem agent credential is a JWT: three base64url segments. */
+const HiveMemCredential = z.string().max(16384).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+const CredentialReload = z.object({ reloaded: z.literal(true), token_env: z.string(), changed: z.boolean() });
 const EventCursor = z.coerce.number().int().min(0);
 function authEqual(actual: string, expected: string): boolean {
   const a = Buffer.from(actual);
@@ -127,13 +131,19 @@ export function ardentOpenApi(): object {
       '/api/v1/skills': { get: { operationId: 'listSkills', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Profile skill index' } } } },
       '/api/v1/skills/{name}': { put: { operationId: 'setSkillEnabled', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'name', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: toJsonSchema(SkillEdit, 'openapi-3.0') } } }, responses: { '200': { description: 'Saved skill selection revision' }, '409': { description: 'Revision conflict' } } } },
       '/api/v1/memory/search': { post: { operationId: 'searchMemory', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } } }, responses: { '200': { description: 'Permitted memories' }, '503': { description: 'HiveMem unavailable' } } } },
-      '/api/v1/memory/status': { get: { operationId: 'getMemoryStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('HiveMem readiness and capability summary', z.object({ status: z.enum(['ready', 'degraded']), agent_id: z.string(), workspace_id: z.string(), retrieval: z.string().nullable(), storage: z.string().nullable(), reason: z.string().nullable() })) } } }
+      '/api/v1/memory/status': { get: { operationId: 'getMemoryStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('HiveMem readiness and capability summary', z.object({ status: z.enum(['ready', 'degraded']), agent_id: z.string(), workspace_id: z.string(), retrieval: z.string().nullable(), storage: z.string().nullable(), reason: z.string().nullable() })) } } },
+      '/api/v1/memory/credential/reload': { post: { operationId: 'reloadMemoryCredential', description: 'Re-read the HiveMem agent credential named by memory.token_env from the profile environment file the gateway started from, and use it for every later HiveMem request without a restart. No other variable changes; requests in flight finish with the previous credential. The credential is never returned.', security: [{ bearerAuth: [] }], requestBody: { required: false, content: { 'application/json': { schema: jsonSchema(z.object({}).strict()) } } }, responses: { '200': jsonResponse('Credential reloaded; changed is false when the file holds the credential already in use', CredentialReload), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Memory provider is not hivemem' }, '422': { description: 'Credential missing, empty or malformed, or the environment file is unreadable; the previous credential stays in use' } } } }
     }
   };
 }
 
+/**
+ * `env` is the gateway's one shared environment: the runtime, tools, channels
+ * and plugins receive the same object. `envFile` is the explicit protected
+ * environment file the gateway started from, if any (default `<profile>/.env`).
+ */
 export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, env: NodeJS.ProcessEnv = process.env,
-  jobEngine?: JobEngine): Hono {
+  jobEngine?: JobEngine, options: { envFile?: string } = {}): Hono {
   const app = new Hono();
   let current = loaded;
   // A saved configuration requires activation; it must not rotate the live
@@ -313,6 +323,36 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
         workspace_id: memory.workspace_id, retrieval: null, storage: null,
         reason: error instanceof Error ? error.message.slice(0, 200) : 'HiveMem unavailable' });
     }
+  });
+  // The fleet manager rotates the HiveMem agent credential in the profile
+  // environment file. A reload replaces only that key in the shared gateway
+  // environment, so every HiveMem client created afterwards uses it.
+  let credentialReloads: Promise<unknown> = Promise.resolve();
+  const reloadCredential = async (name: string): Promise<{ changed: boolean } | { problem: string }> => {
+    let value: string | undefined;
+    try { value = (await readProfileEnv(runtime.profileDir, options.envFile))[name]; }
+    catch { return { problem: 'Profile environment file is unreadable or not an owned private file' }; }
+    if (!value) return { problem: `${name} is missing or empty in the profile environment file` };
+    if (!HiveMemCredential.safeParse(value).success) return { problem: `${name} is not a well-formed agent credential` };
+    const changed = env[name] !== value;
+    env[name] = value;
+    return { changed };
+  };
+  app.post('/api/v1/memory/credential/reload', async c => {
+    const text = await c.req.text();
+    if (text.trim()) {
+      let body: unknown;
+      try { body = JSON.parse(text) as unknown; } catch { throw new Error('Invalid request: body must be empty or an empty JSON object'); }
+      parseInput(body, z.object({}).strict());
+    }
+    const memory = runtime.config.memory;
+    if (memory.provider !== 'hivemem') return c.json({ error: { code: 'CONFLICT', message: 'Memory provider is not hivemem' } }, 409);
+    // Serialize reloads so the last request to start decides the credential.
+    const outcome = credentialReloads.then(() => reloadCredential(memory.token_env));
+    credentialReloads = outcome.catch(() => {});
+    const result = await outcome;
+    if ('problem' in result) return c.json({ error: { code: 'INVALID_CREDENTIAL', message: result.problem } }, 422);
+    return c.json({ reloaded: true, token_env: memory.token_env, changed: result.changed });
   });
   app.get('/api/v1/sessions', c => c.json({ sessions: runtime.store.listSessions('management', SessionContext.parse(c.req.query('context') ?? 'direct')) }));
   app.post('/api/v1/sessions', async c => {

@@ -3984,6 +3984,72 @@
           }
         }
       }
+    },
+    "/api/v1/memory/credential/reload": {
+      "post": {
+        "operationId": "reloadMemoryCredential",
+        "description": "Re-read the HiveMem agent credential named by memory.token_env from the profile environment file the gateway started from, and use it for every later HiveMem request without a restart. No other variable changes; requests in flight finish with the previous credential. The credential is never returned.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Credential reloaded; changed is false when the file holds the credential already in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reloaded": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "token_env": {
+                      "type": "string"
+                    },
+                    "changed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "reloaded",
+                    "token_env",
+                    "changed"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Memory provider is not hivemem"
+          },
+          "422": {
+            "description": "Credential missing, empty or malformed, or the environment file is unreadable; the previous credential stays in use"
+          }
+        }
+      }
     }
   }
 }
