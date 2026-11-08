@@ -20,9 +20,14 @@ import { EventSchema, SessionMessageSchema, SessionSchema, TaskSchema, TaskState
 import type { JobEngine } from './job-engine.js';
 import { pluginContext } from './plugins.js';
 import type { LiveTextUpdate } from './live-text.js';
+import { MissionSubmit } from './missions.js';
+import { ArtifactRecordSchema } from './artifact-manifests.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional() }).strict();
-const SessionOpen = z.object({ key: z.string().trim().min(1).max(256), reset: z.boolean().optional() }).strict();
+/** Contexts a management caller may open a session in. A session serves tasks of its own context only. */
+const SessionContext = z.enum(['direct', 'mission']);
+const SessionOpen = z.object({ key: z.string().trim().min(1).max(256), reset: z.boolean().optional(), context: SessionContext.optional() }).strict();
+const Accepted = z.object({ task_id: z.string().guid(), state: TaskState });
 const ConfigEdit = z.object({ text: z.string().min(1).max(200000), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const SkillEdit = z.object({ enabled: z.boolean(), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const IdentityEdit = z.object({ text: z.string().min(1).max(128 * 1024), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
@@ -33,6 +38,12 @@ function authEqual(actual: string, expected: string): boolean {
   const a = Buffer.from(actual);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+/** Like parseJson, but a validation failure always reads as an invalid request (HTTP 400). */
+function parseInput<T extends z.ZodTypeAny>(body: unknown, schema: T): z.infer<T> {
+  const result = schema.safeParse(body);
+  if (!result.success) throw new Error(`Invalid request: ${result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  return result.data;
 }
 function parseJson<T extends z.ZodTypeAny>(body: unknown, schema: T): z.infer<T> {
   const result = schema.safeParse(body);
@@ -75,12 +86,15 @@ export function ardentOpenApi(): object {
         post: { operationId: 'submitTask', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(Submit), example: { prompt: 'Research today\'s topic', idempotency_key: 'topic-2026-09-26' } } } }, responses: { '202': { ...jsonResponse('Accepted durable task', z.object({ task_id: z.string().guid(), state: TaskState })), content: { 'application/json': { schema: jsonSchema(z.object({ task_id: z.string().guid(), state: TaskState })), example: { task_id: taskExample.id, state: 'queued' } } } }, '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Conflicting idempotency key' } } },
         get: { operationId: 'listTasks', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', description: 'Maximum number of recent tasks', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': { description: 'Recent tasks', content: { 'application/json': { schema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array', items: { $ref: '#/components/schemas/Task' } } } }, example: { tasks: [taskExample] } } } } } }
       },
-      '/api/v1/sessions': { get: { operationId: 'listSessions', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Caller sessions', z.object({ sessions: z.array(SessionSchema) })) } }, post: { operationId: 'openSession', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(SessionOpen) } } }, responses: { '200': jsonResponse('Existing or new session', SessionSchema) } } },
+      '/api/v1/missions': { post: { operationId: 'submitMission', description: 'Accept a team mission as a durable task in context mission. Tools come from mission.resources with the peer mission rule; mission tools (team_handoff, team_ask_user, team_propose_decision, artifact_write, development_note, document_render) need a tool:<name> resource. Memory reads use private scope plus one project:<id> grant. The task result is a TeamResult JSON document. The task streams on /api/v1/tasks/{id}/stream like any task.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(MissionSubmit) } } }, responses: { '202': jsonResponse('Accepted durable mission task', Accepted), '400': { description: 'Invalid mission, context items over 64 KiB, or deadline passed' }, '401': { description: 'Unauthorized' }, '404': { description: 'Session absent' }, '409': { description: 'Conflicting idempotency key' } } } },
+      '/api/v1/sessions': { get: { operationId: 'listSessions', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'context', description: 'Session context (default direct)', schema: { type: 'string', enum: ['direct', 'mission'] } }], responses: { '200': jsonResponse('Caller sessions', z.object({ sessions: z.array(SessionSchema) })) } }, post: { operationId: 'openSession', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(SessionOpen) } } }, responses: { '200': jsonResponse('Existing or new session', SessionSchema) } } },
       '/api/v1/sessions/{id}/messages': { get: { operationId: 'getSessionMessages', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': jsonResponse('Recent caller session messages', z.object({ messages: z.array(SessionMessageSchema) })), '404': { description: 'Session absent' } } } },
       '/api/v1/tasks/{id}': { get: { operationId: 'getTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Task status', content: { 'application/json': { schema: { $ref: '#/components/schemas/Task' }, example: taskExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/events': { get: { operationId: 'getTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', description: 'Return events with sequence greater than this cursor', schema: { type: 'integer', minimum: 0, default: 0 } }], responses: { '200': { description: 'Journal events after the supplied sequence cursor', content: { 'application/json': { schema: { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { $ref: '#/components/schemas/TaskEvent' } } } }, example: { events: [eventExample] } } } } } } },
       '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/cancel': { post: { operationId: 'cancelTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Cancellation requested' } } } },
+      '/api/v1/tasks/{id}/artifacts': { get: { operationId: 'listTaskArtifacts', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Current manifests of artifacts the task registered, oldest first', z.object({ artifacts: z.array(ArtifactRecordSchema) })), '404': { description: 'Task absent' } } } },
+      '/api/v1/artifacts/{sha256}/manifest': { get: { operationId: 'getArtifactManifest', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'sha256', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': jsonResponse('Newest current manifest registered for the digest', ArtifactRecordSchema), '404': { description: 'No current manifest' } } } },
       '/api/v1/artifacts/{id}': { get: { operationId: 'getArtifact', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Artifact bytes' }, '404': { description: 'Artifact absent' } } } },
       '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int() })) } } },
       '/api/v1/jobs/definitions/status': { get: { operationId: 'getJobDefinitionsStatus', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Active profile job definition revision, digest, and redacted window status' }, '503': { description: 'Job engine unavailable' } } } },
@@ -289,15 +303,27 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
         reason: error instanceof Error ? error.message.slice(0, 200) : 'HiveMem unavailable' });
     }
   });
-  app.get('/api/v1/sessions', c => c.json({ sessions: runtime.store.listSessions('management', 'direct') }));
+  app.get('/api/v1/sessions', c => c.json({ sessions: runtime.store.listSessions('management', SessionContext.parse(c.req.query('context') ?? 'direct')) }));
   app.post('/api/v1/sessions', async c => {
     const input = parseJson(await c.req.json() as unknown, SessionOpen);
-    return c.json(input.reset ? runtime.store.resetSession('management', 'direct', input.key) : runtime.store.session('management', 'direct', input.key));
+    const context = input.context ?? 'direct';
+    return c.json(input.reset ? runtime.store.resetSession('management', context, input.key) : runtime.store.session('management', context, input.key));
   });
   app.get('/api/v1/sessions/:id/messages', c => c.json({ messages: runtime.store.sessionMessages(c.req.param('id'), 'management') }));
   app.post('/api/v1/tasks', async c => {
     const input = parseJson(await c.req.json() as unknown, Submit);
     const task = runtime.accept(input.prompt, 'management', 'direct', input.idempotency_key, input.session_id);
+    if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
+    return c.json({ task_id: task.id, state: task.state }, 202);
+  });
+  app.post('/api/v1/missions', async c => {
+    const input = parseInput(await c.req.json() as unknown, MissionSubmit);
+    let task;
+    try { task = runtime.acceptMission(input, 'management'); }
+    catch (error: unknown) {
+      if (error instanceof Error && /Session caller or context mismatch/.test(error.message)) throw new Error('Invalid session: open it with context mission');
+      throw error;
+    }
     if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
     return c.json({ task_id: task.id, state: task.state }, 202);
   });
@@ -352,6 +378,16 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     });
   });
   app.post('/api/v1/tasks/:id/cancel', c => c.json(runtime.cancel(c.req.param('id'))));
+  app.get('/api/v1/tasks/:id/artifacts', c => {
+    const id = c.req.param('id');
+    if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
+    return c.json({ artifacts: runtime.artifactManifests.forTask(id) });
+  });
+  app.get('/api/v1/artifacts/:sha256/manifest', c => {
+    const record = runtime.artifactManifests.manifest(c.req.param('sha256'));
+    if (!record) return c.json({ error: { code: 'NOT_FOUND', message: 'Artifact manifest not found' } }, 404);
+    return c.json(record);
+  });
   app.get('/api/v1/artifacts/:id', async c => {
     try { return c.body(new Uint8Array(await runtime.artifacts.get(c.req.param('id'))), 200, { 'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); }
     catch { return c.json({ error: { code: 'NOT_FOUND', message: 'Artifact not found' } }, 404); }

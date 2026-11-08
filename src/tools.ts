@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { toJsonSchema } from './json-schema.js';
+import type { TaskContext } from './store.js';
 
-export type ToolContext = 'direct' | 'peer' | 'scheduled';
+/** A task context in which a tool may run. Mission tools run only in `mission`. */
+export type ToolContext = TaskContext;
 export type ToolEffect = 'read' | 'artifact-write' | 'memory-write' | 'external-write';
 /** Constructed only by first-party code after proving that an effect did not open. */
 export class ProvenNoEffectError extends Error {

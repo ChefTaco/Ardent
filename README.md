@@ -128,6 +128,7 @@ only the *names* of the environment variables that hold them.
 | `a2a` | disabled | See [A2A](#a2a). |
 | `channels.telegram`, `channels.mattermost` | disabled | See [Chat channels](#chat-channels). |
 | `integrations.magnus_control` | disabled | See [Magnus Control tools](#magnus-control-tools). |
+| `artifacts.max_bytes` | `2097152` (2 MiB) | Largest artifact a task may store, up to 64 MiB. See [Team missions](#team-missions). |
 | `plugins` | `[]` | See [Plugins](#plugins). |
 | `api` | `127.0.0.1:9910`, `ARDENT_API_TOKEN` | Management listener and the env var holding its bearer token. A non-loopback host is refused; put a TLS proxy in front instead. |
 
@@ -278,6 +279,61 @@ Live text works the same for every backend and caller:
 - Codex sends its answer as one piece when the turn completes.
 
 `ardent chat` uses the same rule to print replies as they arrive.
+
+### Team missions
+
+`POST /api/v1/missions` runs a team mission locally, for a coordinator such as
+a project studio. It is accepted like a task (`202 {task_id, state}`) and
+streams on `/api/v1/tasks/{id}/stream` like any task.
+
+```json
+{
+  "objective": "Draft the opening scene",
+  "mission": { "id": "scene-1", "revision": 1, "parent_task": null, "constraints": [],
+    "allowed_actions": ["observe", "analyze", "create_artifact"],
+    "resources": ["project:adventure", "tool:artifact_write", "tool:team_handoff"],
+    "deadline": 1893456000, "acceptance_criteria": ["The scene is saved"], "expected_artifacts": [] },
+  "context_items": [{ "title": "Brief", "mime": "text/markdown", "text": "..." }],
+  "labels": { "project": "adventure" },
+  "session_id": "<a session opened with context: mission>",
+  "idempotency_key": "scene-1-turn-1"
+}
+```
+
+- `mission` is the A2A team mission shape. The task runs in context `mission`,
+  and its tools follow the peer mission rule: `resources` grant tools, never
+  the model.
+- The objective is at most 16,000 characters; `context_items` together at most
+  64 KiB. Context items reach the model as tool data, so the context fitter can
+  shorten them; the full text stays in the task journal.
+- Memory reads use the agent's private scope plus one `project:<id>` grant.
+  Missions never write memory.
+- A session for a mission is opened with `POST /api/v1/sessions`
+  `{key, context: "mission"}`.
+- The task result is a `TeamResult` JSON document. A prose reply becomes a
+  `partial` result with the reply as `summary`; a reply carrying a
+  `team_result` is checked against the mission and the observed artifacts.
+
+Mission tools are granted with `tool:<name>` resources. The coordination
+tools only record a journal event; Ardent never acts on them itself:
+
+| Tool | Journal event | Notes |
+|---|---|---|
+| `team_handoff {to_role, objective, deliverables?, note?}` | `team_handoff` | Asks the coordinator to give work to another role |
+| `team_ask_user {question, options?}` | `team_ask_user` | Ends the turn; the result is `input_required` with a clarification |
+| `team_propose_decision {title, statement, rationale?}` | `team_propose_decision` | A proposal; only the user decides |
+| `artifact_write {name, mime, text \| base64 \| workspace_path, revises_sha256?}` | `artifact_registered` | Markdown, text, JSON, CSV, SVG, PNG, JPEG, WebP, PDF or DOCX, up to `artifacts.max_bytes`. `workspace_path` reads a file inside the profile's `workspace` |
+| `document_render {source_markdown, format: pdf \| docx, name}` | `artifact_registered` | Markdown (with ` ```svg ` figures) to PDF. DOCX is not available in this build |
+| `development_note {kind, title, body, sources?}` | `development_note` | Also available in direct tasks; see below |
+
+Every registered artifact has an immutable manifest (digest, size, media type,
+revision, provenance and the artifact it supersedes). `revises_sha256` makes
+a new artifact a revision of an earlier one. `GET /api/v1/tasks/{id}/artifacts`
+lists a task's manifests and `GET /api/v1/artifacts/{sha256}/manifest` returns
+the newest manifest for a digest; the bytes stay at `GET /api/v1/artifacts/{id}`.
+
+`development_note` stores an append-only development record: the agent's own
+note about how it works (`epistemic: agent_reported`).
 
 ## Plugins
 

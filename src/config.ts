@@ -66,6 +66,8 @@ export const ConfigSchema = z.object({
     /** Optional read-only Magnus Control tools. URL and token come only from config or the environment. */
     magnus_control: z.object({ enabled: z.boolean().default(false), base_url: urlReference.default('${ARDENT_MAGNUS_API_URL}'), token_env: z.string().regex(envName).default('ARDENT_MAGNUS_READ_TOKEN') }).strict().default(magnusControlDefault)
   }).strict().default({ magnus_control: magnusControlDefault }),
+  /** Artifact store limits. `max_bytes` bounds each stored artifact (default 2 MiB, at most 64 MiB). */
+  artifacts: z.object({ max_bytes: z.number().int().min(1024).max(64 * 1024 * 1024).default(2 * 1024 * 1024) }).strict().default({ max_bytes: 2 * 1024 * 1024 }),
   /** Plugin modules loaded by the gateway (npm package names, absolute paths, or file:// URLs). */
   plugins: z.array(pluginSpecifier).max(32).default([]),
   api: z.object({ host: z.string().min(1).default('127.0.0.1'), port: z.number().int().min(1).max(65535).default(9910), token_env: z.string().regex(envName).default('ARDENT_API_TOKEN') }).strict().default({ host: '127.0.0.1', port: 9910, token_env: 'ARDENT_API_TOKEN' })
