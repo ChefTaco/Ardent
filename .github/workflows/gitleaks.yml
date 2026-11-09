@@ -1,0 +1,27 @@
+name: Gitleaks
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-verified Gitleaks
+        run: bash scripts/install-gitleaks.sh
+      - name: Verify secret detection and hook boundaries
+        run: bash scripts/test-gitleaks.sh
+      - name: Scan complete reachable history
+        run: bash scripts/gitleaks.sh --history

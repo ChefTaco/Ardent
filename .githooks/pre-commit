@@ -4,3 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 bash "$ROOT_DIR/scripts/check-private-data.sh" --staged
 bash "$ROOT_DIR/scripts/scan-secrets.sh"
+
+# Check exact index bytes as well as the existing privacy policy.
+bash "$(git rev-parse --show-toplevel)/scripts/gitleaks.sh" --staged

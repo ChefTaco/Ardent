@@ -3,6 +3,10 @@
 set -euo pipefail
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 bash "$ROOT_DIR/scripts/check-private-data.sh"
+GITLEAKS_PUSH_INPUT="$(mktemp)"
+trap 'rm -f "$GITLEAKS_PUSH_INPUT"' EXIT
+cat > "$GITLEAKS_PUSH_INPUT"
+bash "$ROOT_DIR/scripts/gitleaks.sh" --pre-push < "$GITLEAKS_PUSH_INPUT"
 zero=0000000000000000000000000000000000000000
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   [[ "$local_sha" == "$zero" ]] && continue
@@ -11,4 +15,4 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   git log --format='%B' "$range" > "$msg_file"
   bash "$ROOT_DIR/scripts/check-private-data.sh" --message "$msg_file" || { rm -f "$msg_file"; exit 1; }
   rm -f "$msg_file"
-done
+done < "$GITLEAKS_PUSH_INPUT"
