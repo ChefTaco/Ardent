@@ -1,6 +1,6 @@
 {
   "name": "@hivemagnus/ardent",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Headless TypeScript agent runtime with A2A, scheduled jobs, skills, chat channels, and a plugin API",
   "keywords": [
     "agent",
@@ -73,7 +73,7 @@
     "@a2a-js/sdk": "1.3.0",
     "@bufbuild/protobuf": "2.16.0",
     "@grpc/grpc-js": "1.14.7",
-    "@hivemagnus/canvas-word-codec": "1.0.0",
+    "@hivemagnus/canvas-word-codec": "1.1.0",
     "@hivemagnus/emberfold": "0.1.0",
     "@hono/node-server": "^2.1.5",
     "better-sqlite3": "^13.0.3",
