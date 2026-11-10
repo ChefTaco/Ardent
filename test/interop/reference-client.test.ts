@@ -42,7 +42,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-describe('Assistant child claim against accepted Hermes root coordination', () => {
+describe('Assistant child claim against independent root coordination', () => {
   it('claims the exact read-only budget and settles a retained native receipt without replay', async () => {
     const python = process.env.ARDENT_A2A_PYTHON;
     const hermes = process.env.ARDENT_HERMES_SOURCE;
@@ -56,9 +56,8 @@ describe('Assistant child claim against accepted Hermes root coordination', () =
     const home = await mkdtemp(join(tmpdir(), 'ardent-hermes-root-'));
     const dir = await mkdtemp(join(tmpdir(), 'ardent-hermes-child-'));
     dirs.push(home, dir);
-    const teamTests = join(import.meta.dirname, '../../../../services/control-api/hermes/plugins/hermes-team/tests');
     const fixture = spawn(python, [join(import.meta.dirname, '../fixtures/hermes-team-root-server.py'), String(port), home],
-      { env: { ...process.env, PYTHONPATH: `${hermes}:${teamTests}` }, stdio: ['ignore', 'pipe', 'pipe'] });
+      { env: { ...process.env, PYTHONPATH: hermes }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     fixture.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
     try {
@@ -209,6 +208,10 @@ describe('independent Python A2A 1.0 client against Ardent server', () => {
     config.research.searxng_url = `http://127.0.0.1:${modelAddress.port}/`;
     config.research.firecrawl_url = `http://127.0.0.1:${modelAddress.port}/`;
     config.a2a.public_url = `http://127.0.0.1:${port}`;
+    config.a2a.hermes_compat = true;
+    // This functional probe shares one peer across three bindings and lifecycle cases.
+    // Default throttling is independently verified in a2a-rate-limit.test.ts.
+    Object.assign(config.a2a.rate_limit, { ip_burst: 2000, peer_burst: 2000 });
     const token = 'reference-token-1234567890';
     const coordinatorToken = 'coordinator-token-1234567890';
     const runtime = new ArdentRuntime(dir, config, { REFERENCE_TOKEN: token, COORDINATOR_TOKEN: coordinatorToken });
@@ -275,16 +278,15 @@ describe('independent Python A2A 1.0 client against Ardent server', () => {
       expect(hermesResult.reply).toContain('REFERENCE_OK');
       expect(hermesResult.context_id).toBeTruthy();
       expect(hermesResult.state).toBe('TASK_STATE_COMPLETED');
-      const teamContracts = join(import.meta.dirname, '../../../../services/control-api/hermes/plugins/hermes-team');
-      const hermesTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken, teamContracts], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-team-home') } });
+      const hermesTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-team-home') } });
       const teamResult = JSON.parse(hermesTeam.stdout) as { task_id: string; state: string; outcome: string };
       expect(teamResult.task_id).toBeTruthy();
       expect(teamResult.state).toBe('TASK_STATE_COMPLETED');
       expect(teamResult.outcome).toBe('partial');
-      const lifecycleTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken, teamContracts, 'lifecycle'], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-lifecycle-home') } });
+      const lifecycleTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken, 'lifecycle'], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-lifecycle-home') } });
       const lifecycle = JSON.parse(lifecycleTeam.stdout) as { lifecycle: boolean; active_cancel: boolean; outcome: string };
       expect(lifecycle).toMatchObject({ lifecycle: true, active_cancel: true, outcome: 'cancelled' });
-      const goldenTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken, teamContracts, 'golden'], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-golden-home') } });
+      const goldenTeam = await exec(python, [join(import.meta.dirname, '../fixtures/hermes-team-client.py'), `http://127.0.0.1:${port}`, coordinatorToken, 'golden'], { timeout: 30000, env: { ...process.env, PYTHONPATH: hermes, HERMES_HOME: join(dir, 'hermes-golden-home') } });
       const golden = JSON.parse(goldenTeam.stdout) as { state: string; outcome: string; clarified: boolean; artifacts: number; attributed: boolean };
       expect(golden).toMatchObject({ state: 'TASK_STATE_COMPLETED', outcome: 'completed', clarified: true, attributed: true });
       expect(golden.artifacts).toBeGreaterThanOrEqual(2);
@@ -293,6 +295,8 @@ describe('independent Python A2A 1.0 client against Ardent server', () => {
       expect(goldenExtractions).toBeGreaterThanOrEqual(1);
     } finally {
       surface.grpcServer.forceShutdown();
+      await runtime.drain(1000);
+      await surface.pushSender.drain();
       runtime.close();
     }
   }, 120000);

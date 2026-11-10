@@ -1,38 +1,28 @@
-"""Use the accepted Hermes team contract and pinned Hermes wire client against Ardent."""
+"""Use independent team contracts and the pinned Hermes wire client against Ardent."""
 
-import importlib.util
 import json
 import sys
 import time
 import uuid
-from pathlib import Path
 from urllib.request import Request, urlopen
 
 from plugins.platforms.a2a import protocol
-
-
-def load_module(path: str, name: str):
-    spec = importlib.util.spec_from_file_location("accepted_hermes_team_" + name, Path(path) / (name + ".py"))
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+import team_reference as contracts
+from team_reference import validate_ardent_card, lifecycle_call
 
 
 def main() -> None:
-    url, token, contract_path = sys.argv[1:4]
-    mode = sys.argv[4] if len(sys.argv) > 4 else "result"
+    url, token = sys.argv[1:3]
+    mode = sys.argv[3] if len(sys.argv) > 3 else "result"
     golden = mode == "golden"
     lifecycle = mode == "lifecycle"
-    contracts = load_module(contract_path, "contracts")
-    capabilities = load_module(contract_path, "capabilities")
     card_request = Request(url.rstrip("/") + "/.well-known/hermes-team-card.json", headers={"Authorization": "Bearer " + token})
     with urlopen(card_request, timeout=10) as response:
         card = json.load(response)
     meta = card["metadata"]["hermesTeam"]
-    capabilities.validate_ardent_card(card, authenticated=True, source_digest=meta["sourceDigest"], task_policy_digest=meta["taskPolicyDigest"])
+    validate_ardent_card(card, authenticated=True, source_digest=meta["sourceDigest"], task_policy_digest=meta["taskPolicyDigest"])
     try:
-        capabilities.validate_ardent_card(card, authenticated=True, source_digest="0" * 64, task_policy_digest=meta["taskPolicyDigest"])
+        validate_ardent_card(card, authenticated=True, source_digest="0" * 64, task_policy_digest=meta["taskPolicyDigest"])
     except ValueError:
         pass
     else:
@@ -129,13 +119,6 @@ def main() -> None:
         assert any(part.get("data") for artifact in finished["artifacts"] for part in artifact["parts"]), finished
         print(json.dumps({"task_id": task["id"], "state": finished["status"]["state"], "outcome": final["outcome"], "clarified": True, "artifacts": len(final["artifacts"]), "attributed": True}))
         return
-    package_spec = importlib.util.spec_from_file_location("ardent_team_under_test", Path(contract_path) / "__init__.py", submodule_search_locations=[contract_path])
-    assert package_spec and package_spec.loader
-    package = importlib.util.module_from_spec(package_spec)
-    sys.modules[package_spec.name] = package
-    package_spec.loader.exec_module(package)
-    from ardent_team_under_test import capabilities as accepted_capabilities, coordination, team as accepted_team
-
     def request_local(_home, _peer, method, params):
         wire_request = Request(url.rstrip("/") + "/", data=json.dumps({"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": method, "params": params}).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
         with urlopen(wire_request, timeout=20) as wire:
@@ -144,42 +127,36 @@ def main() -> None:
             raise RuntimeError(value["error"])
         return protocol.unwrap_send_message_response(value["result"])
 
-    original_config, original_request = accepted_team.config, accepted_team.request
-    original_discover = accepted_capabilities.discover_peer
-    try:
-        accepted_team.config = lambda _home: {"peers": {"assistant": {"runtime_kind": "ardent"}}}
-        accepted_team.request = request_local
-        accepted_capabilities.discover_peer = lambda _home, _peer, **kwargs: card if kwargs.get("coordination_version") is None else (_ for _ in ()).throw(AssertionError("Ardent lifecycle used generic coordination"))
-        events = coordination.call(None, "task_events", {"native_task_id": task["id"], "after_cursor": 0, "limit": 50}, key="events-" + task["id"], coordinator="assistant")
-        assert events["native_task_id"] == task["id"] and events["task_id"] == message_id and events["events"]
-        actions = ("pause", "resume", "cancel") if lifecycle else ("pause", "resume")
-        for version, action in enumerate(actions, 1):
-            payload = {"native_task_id": task["id"], "task_id": message_id, "mission_revision": 1, "control_id": action + "-" + task["id"], "control_version": version, "action": action}
-            receipt = coordination.call(None, "task_control", payload, key=action + "-" + task["id"], coordinator="assistant")
-            assert receipt["control_version"] == version and receipt["admission"] == {"pause": "paused", "resume": "open", "cancel": "cancel_requested"}[action]
-            assert coordination.call(None, "task_control", payload, key=action + "-" + task["id"], coordinator="assistant") == receipt
-            if action == "pause":
-                assert coordination.call(None, "task_events", {"native_task_id": task["id"], "after_cursor": events["next_cursor"], "limit": 50}, key="events-after-pause-" + task["id"], coordinator="assistant")["events"]
-        if lifecycle:
-            assert receipt["admission"] == "cancel_requested" and receipt["delivery"] == "acknowledged"
-            time.sleep(0.25)
-            get = request_local(None, "assistant", "GetTask", {"id": task["id"]})
-            assert get["status"]["state"] != "TASK_STATE_COMPLETED", get
-            deadline_message_id = "team-deadline-" + uuid.uuid4().hex
-            deadline_objective = "CANCEL_HOLD finite mission budget boundary"
-            deadline_mission = {**mission, "id": "mission-deadline-" + uuid.uuid4().hex, "deadline": int(time.time()) + 2}
-            deadline_envelope = contracts.build_envelope(deadline_mission, "coordinator", deadline_message_id, deadline_objective)
-            deadline_body = {"jsonrpc": "2.0", "id": deadline_message_id, "method": "SendStreamingMessage", "params": {
-                "message": {"messageId": deadline_message_id, "contextId": "ctx-" + uuid.uuid4().hex, "role": "ROLE_USER",
-                            "parts": [{"text": deadline_objective}], "metadata": {contracts.METADATA_KEY: deadline_envelope, contracts.CLARIFICATION_KEY: "1.0"}},
-                "configuration": {"blocking": False}}}
-            expiring = streaming_task(deadline_body)
-            time.sleep(2.5)
-            expired = request_local(None, "assistant", "GetTask", {"id": expiring["id"]})
-            assert expired["status"]["state"] in {"TASK_STATE_FAILED", "TASK_STATE_CANCELED"}, expired
-    finally:
-        accepted_team.config, accepted_team.request = original_config, original_request
-        accepted_capabilities.discover_peer = original_discover
+    def call(action, payload, key):
+        return lifecycle_call(request_local, action, payload, key)
+
+    events = call("task_events", {"native_task_id": task["id"], "after_cursor": 0, "limit": 50}, key="events-" + task["id"])
+    assert events["native_task_id"] == task["id"] and events["task_id"] == message_id and events["events"]
+    actions = ("pause", "resume", "cancel") if lifecycle else ("pause", "resume")
+    for version, action in enumerate(actions, 1):
+        payload = {"native_task_id": task["id"], "task_id": message_id, "mission_revision": 1, "control_id": action + "-" + task["id"], "control_version": version, "action": action}
+        receipt = call("task_control", payload, key=action + "-" + task["id"])
+        assert receipt["control_version"] == version and receipt["admission"] == {"pause": "paused", "resume": "open", "cancel": "cancel_requested"}[action]
+        assert call("task_control", payload, key=action + "-" + task["id"]) == receipt
+        if action == "pause":
+            assert call("task_events", {"native_task_id": task["id"], "after_cursor": events["next_cursor"], "limit": 50}, key="events-after-pause-" + task["id"])["events"]
+    if lifecycle:
+        assert receipt["admission"] == "cancel_requested" and receipt["delivery"] == "acknowledged"
+        time.sleep(0.25)
+        get = request_local(None, "assistant", "GetTask", {"id": task["id"]})
+        assert get["status"]["state"] != "TASK_STATE_COMPLETED", get
+        deadline_message_id = "team-deadline-" + uuid.uuid4().hex
+        deadline_objective = "CANCEL_HOLD finite mission budget boundary"
+        deadline_mission = {**mission, "id": "mission-deadline-" + uuid.uuid4().hex, "deadline": int(time.time()) + 2}
+        deadline_envelope = contracts.build_envelope(deadline_mission, "coordinator", deadline_message_id, deadline_objective)
+        deadline_body = {"jsonrpc": "2.0", "id": deadline_message_id, "method": "SendStreamingMessage", "params": {
+            "message": {"messageId": deadline_message_id, "contextId": "ctx-" + uuid.uuid4().hex, "role": "ROLE_USER",
+                        "parts": [{"text": deadline_objective}], "metadata": {contracts.METADATA_KEY: deadline_envelope, contracts.CLARIFICATION_KEY: "1.0"}},
+            "configuration": {"blocking": False}}}
+        expiring = streaming_task(deadline_body)
+        time.sleep(2.5)
+        expired = request_local(None, "assistant", "GetTask", {"id": expiring["id"]})
+        assert expired["status"]["state"] in {"TASK_STATE_FAILED", "TASK_STATE_CANCELED"}, expired
     print(json.dumps({"task_id": task["id"], "state": task["status"]["state"], "outcome": "cancelled" if lifecycle else result["outcome"], "lifecycle": True, "active_cancel": lifecycle}))
 
 
