@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants, existsSync, mkdirSync } from 'node:fs';
 import { open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import type Database from 'better-sqlite3';
+import type Database from './sqlite.js';
 import { z } from 'zod';
 
 const identifier = z.string().regex(/^[a-z][a-z0-9._-]{0,79}$/);
@@ -139,7 +139,7 @@ export class JobEngine {
   #lastActive: { revision: number; sha256: string } | null = null;
   #busy = false;
   /** `clock` measures elapsed time within a tick; the injected tick time stays the timeline origin. */
-  constructor(readonly db: Database.Database, readonly profileDir: string, readonly profile: string,
+  constructor(readonly db: Database, readonly profileDir: string, readonly profile: string,
     readonly registry: JobRegistry, readonly ownershipCheck: OwnershipCheck, readonly clock: () => number = () => Date.now()) {
     identifier.parse(profile);
     mkdirSync(join(profileDir, 'state', 'job-definition-releases'), { recursive: true, mode: 0o700 });

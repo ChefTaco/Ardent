@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import type Database from 'better-sqlite3';
+import type Database from './sqlite.js';
 import { StreamResponse as StreamCodec, TaskPushNotificationConfig as PushCodec, type StreamResponse, type Task, type TaskPushNotificationConfig } from '@a2a-js/sdk';
 import { RequestMalformedError } from '@a2a-js/sdk/errors';
 import type { PushNotificationSender, PushNotificationStore, ServerCallContext, StoredPushNotificationConfig } from '@a2a-js/sdk/server';
@@ -32,7 +32,7 @@ function validatedUrl(raw: string, peer: PeerConfig): string {
 }
 
 export class SqliteA2APushStore implements PushNotificationStore {
-  constructor(readonly db: Database.Database, readonly peers: PeerConfig[]) {
+  constructor(readonly db: Database, readonly peers: PeerConfig[]) {
     db.exec(`CREATE TABLE IF NOT EXISTS a2a_push_configs (
       task_id TEXT NOT NULL, tenant TEXT NOT NULL, caller TEXT NOT NULL, id TEXT NOT NULL,
       config_json TEXT NOT NULL, wire_version TEXT NOT NULL, created_ms INTEGER NOT NULL,

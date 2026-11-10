@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.0 - 2026-11-10
+
+### Changed
+
+- Replace better-sqlite3 with pinned Node-API SQLite 3.54.1. Reject affected or unverifiable embedded versions independently of npm/image scanner coverage. Preserve profile files, transactional journals, rollback and backups.
+- The low-level `TaskStore.db` type now exposes the application storage boundary; callers of driver-specific methods need to migrate. The management API, CLI and plugin hooks remain compatible.
+- Check the real installed native engine, legacy-file preservation, read-only access, FTS5 transactions and atomic existing-file opens during acceptance.
+
 ## 2.3.1 - 2026-11-10
 
 ### Changed

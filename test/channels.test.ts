@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
+import Database from '../src/sqlite.js';
 import { loadConfig } from '../src/config.js';
 import { initTestProfile } from './helpers.js';
 import { ArdentRuntime } from '../src/runtime.js';

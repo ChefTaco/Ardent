@@ -45,8 +45,14 @@ isolated provider acceptance, and verifies an actual old-runtime rollback.
 
 ## Install
 
-Ardent needs Node.js 24.22.1+ or 26.13.0+ (`better-sqlite3` is a native
-dependency).
+Ardent needs Node.js 24.22.1+ or 26.13.0+. Its pinned `@photostructure/sqlite`
+driver bundles SQLite 3.54.1 and stable Node-API binaries for supported x64/arm64
+platforms. Existing profile databases keep their format and journal history.
+Node.js 26 is recommended for its patched built-in libraries.
+
+Version 3 replaces the low-level `TaskStore.db` driver surface with the application's
+storage boundary. Code that used better-sqlite3-specific methods must migrate;
+the management API, CLI and plugin hooks retain their existing contracts.
 
 ```bash
 npm i -g @hivemagnus/ardent
