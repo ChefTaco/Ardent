@@ -486,3 +486,19 @@ See [AGENTS.md](AGENTS.md) for contributor guidance.
 
 Apache-2.0. The vendored A2A protocol definition in `protocol/` carries its own
 license, [`protocol/LICENSE-A2A.txt`](protocol/LICENSE-A2A.txt).
+
+### Interoperability checks
+
+Run `npm run interop` from this standalone checkout. The runner installs pinned
+Python A2A SDKs and checks out an exact public Hermes revision in an ignored
+cache; Python is used only for these tests. Both supported Node versions run
+this suite in CI.
+
+The suite exercises the real Python SDK and Hermes wire adapter in both
+client/server directions. Team missions, lifecycle and child-budget transactions
+use independent Python reference peers in `test/fixtures/team_reference.py`.
+They implement the published Ardent wire contract; they do not load an external
+Hermes team plugin or require a sibling Magnus checkout. The compatibility probe
+explicitly enables `hermes_compat` and allows its combined functional workload
+through the fixture's rate buckets. Default throttling remains covered by the
+separate rate-limit tests.

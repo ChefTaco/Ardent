@@ -50,4 +50,5 @@ if (!process.env.ARDENT_HERMES_SOURCE) {
     run('git', ['checkout', '--detach', hermesRevision], { cwd: hermesSource });
   }
 }
+run(python, ['-m', 'unittest', 'discover', '-s', join(packageDir, 'test/fixtures'), '-p', 'team_reference_test.py']);
 run('npm', ['run', 'interop:test'], { cwd: packageDir, env: { ...process.env, ARDENT_A2A_PYTHON: python, ARDENT_A2A_PYTHON_V03: legacyPython, ARDENT_HERMES_SOURCE: hermesSource } });

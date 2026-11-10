@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Make the A2A interoperability suite self-contained with independent transactional
+  team reference peers, explicit Hermes compatibility and graceful fixture cleanup.
+  Run all five scenarios in CI on both supported Node versions.
+
 ## 2.3.0 - 2026-11-08
 
 ### Added
