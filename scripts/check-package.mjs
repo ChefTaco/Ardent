@@ -36,7 +36,7 @@ try {
   const sourcePackage = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   if (packageJson.name !== sourcePackage.name || packageJson.version !== sourcePackage.version)
     throw new Error('Installed package identity differs');
-  await run(process.execPath, ['-e', "const Database=require(process.argv[1]);new Database(':memory:').close()", join(install, 'node_modules/better-sqlite3')]);
+  await run(process.execPath, ['-e', "const {DatabaseSync}=require(process.argv[1]);const db=new DatabaseSync(':memory:');if(db.prepare('select sqlite_version() v').get().v!=='3.54.1')throw Error('Unexpected embedded SQLite');db.close()", join(install, 'node_modules/@photostructure/sqlite')]);
   const env = { ...process.env, ARDENT_HOME: join(temporary, 'home') };
   const cli = join(packageDir, 'dist/cli.js');
   const initialized = JSON.parse(await run(process.execPath, [cli, 'init', '--profile', 'assistant', '--non-interactive'], { env }));

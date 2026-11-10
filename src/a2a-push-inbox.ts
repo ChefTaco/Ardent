@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import type Database from 'better-sqlite3';
+import type Database from './sqlite.js';
 import { StreamResponse as StreamCodec, type StreamResponse } from '@a2a-js/sdk';
 import { z } from 'zod';
 import type { PeerConfig } from './a2a-peers.js';
@@ -10,7 +10,7 @@ const EventRow = z.object({ event_json: z.string() });
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 
 export class A2APushInbox {
-  constructor(readonly db: Database.Database, readonly peers: PeerConfig[], readonly publicUrl: string) {
+  constructor(readonly db: Database, readonly peers: PeerConfig[], readonly publicUrl: string) {
     db.exec(`CREATE TABLE IF NOT EXISTS a2a_outbound_calls (
       id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, message_id TEXT NOT NULL, task_id TEXT,
       token_hash TEXT NOT NULL UNIQUE, state TEXT NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);

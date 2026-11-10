@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Message, TaskState, type SendMessageRequest, type StreamResponse, type Task } from '@a2a-js/sdk';
 import { RequestMalformedError, UnsupportedOperationError } from '@a2a-js/sdk/errors';
 import { DefaultRequestHandler, type ServerCallContext } from '@a2a-js/sdk/server';
-import type Database from 'better-sqlite3';
+import type Database from './sqlite.js';
 import { z } from 'zod';
 import type { PeerTaskGate } from './a2a-rate-limit.js';
 import type { SqliteA2ATaskStore } from './a2a-store.js';
@@ -12,7 +12,7 @@ const terminal = new Set([TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_F
 
 /** Binds transport retries to the original task before invoking the executor. */
 export class IdempotentA2AHandler extends DefaultRequestHandler {
-  constructor(readonly db: Database.Database, readonly durableStore: SqliteA2ATaskStore, readonly taskGate: PeerTaskGate,
+  constructor(readonly db: Database, readonly durableStore: SqliteA2ATaskStore, readonly taskGate: PeerTaskGate,
     ...args: ConstructorParameters<typeof DefaultRequestHandler>) {
     super(...args);
   }

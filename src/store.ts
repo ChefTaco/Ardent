@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import Database from 'better-sqlite3';
+import Database from './sqlite.js';
 import { z } from 'zod';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
@@ -19,7 +19,7 @@ export const EventSchema = z.object({ sequence: z.number().int(), task_id: z.str
 export type TaskEvent = z.infer<typeof EventSchema>;
 
 export class TaskStore {
-  readonly db: Database.Database;
+  readonly db: Database;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path);

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import Database from 'better-sqlite3';
+import { Database } from './sqlite.js';
 import { parse } from 'dotenv';
 import { z } from 'zod';
 import { ContextCheckpoints, type CompactionCall } from './context-checkpoints.js';
@@ -24,7 +24,7 @@ const snapshotSchema = z.object({ tables: z.array(z.object({ table: tableName,
 export type ContextSnapshot = z.infer<typeof snapshotSchema>;
 const previousReaderSchema = z.object({ ContextCheckpoints: z.custom<typeof ContextCheckpoints>(value => typeof value === 'function') });
 
-function rowsDigest(database: Database.Database, table: string, watermark: number, unknownOnly: boolean) {
+function rowsDigest(database: Database, table: string, watermark: number, unknownOnly: boolean) {
   tableName.parse(table);
   const hash = createHash('sha256');
   let count = 0;
@@ -34,7 +34,7 @@ function rowsDigest(database: Database.Database, table: string, watermark: numbe
   return { count, sha256: hash.digest('hex') };
 }
 
-export function snapshotContext(database: Database.Database): ContextSnapshot {
+export function snapshotContext(database: Database): ContextSnapshot {
   if (database.pragma('quick_check', { simple: true }) !== 'ok') throw new Error('Profile database integrity check failed');
   const tables: ContextSnapshot['tables'] = [];
   const names = z.array(z.object({ name: tableName })).parse(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all());
@@ -49,14 +49,14 @@ export function snapshotContext(database: Database.Database): ContextSnapshot {
   return { tables };
 }
 
-export function verifyContextSnapshot(database: Database.Database, input: unknown): void {
+export function verifyContextSnapshot(database: Database, input: unknown): void {
   for (const snapshot of snapshotSchema.parse(input).tables) {
     const actual = rowsDigest(database, snapshot.table, snapshot.watermark, snapshot.unknown_only);
     if (actual.count !== snapshot.count || actual.sha256 !== snapshot.sha256) throw new Error('Original sources, journal events, or uncertain effects changed');
   }
 }
 
-export function assertContextIdle(database: Database.Database): void {
+export function assertContextIdle(database: Database): void {
   const { count } = z.object({ count: z.number().int() }).parse(database.prepare("SELECT count(*) AS count FROM tasks WHERE state IN ('queued','running','input_required')").get());
   if (count) throw new Error('Profile has unfinished tasks; no maintenance is permitted');
   if (database.prepare('SELECT 1 FROM admission_fence LIMIT 1').get()) throw new Error('An existing one-way profile admission fence must remain intact');

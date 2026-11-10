@@ -21,7 +21,7 @@ import { CodexAppServer, assertCodexProtocol, compactWithCodex } from './codex.j
 import { LlamaCppBackend } from './llamacpp.js';
 import { toJsonSchema } from './json-schema.js';
 import { hermesTeamCard } from './hermes-compat.js';
-import Database from 'better-sqlite3';
+import Database from './sqlite.js';
 import { JobEngine, validateJobDefinitions } from './job-engine.js';
 import { composeOwnershipChecks } from './job-ownership.js';
 import { BUILTIN_JOB_VALIDATION_REGISTRY, builtinJobHandlers } from './job-news-handlers.js';

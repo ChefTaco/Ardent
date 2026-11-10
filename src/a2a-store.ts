@@ -1,6 +1,6 @@
 import { Task as TaskCodec, TaskState, type ListTasksRequest, type ListTasksResponse, type Task } from '@a2a-js/sdk';
 import type { ServerCallContext, TaskStore as A2ATaskStore } from '@a2a-js/sdk/server';
-import type Database from 'better-sqlite3';
+import type Database from './sqlite.js';
 import { z } from 'zod';
 
 const StoredTask = z.object({ id: z.string().min(1), contextId: z.string(), status: z.object({ state: z.string(), timestamp: z.string().optional() }).nullable().optional(), artifacts: z.array(z.unknown()).optional(), history: z.array(z.unknown()).optional() }).passthrough();
@@ -20,7 +20,7 @@ function readTask(json: string): Task {
 }
 
 export class SqliteA2ATaskStore implements A2ATaskStore {
-  constructor(readonly db: Database.Database) {
+  constructor(readonly db: Database) {
     db.exec(`CREATE TABLE IF NOT EXISTS a2a_tasks (
       id TEXT PRIMARY KEY, tenant TEXT NOT NULL, caller TEXT NOT NULL,
       context_id TEXT NOT NULL, status TEXT NOT NULL, status_timestamp TEXT NOT NULL,

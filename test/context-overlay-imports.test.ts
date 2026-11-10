@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 // Magnus adopts newer context maintenance onto an installed older runtime by overlaying these
 // modules; they then load that runtime's own base modules. Those base modules must only be asked
 // for exports that every supported release already has.
-const overlay = ['src/context.ts', 'src/context-checkpoints.ts', 'src/context-maintenance.ts'];
+const overlay = ['src/context.ts', 'src/context-checkpoints.ts', 'src/context-maintenance.ts', 'src/sqlite.ts'];
 const stableExports: Record<string, string[]> = {
   './store.js': ['TaskStore'],
   './config.js': ['loadConfig'],
