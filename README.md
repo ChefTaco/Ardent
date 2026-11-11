@@ -45,7 +45,7 @@ isolated provider acceptance, and verifies an actual old-runtime rollback.
 
 ## Install
 
-Ardent needs Node.js 24.22.1+ or 26.13.0+. Its pinned `@photostructure/sqlite`
+Ardent needs Node.js 24.22.3+ or 26.13.1+. Its pinned `@photostructure/sqlite`
 driver bundles SQLite 3.54.1 and stable Node-API binaries for supported x64/arm64
 platforms. Existing profile databases keep their format and journal history.
 Node.js 26 is recommended for its patched built-in libraries.

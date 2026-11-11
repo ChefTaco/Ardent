@@ -6,7 +6,7 @@ are all welcome.
 ## Getting set up
 
 ```bash
-npm ci                # Node.js 24.22.1+ or 26.13.0+
+npm ci                # Node.js 24.22.3+ or 26.13.1+
 npm run hooks:install # privacy and secret checks on commit and push
 npm run build
 ```
