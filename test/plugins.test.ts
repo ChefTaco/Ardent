@@ -287,6 +287,7 @@ describe('plugin API', () => {
     const management=new Hono().get('/api/v1/extension/status',c=>c.json({ok:true}));
     const ingress=new Hono().post('/hooks/fixture',async c=>{calls++;if(c.req.header('X-Fixture-Auth')!=='fixture-owner')return c.json({error:'Unauthorized'},401);return c.body(await c.req.arrayBuffer());});
     await runtime.usePlugins([{name:'ingress',httpRoutes:()=>[{security:'management',app:management},{security:'independent',app:ingress}]}],env);
+    vi.spyOn(Date,'now').mockReturnValue(Date.now());
     try{
       const app=createArdentApi(runtime,loaded,env);
       expect((await app.request('/api/v1/extension/status')).status).toBe(401);
@@ -296,9 +297,36 @@ describe('plugin API', () => {
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
       const before=calls;
       expect((await app.request('/hooks/fixture',{method:'POST',body:new Uint8Array(1_048_577)})).status).toBe(413);expect(calls).toBe(before);
-      for(let i=0;i<116;i++)await app.request('/hooks/fixture',{method:'POST'});
+      for(let i=0;i<117;i++)await app.request('/hooks/fixture',{method:'POST'});
       const limited=await app.request('/hooks/fixture',{method:'POST'});expect(limited.status).toBe(429);expect(limited.headers.get('Retry-After')).toBeTruthy();expect(limited.headers.get('Cache-Control')).toBe('no-store');
     }finally{runtime.close();}
+  });
+
+  it('supports a reviewed ingress burst without consuming management capacity',async()=>{
+    const dir=await temp();await initProfile(dir);const loaded=await loadConfig(dir),env={ARDENT_API_TOKEN:'fixture-management'};
+    const runtime=new ArdentRuntime(dir,loaded.config,env);vi.spyOn(Date,'now').mockReturnValue(Date.now());
+    const management=new Hono().get('/api/v1/capacity/status',c=>c.json({ok:true}));
+    const ingress=new Hono().post('/hooks/chunk',c=>c.req.header('X-Fixture-Auth')==='fixture-owner'?c.json({accepted:true}):c.json({error:'Unauthorized'},401));
+    await runtime.usePlugins([{name:'capacity',httpRoutes:()=>[{security:'management',app:management},{security:'independent',app:ingress,rateLimit:{perMinute:600,burst:200}}]}],env);
+    try{
+      const app=createArdentApi(runtime,loaded,env);
+      for(let i=0;i<200;i++)expect((await app.request('/hooks/chunk',{method:'POST',headers:{'X-Fixture-Auth':'fixture-owner'}})).status).toBe(200);
+      expect((await app.request('/hooks/chunk?burst=9999',{method:'POST',headers:{'X-Fixture-Auth':'fixture-owner'}})).status).toBe(429);
+      expect((await app.request('/api/v1/capacity/status')).status).toBe(401);
+      expect((await app.request('/api/v1/capacity/status',{headers:{Authorization:'Bearer fixture-management'}})).status).toBe(200);
+    }finally{runtime.close();}
+  });
+
+  it('rejects unbounded, fractional or conflicting ingress budgets before mounting handlers',async()=>{
+    const dir=await temp();await initProfile(dir);const loaded=await loadConfig(dir);
+    for(const budget of [{perMinute:0,burst:1},{perMinute:6001,burst:1},{perMinute:1,burst:1201},{perMinute:1,burst:1.5},{perMinute:NaN,burst:1},{perMinute:Infinity,burst:1},{perMinute:1,burst:1,unreviewed:true}]){
+      const runtime=new ArdentRuntime(dir,loaded.config,{});
+      await runtime.usePlugins([{name:'invalid',httpRoutes:()=>[{security:'independent',app:new Hono().get('/hooks/invalid',c=>c.text('unreachable')),rateLimit:budget}]}],{});
+      try{expect(()=>createArdentApi(runtime,loaded,{})).toThrow();}finally{runtime.close();}
+    }
+    const runtime=new ArdentRuntime(dir,loaded.config,{});
+    await runtime.usePlugins([{name:'conflicting',httpRoutes:()=>[{security:'independent',app:new Hono().get('/hooks/one',c=>c.text('unreachable')),rateLimit:{perMinute:600,burst:200}},{security:'independent',app:new Hono().get('/hooks/two',c=>c.text('unreachable'))}]}],{});
+    try{expect(()=>createArdentApi(runtime,loaded,{})).toThrow('Conflicting');}finally{runtime.close();}
   });
 
   it('refuses compatibility routes that shadow core handlers or cross authentication boundaries', async () => {
