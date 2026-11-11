@@ -19,7 +19,8 @@ import { fitModelMessages } from './context.js';
 import { ContextCheckpoints, tokenEstimate } from './context-checkpoints.js';
 import { loadModelPolicy } from './model-policy.js';
 import { BackendEventSchema, type BackendEventSink } from './backend-events.js';
-import { pluginContext, type ArdentPlugin } from './plugins.js';
+import { pluginContext, pluginTaskTools, pluginTeamEnvelope, type ArdentPlugin, type ArdentTaskPluginContext } from './plugins.js';
+import { pluginInputImages } from './plugin-inputs.js';
 import { LiveTextHub } from './live-text.js';
 import { ArtifactManifests } from './artifact-manifests.js';
 import { DevelopmentRecords } from './development.js';
@@ -31,7 +32,8 @@ import { compactToolArguments } from './tool-arguments.js';
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
 type SourceEvidence = { url: string; extracted: boolean; title: string; published_at: string | null; retrieved_at: string | null; content_sha256: string | null };
-type Evidence = { sourceIds: Set<string>; sources: Map<string, SourceEvidence>; artifactIds: Set<string>; researchAttempted: boolean };
+export type TaskEvidence = { sourceIds: Set<string>; sources: Map<string, SourceEvidence>; artifactIds: Set<string>; researchAttempted: boolean };
+type Evidence = TaskEvidence;
 type PendingRun = { task: Task; env: NodeJS.ProcessEnv; onText?: (chunk: string, step: number) => void; resolve: (result: RunResult) => void; reject: (error: Error) => void };
 
 function addSources(value: unknown, evidence: Evidence, extracted = false, retrievedAt?: string): void {
@@ -90,6 +92,14 @@ export class ArdentRuntime {
   get draining(): boolean { return this.#draining; }
   #skillsPromise?: Promise<SkillInfo[]>;
   #plugins: readonly ArdentPlugin[] = [];
+  #pluginsInstalled = false;
+  #gatewayPrepared = false;
+  #pluginsStarted = false;
+  readonly #taskContexts = new Map<string, ArdentTaskPluginContext>();
+  #pluginEnvironment: NodeJS.ProcessEnv = {};
+  #closing = false;
+  #closed = false;
+  #pluginsDrained = true;
   get plugins(): readonly ArdentPlugin[] { return this.#plugins; }
   constructor(readonly profileDir: string, readonly config: ArdentConfig, env: NodeJS.ProcessEnv = process.env) {
     this.store = new TaskStore(join(profileDir, 'state', 'ardent.sqlite'));
@@ -102,17 +112,54 @@ export class ArdentRuntime {
   }
   /** Install plugins once, before the runtime accepts work. Plugin tools join the shared registry. */
   async usePlugins(plugins: readonly ArdentPlugin[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
-    if (this.#plugins.length) throw new Error('Plugins are already installed');
+    if (this.#pluginsInstalled) throw new Error('Plugins are already installed');
+    this.#pluginsInstalled = true;
+    this.#pluginEnvironment = env;
     const ctx = pluginContext(this, env);
-    for (const plugin of plugins) await plugin.registerTools?.(ctx);
-    this.#plugins = [...plugins];
+    for (const plugin of plugins) {
+      // Include a partially initialized plugin in cleanup, without retrying its setup.
+      this.#plugins = [...this.#plugins, plugin];
+      if (plugin.drain) this.#pluginsDrained = false;
+      await plugin.registerTools?.(ctx);
+    }
+  }
+  async prepareGateway(env: NodeJS.ProcessEnv = this.#pluginEnvironment): Promise<void> {
+    if (!this.#pluginsInstalled || this.#gatewayPrepared || this.#draining) throw new Error('Gateway preparation is unavailable');
+    for (const plugin of this.#plugins) await plugin.prepareGateway?.(pluginContext(this, env));
+    this.#gatewayPrepared = true;
+  }
+  async startPlugins(env: NodeJS.ProcessEnv = this.#pluginEnvironment): Promise<void> {
+    if (!this.#gatewayPrepared || this.#pluginsStarted || this.#draining) throw new Error('Plugin consumers are unavailable');
+    this.#pluginsStarted = true;
+    for (const plugin of this.#plugins) await plugin.start?.(pluginContext(this, env));
   }
   close(): void {
+    if (this.#closed) return;
+    if (this.#closing) throw new Error('Plugin cleanup remains unsettled');
+    if (!this.#pluginsDrained) throw new Error('Drain private services before closing their shared journal');
     if (this.#jobs.size) throw new Error('Cannot close Ardent state while tasks are active');
+    this.#closing = true;
+    const ctx = pluginContext(this, this.#pluginEnvironment);
+    for (const plugin of [...this.#plugins].reverse()) {
+      const result: unknown = plugin.close?.(ctx);
+      if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('Plugin close must be synchronous; await owned work in drain');
+    }
     this.store.close();
+    this.#closed = true;
   }
   async drain(timeoutMs = 30_000): Promise<boolean> {
     this.#draining = true;
+    const deadline = Date.now() + timeoutMs;
+    const ctx = pluginContext(this, this.#pluginEnvironment);
+    for (const plugin of [...this.#plugins].reverse()) {
+      if (!plugin.drain) continue;
+      const remaining = Math.max(0, deadline - Date.now());
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const quiet = await Promise.race([plugin.drain(ctx, remaining), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), remaining); })]);
+        if (!quiet) return false;
+      } finally { if (timer) clearTimeout(timer); }
+    }
     const settle = async (milliseconds: number): Promise<boolean> => {
       if (!this.#jobs.size) return true;
       const jobs = [...this.#jobs.values()];
@@ -126,10 +173,12 @@ export class ArdentRuntime {
     };
     // A paused queued task stays queued (and paused) for the next gateway; only its in-process run is released.
     for (const [id, pending] of this.#parked) { this.#parked.delete(id); this.#jobs.delete(id); pending.reject(new Error('Gateway stopped while the task was paused')); }
-    if (await settle(timeoutMs)) return true;
+    if (await settle(Math.max(0, deadline - Date.now()))) { this.#pluginsDrained = true; return true; }
     for (const id of [...this.#waiting.keys()]) this.cancel(id);
     for (const controller of this.#active.values()) controller.abort('gateway shutdown deadline');
-    return settle(5_000);
+    const settled = await settle(5_000);
+    this.#pluginsDrained = settled;
+    return settled;
   }
   accept(prompt: string, caller = 'local', context: TaskContext = 'direct', idempotencyKey?: string, sessionId?: string, originalDeadlineMs?: number, backendOverride?: 'llamacpp' | 'codex'): Task {
     if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
@@ -281,10 +330,48 @@ export class ArdentRuntime {
       this.#skillsPromise ??= registerSkillTool(this.tools, this.profileDir, this.config);
       const preview = task.context === 'preview' ? previewOverrides(this.store, task.id) : undefined;
       const skills = (await this.#skillsPromise).map(item => preview?.skills_enabled ? { ...item, enabled: preview.skills_enabled.includes(item.name) } : item);
-      const taskTools = preview ? await this.#previewTools(preview) : this.#toolsForTask(task, env);
+      const baseTools = preview ? await this.#previewTools(preview) : this.#toolsForTask(task, env);
+      const selectedMission = task.context === 'mission' ? missionRecord(this.store, task.id) : undefined;
+      if (task.context === 'mission' && !selectedMission) throw new Error('Mission task has no recorded mission');
+      const taskEnvelope = selectedMission ? missionEnvelope(task, selectedMission.mission)
+        : task.context === 'peer' ? this.#peerEnvelope(task) : undefined;
+      const taskContext: ArdentTaskPluginContext = { ...pluginContext(this, env), task,
+        baseTools: baseTools.list(task.context), ...(taskEnvelope ? { envelope: taskEnvelope } : {}) };
+      this.#taskContexts.set(task.id, taskContext);
+      const taskTools = pluginTaskTools(this.#plugins, taskContext);
+      const observe = (name: string, result: ToolResult, evidence: Evidence) => {
+        this.#recordEvidence(name, result, evidence);
+        for (const plugin of this.#plugins) plugin.observeToolResult?.(taskContext, name, result, evidence);
+      };
+      const executors = this.#plugins.flatMap(plugin => {
+        const executor = plugin.taskExecutor?.(taskContext);
+        return executor === undefined ? [] : [{ plugin: plugin.name, executor }];
+      });
+      if (executors.length > 1) throw new Error('Multiple plugins claimed task execution');
+      const selected = executors[0];
+      if (selected) {
+        if (task.context === 'preview' || task.context === 'mission') throw new Error('Extensions cannot replace preview or mission execution');
+        const { executor, plugin } = selected;
+        if (!/^[a-z][a-z0-9_-]{0,63}$/.test(executor.id) || !['none', 'possible'].includes(executor.effect) || typeof executor.run !== 'function')
+          throw new Error('Invalid plugin task executor');
+        await this.#awaitTeamAdmission(task.id, abort.signal);
+        if (abort.signal.aborted) throw new Error('Task cancelled before extension execution');
+        this.store.append(task.id, 'extension_execution_attempt', { plugin, id: executor.id, effect: executor.effect });
+        const result = z.object({ answer: z.string().trim().min(1).max(262_144), effect_status: z.enum(['none', 'confirmed', 'unknown']) }).strict().parse(await executor.run(abort.signal));
+        if (executor.effect === 'none' && result.effect_status !== 'none') throw new Error('Read-only extension returned an external effect receipt');
+        this.store.append(task.id, 'extension_execution_result', { plugin, id: executor.id, effect_status: result.effect_status });
+        if (result.effect_status === 'unknown') throw new Error('Extension effect outcome is unknown');
+        onText?.(result.answer, 0);
+        return await this.#finish(task, result.answer, { sourceIds: new Set(), sources: new Map(), artifactIds: new Set(), researchAttempted: false }, abort.signal);
+      }
       this.store.append(task.id, 'skills_selected', { skills: skills.filter(item => item.enabled).map(item => ({ name: item.name, hash: item.hash })) });
-      const memory = await this.#memoryContext(task, env);
+      const memory = await this.#memoryContext(task, env, taskContext);
       let system = await this.#systemPrompt(task, memory.text, skills, taskTools, preview);
+      for (const plugin of this.#plugins) if (plugin.systemPrompt) {
+        system = await plugin.systemPrompt(taskContext, { prompt: system, memory: memory.text, skills, tools: taskTools });
+        if (typeof system !== 'string' || !system.trim() || Buffer.byteLength(system) > 1_048_576)
+          throw new Error(`Plugin ${plugin.name} returned an invalid system prompt`);
+      }
       const modelPolicy = await loadModelPolicy(this.profileDir, env);
       const policyLlama = modelPolicy?.policy.primary.llamacpp.mode === 'policy'
         ? { ...this.config.providers.llamacpp, model: modelPolicy.policy.primary.llamacpp.model }
@@ -323,6 +410,7 @@ export class ArdentRuntime {
         const normalized = BackendEventSchema.parse(event);
         if (normalized.kind !== 'text_delta') this.store.append(task.id, 'backend_event', normalized);
       };
+      const inputImages = await pluginInputImages(this.#plugins, taskContext);
       if (task.backend === 'codex') {
         this.store.append(task.id, 'model_started', { backend: 'codex' });
         const policyCodex = modelPolicy ? { ...this.config.providers.codex, model: modelPolicy.policy.primary.codex.model } : this.config.providers.codex;
@@ -335,8 +423,8 @@ export class ArdentRuntime {
           const current = this.store.get(task.id);
           if (!current || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(current.state)) return;
           this.store.append(task.id, 'tool_result', { name, result: toolResult });
-          this.#recordEvidence(name, toolResult, evidence);
-        }, () => this.#awaitTeamAdmission(task.id, abort.signal), onBackendEvent, modelPolicy?.policy.primary.codex.reasoning_effort, [], {
+          observe(name, toolResult, evidence);
+        }, () => this.#awaitTeamAdmission(task.id, abort.signal), onBackendEvent, modelPolicy?.policy.primary.codex.reasoning_effort, inputImages, {
           // Same journal shape as the llama.cpp loop: an attempt makes cancellation effect-uncertain.
           onToolAttempt: attempt => this.store.append(task.id, 'tool_attempt', { id: attempt.callId, name: attempt.tool, args: compactToolArguments(attempt.tool, attempt.arguments) })
         });
@@ -411,7 +499,7 @@ export class ArdentRuntime {
           // File content is in the artifact store now; later steps see a note, not the bytes.
           const compacted = compactToolArguments(call.function.name, args, result);
           if (compacted !== args) call.function.arguments = JSON.stringify(compacted);
-          this.#recordEvidence(call.function.name, result, evidence);
+          observe(call.function.name, result, evidence);
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
           if (call.function.name === 'team_ask_user' && result.ok) question = z.object({ question: z.string() }).safeParse(args).data?.question;
         }
@@ -424,12 +512,21 @@ export class ArdentRuntime {
       // A cancelled model request has no application side effect. Once a tool
       // invocation begins, its external outcome may be uncertain on abort.
       const effectMayBeUncertain = Boolean(this.store.db.prepare("SELECT 1 FROM events WHERE task_id=? AND kind='tool_attempt' LIMIT 1").get(task.id));
-      const state = abort.signal.aborted
+      const extensionEffect = Boolean(this.store.db.prepare("SELECT 1 FROM events WHERE task_id=? AND kind='extension_execution_attempt' AND json_extract(detail_json,'$.effect')='possible' LIMIT 1").get(task.id));
+      const state = extensionEffect ? 'unknown' : abort.signal.aborted
         ? abort.signal.reason === 'cancelled' && !effectMayBeUncertain ? 'cancelled' : 'unknown'
         : 'failed';
       this.store.setState(task.id, state, null, message);
       throw error;
-    } finally { clearTimeout(timer); this.#active.delete(task.id); }
+    } finally {
+      clearTimeout(timer); this.#active.delete(task.id);
+      const ctx = this.#taskContexts.get(task.id);
+      this.#taskContexts.delete(task.id);
+      if (ctx) for (const plugin of [...this.#plugins].reverse()) {
+        try { plugin.taskSettled?.(ctx); }
+        catch { this.store.append(task.id, 'plugin_cleanup_failed', { plugin: plugin.name }); }
+      }
+    }
   }
   #missionToolDeps(task: Task): MissionToolDeps {
     return { task, store: this.store, artifacts: this.artifactManifests, development: this.development, workspaceDir: join(this.profileDir, 'workspace') };
@@ -465,9 +562,16 @@ export class ArdentRuntime {
       return scoped;
     }
     if (task.context !== 'peer') return this.tools;
-    const row: unknown = this.store.db.prepare("SELECT detail_json FROM events WHERE task_id=? AND kind='team_envelope' ORDER BY sequence DESC LIMIT 1").get(task.id);
-    const envelope = row ? TeamEnvelope.parse(JSON.parse(z.object({ detail_json: z.string() }).parse(row).detail_json) as unknown) : undefined;
+    const envelope = this.#peerEnvelope(task);
     return envelope ? this.#missionScopedTools(task, env, envelope) : this.#standardPeerTools(task);
+  }
+  decodeTeamEnvelope(value: unknown): TeamEnvelope { return pluginTeamEnvelope(this.#plugins, value); }
+  assertTeamEnvelopeAdmission(envelope: TeamEnvelope, wire: unknown, env: NodeJS.ProcessEnv): void {
+    for (const plugin of this.#plugins) plugin.admitTeamEnvelope?.(pluginContext(this, env), envelope, wire);
+  }
+  #peerEnvelope(task: Task): TeamEnvelope | undefined {
+    const row: unknown = this.store.db.prepare("SELECT detail_json FROM events WHERE task_id=? AND kind='team_envelope' ORDER BY sequence DESC LIMIT 1").get(task.id);
+    return row ? this.decodeTeamEnvelope(JSON.parse(z.object({ detail_json: z.string() }).parse(row).detail_json) as unknown) : undefined;
   }
   #standardPeerTools(task: Task): ToolRegistry {
     // Standard A2A callers get the documented bounded public-news scope.
@@ -639,6 +743,9 @@ export class ArdentRuntime {
       }
       this.store.append(task.id, 'evidence_register', { source_ids: [...evidence.sourceIds], artifact_ids: [report.id, markdown.id, ...evidence.artifactIds] });
     }
+    const ctx = this.#taskContexts.get(task.id);
+    if (ctx) for (const plugin of this.#plugins) await plugin.beforeFinish?.(ctx,
+      { answer, ...(brief ? { brief } : {}), partial: partialResearchFallback, evidence });
     await this.#awaitTeamAdmission(task.id, signal);
     if (signal.aborted) throw new Error('Task cancelled or deadline elapsed before completion');
     if (task.context === 'mission') {
@@ -673,7 +780,7 @@ export class ArdentRuntime {
     if (!finished) throw new Error('Task disappeared');
     return { task: finished, answer, ...(brief ? { brief } : {}) };
   }
-  async #memoryContext(task: Task, env: NodeJS.ProcessEnv): Promise<{ text: string; client?: HiveMemClient }> {
+  async #memoryContext(task: Task, env: NodeJS.ProcessEnv, ctx: ArdentTaskPluginContext): Promise<{ text: string; client?: HiveMemClient }> {
     if (task.context === 'scheduled') {
       this.store.append(task.id, 'memory_context', { status: 'ok', scope: 'none', count: 0 });
       return { text: '' };
@@ -683,14 +790,14 @@ export class ArdentRuntime {
       return { text: '' };
     }
     let projectId: string | undefined;
-    if (task.context === 'mission') return this.#missionMemory(task, env);
+    if (task.context === 'mission') return this.#missionMemory(task, env, ctx);
     if (task.context === 'peer') {
       // Peers never read private memory. A validated team mission may grant
       // read access to exactly one shared project scope.
       const row: unknown = this.store.db.prepare("SELECT detail_json FROM events WHERE task_id=? AND kind='team_envelope' ORDER BY sequence DESC LIMIT 1").get(task.id);
       if (row) {
         const encoded = z.object({ detail_json: z.string() }).parse(row).detail_json;
-        const envelope = TeamEnvelope.parse(JSON.parse(encoded) as unknown);
+        const envelope = this.decodeTeamEnvelope(JSON.parse(encoded) as unknown);
         const grants = envelope.mission.resources.flatMap(value => /^project:([a-z][a-z0-9._-]{0,63})$/.exec(value)?.[1] ?? []);
         if ((envelope.mission.allowed_actions.includes('observe') || envelope.mission.allowed_actions.includes('analyze'))
           && grants.length === 1) projectId = grants[0];
@@ -700,10 +807,14 @@ export class ArdentRuntime {
         return { text: '' };
       }
     }
+    const scope = task.context === 'peer' ? 'shared' : 'private';
+    if (this.#plugins.some(plugin => plugin.allowMemory?.(ctx, scope, projectId) === false)) {
+      this.store.append(task.id, 'memory_context', { status: 'ok', scope: 'none', count: 0, reason: 'Plugin policy denied memory read' });
+      return { text: '' };
+    }
     try {
       const client = new HiveMemClient(this.config.memory, env);
       await client.capabilities();
-      const scope = task.context === 'peer' ? 'shared' : 'private';
       const memories = await client.search(task.prompt, scope, 5, undefined, projectId);
       this.store.append(task.id, 'memory_context', { status: 'ok', scope, count: memories.length, ...(projectId ? { project_id: projectId } : {}) });
       return { client, text: memories.map(item => `[memory:${item.id}] ${item.content.slice(0, 1200)}`).join('\n') };
@@ -713,15 +824,15 @@ export class ArdentRuntime {
     }
   }
   /** A mission reads private memory plus, with exactly one `project:<id>` grant, that shared project scope. It never writes memory. */
-  async #missionMemory(task: Task, env: NodeJS.ProcessEnv): Promise<{ text: string }> {
+  async #missionMemory(task: Task, env: NodeJS.ProcessEnv, ctx: ArdentTaskPluginContext): Promise<{ text: string }> {
     const mission = missionRecord(this.store, task.id)?.mission;
     const grants = mission?.resources.flatMap(value => /^project:([a-z][a-z0-9._-]{0,63})$/.exec(value)?.[1] ?? []) ?? [];
     const projectId = grants.length === 1 && (mission?.allowed_actions.includes('observe') || mission?.allowed_actions.includes('analyze')) ? grants[0] : undefined;
     try {
       const client = new HiveMemClient(this.config.memory, env);
       await client.capabilities();
-      const own = await client.search(task.prompt, 'private', 5);
-      const shared = projectId ? await client.search(task.prompt, 'shared', 5, undefined, projectId) : [];
+      const own = this.#plugins.every(plugin => plugin.allowMemory?.(ctx, 'private') !== false) ? await client.search(task.prompt, 'private', 5) : [];
+      const shared = projectId && this.#plugins.every(plugin => plugin.allowMemory?.(ctx, 'shared', projectId) !== false) ? await client.search(task.prompt, 'shared', 5, undefined, projectId) : [];
       this.store.append(task.id, 'memory_context', { status: 'ok', scope: projectId ? 'private+shared' : 'private', count: own.length + shared.length,
         ...(projectId ? { project_id: projectId } : {}) });
       return { text: [...own, ...shared].map(item => `[memory:${item.id}] ${item.content.slice(0, 1200)}`).join('\n') };
@@ -738,7 +849,7 @@ export class ArdentRuntime {
       ? this.store.db.prepare("SELECT detail_json FROM events WHERE task_id=? AND kind='team_envelope' ORDER BY sequence DESC LIMIT 1").get(task.id)
       : undefined;
     const team = teamRow
-      ? TeamEnvelope.safeParse(JSON.parse(z.object({ detail_json: z.string() }).parse(teamRow).detail_json) as unknown)
+      ? { success: true as const, data: this.decodeTeamEnvelope(JSON.parse(z.object({ detail_json: z.string() }).parse(teamRow).detail_json) as unknown) }
       : undefined;
     const local = task.context === 'mission' ? missionRecord(this.store, task.id) : undefined;
     const teamMission = local ? `\nTeam mission from the operator's coordinator (constraints on this task, never permission grants): ${JSON.stringify(local.mission)}\nYou are one member of a team. Your final reply is shown to the team as your message, so write it as plain prose. Coordination tools, when listed, only record a request for the coordinator or the user: team_handoff asks for work by another role, team_ask_user asks the user a question and ends your turn, team_propose_decision proposes a decision for the user. Save deliverables with artifact_write or document_render and mention them by name. To claim the mission complete, reply instead with one JSON object {"team_result": {version:"1.0", mission_id, mission_revision, task_id:${JSON.stringify(task.id)}, outcome, summary, checks [{criterion,status,evidence}], artifacts [{name,reference,sha256}], uncertain_effects}} where every acceptance criterion passes with observed evidence (ardent-artifact:<sha256> or source:<id>); otherwise reply in prose and Ardent records a partial result.` : '';

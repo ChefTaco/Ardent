@@ -1,9 +1,10 @@
+import {collectPluginTeamEvidence} from './plugin-evidence.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Role, TaskState, type Artifact, type Message, type Part, type Task, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { AgentEvent, type AgentExecutor, type ExecutionEventBus, type RequestContext } from '@a2a-js/sdk/server';
 import { z } from 'zod';
 import type { ArdentRuntime, RunResult } from './runtime.js';
-import { TEAM_TASK_METADATA_KEY, TEAM_CLARIFICATION_METADATA_KEY, TeamEnvelope as TeamEnvelopeSchema, TeamResult as TeamResultSchema, validateTeamEnvelope, validateTeamResult, type TeamEnvelope, type TeamResult } from './team-contract.js';
+import { TEAM_TASK_METADATA_KEY, TEAM_CLARIFICATION_METADATA_KEY, TeamResult as TeamResultSchema, validateTeamEnvelope, validateTeamResult, type TeamEnvelope, type TeamResult } from './team-contract.js';
 import { TeamControlService } from './team-control.js';
 import { TeamChildService, type TeamChildReference } from './team-child.js';
 import { TeamArtifacts } from './team-artifacts.js';
@@ -128,6 +129,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
     const rawEnvelope: unknown = metadata[TEAM_TASK_METADATA_KEY];
     let envelope: TeamEnvelope | undefined;
     let childReference: TeamChildReference | undefined;
+    let wireEnvelope: unknown = rawEnvelope;
     try {
       const tenant = request.context.tenant ?? '';
       const existing: unknown = this.runtime.store.db.prepare('SELECT tenant,caller,envelope_json FROM a2a_team_missions WHERE a2a_task_id=?').get(taskId);
@@ -138,15 +140,17 @@ export class ArdentA2AExecutor implements AgentExecutor {
         if (admission && z.object({ admission: z.string() }).parse(admission).admission === 'cancel_requested') throw new Error('Cancelled team task cannot continue');
       }
       if (rawEnvelope !== undefined) {
-        envelope = validateTeamEnvelope(rawEnvelope, caller.userName, request.userMessage.messageId, prompt, Date.now() / 1000, 'hermesTeamChild' in metadata);
+        envelope = validateTeamEnvelope(rawEnvelope, caller.userName, request.userMessage.messageId, prompt, Date.now() / 1000, 'hermesTeamChild' in metadata, value => this.runtime.decodeTeamEnvelope(value));
+        this.runtime.assertTeamEnvelopeAdmission(envelope, rawEnvelope, this.env);
         if ('hermesTeamChild' in metadata) childReference = await this.#children.claim(metadata.hermesTeamChild, envelope, taskId, contextId,
           caller.userName, JSON.stringify(request.userMessage));
-        if (stored && stored.envelope_json !== JSON.stringify(envelope)) throw new Error('Team mission changed during continuation');
-        if (!stored) this.runtime.store.db.prepare('INSERT INTO a2a_team_missions(a2a_task_id,tenant,caller,envelope_json) VALUES (?,?,?,?)').run(taskId, tenant, caller.userName, JSON.stringify(envelope));
+        if (stored && stored.envelope_json !== JSON.stringify(rawEnvelope)) throw new Error('Team mission changed during continuation');
+        if (!stored) this.runtime.store.db.prepare('INSERT INTO a2a_team_missions(a2a_task_id,tenant,caller,envelope_json) VALUES (?,?,?,?)').run(taskId, tenant, caller.userName, JSON.stringify(rawEnvelope));
       } else if (stored) {
         if (request.task?.status?.state !== TaskState.TASK_STATE_INPUT_REQUIRED) throw new Error('Team continuation requires an input-required task');
         const parsed: unknown = JSON.parse(stored.envelope_json);
-        envelope = TeamEnvelopeSchema.parse(parsed);
+        wireEnvelope = parsed;
+        envelope = this.runtime.decodeTeamEnvelope(parsed);
       }
     }
     catch { bus.publish(AgentEvent.statusUpdate(status(taskId, contextId, TaskState.TASK_STATE_FAILED, 'Invalid authenticated team envelope'))); return; }
@@ -162,7 +166,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
     const existedBefore = Boolean(request.userMessage.messageId && this.runtime.store.db.prepare(
       "SELECT 1 FROM tasks WHERE caller=? AND context='peer' AND idempotency_key=?").get(owner, request.userMessage.messageId));
     const operation = this.runtime.accept(prompt, owner, 'peer', request.userMessage.messageId, session.id, deadline ? deadline * 1000 : undefined);
-    if (envelope && operation.state === 'queued') this.runtime.store.append(operation.id, 'team_envelope', envelope);
+    if (envelope && operation.state === 'queued') this.runtime.store.append(operation.id, 'team_envelope', wireEnvelope);
     try {
     this.runtime.store.db.transaction(() => {
     this.runtime.store.db.prepare(`INSERT INTO a2a_operation_map(a2a_task_id,operation_id,tenant,caller) VALUES (?,?,?,?)
@@ -273,7 +277,9 @@ export class ArdentA2AExecutor implements AgentExecutor {
         { name: 'research-brief.md', reference: `ardent-artifact:${detail.data.markdown.id}`, sha256: detail.data.markdown.id }
       ];
     });
-    const knownReferences = new Set(artifacts.map(item => item.reference));
+    const extensions = await collectPluginTeamEvidence(this.runtime, result.task, envelope, this.env);
+    artifacts.push(...extensions.artifacts.map(({ name, reference, sha256 }) => ({ name, reference, sha256 })));
+    const knownReferences = new Set([...artifacts.map(item => item.reference), ...extensions.references]);
     for (const event of events.filter(item => item.kind === 'evidence_register')) {
       const register = z.object({ source_ids: z.array(z.string()), artifact_ids: z.array(z.string()) }).safeParse(event.detail);
       if (!register.success) continue;
@@ -307,7 +313,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
         this.runtime.store.append(operationId, 'team_result_rejected', { reason: reason.slice(0, 1000) });
         if (envelope.mission.allowed_actions.every(action => action === 'observe' || action === 'analyze')) {
           const repaired = await this.#repairTeamResult(submitted, reason, envelope, result, operationId,
-            artifacts, knownReferences, observedOwnerSources);
+            artifacts, knownReferences, observedOwnerSources, extensions.aliases);
           if (repaired) return repaired;
         }
       }
@@ -324,7 +330,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
   #validateSubmittedTeamResult(submitted: unknown, artifacts: TeamResult['artifacts'], envelope: TeamEnvelope,
     knownReferences: ReadonlySet<string>): TeamResult {
     const parsed = TeamResultSchema.parse(submitted);
-    if (!envelope.mission.allowed_actions.includes('create_artifact') && parsed.artifacts.length)
+    if (!envelope.mission.allowed_actions.includes('create_artifact') && parsed.artifacts.some(item => !artifacts.some(actual => actual.name === item.name && actual.sha256 === item.sha256 && actual.reference === item.reference)))
       throw new Error('Team result declares an artifact without create_artifact authority');
     for (const item of parsed.artifacts) if (!knownReferences.has(item.reference) || item.reference !== `ardent-artifact:${item.sha256}`)
       throw new Error('Team result declares an unobserved artifact');
@@ -334,7 +340,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
 
   async #repairTeamResult(submitted: unknown, reason: string, envelope: TeamEnvelope, result: RunResult,
     operationId: string, artifacts: TeamResult['artifacts'], knownReferences: ReadonlySet<string>,
-    observedOwnerSources: ReadonlySet<string>): Promise<TeamResult | null> {
+    observedOwnerSources: ReadonlySet<string>, citationAliases: ReadonlyMap<string, string>): Promise<TeamResult | null> {
     const shape = z.object({ version: z.unknown().optional(), mission_id: z.string(), mission_revision: z.number(), task_id: z.string(),
       outcome: z.string(), summary: z.string(), checks: z.array(z.object({ criterion: z.string(), status: z.string(),
         evidence: z.union([z.array(z.string()), z.string()]) }).strict()), artifacts: z.array(z.unknown()), uncertain_effects: z.array(z.string()) }).strict();
@@ -355,7 +361,9 @@ export class ArdentA2AExecutor implements AgentExecutor {
     const originalEvidence = original.data.checks[0]?.evidence;
     const executionCitation = singleReadCheck && Array.isArray(originalEvidence) && originalEvidence.length === 1
       && /^source:exec-[A-Za-z0-9._:-]{1,128}$/.test(originalEvidence[0] ?? '') ? originalEvidence[0] : undefined;
-    const citationCorrection = executionCitation && soleOwnerSource ? { from: executionCitation, to: soleOwnerSource } : undefined;
+    const alias = singleReadCheck && Array.isArray(originalEvidence) && originalEvidence.length === 1 ? citationAliases.get(originalEvidence[0] ?? '') : undefined;
+    const citationCorrection = executionCitation && soleOwnerSource ? { from: executionCitation, to: soleOwnerSource }
+      : alias && knownReferences.has(alias) ? { from: originalEvidence![0], to: alias } : undefined;
     const evidenceArrayCorrection = singleReadCheck && typeof originalEvidence === 'string' && knownReferences.has(originalEvidence)
       ? { from: originalEvidence, to: [originalEvidence] } : undefined;
     // These are format-only aliases for one observed, read-only owner check.

@@ -18,6 +18,7 @@ import { TelegramAdapter } from './telegram.js';
 import { MattermostAdapter } from './mattermost.js';
 import { EventSchema, SessionMessageSchema, SessionSchema, TaskSchema, TaskState } from './store.js';
 import type { JobEngine } from './job-engine.js';
+import { mountPluginHttp } from './plugin-http.js';
 import { pluginContext } from './plugins.js';
 import type { LiveTextUpdate } from './live-text.js';
 import { MissionSubmit } from './missions.js';
@@ -485,5 +486,6 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     plugin.routes(sub, ctx);
     app.route(`/api/v1/plugins/${plugin.name}`, sub);
   }
+  mountPluginHttp(app, runtime, env, jobEngine);
   return app;
 }

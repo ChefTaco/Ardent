@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ChatMessage } from './llamacpp.js';
 import type { Task, TaskStore } from './store.js';
-import { TEAM_VERSION, TeamMission, TeamResult, validateTeamResult, type TeamEnvelope } from './team-contract.js';
+import { TEAM_VERSION, CoreTeamAction, TeamMission, TeamResult, validateTeamResult, type TeamEnvelope } from './team-contract.js';
 
 /** Bound on the combined text of a mission's context items. */
 export const MAX_CONTEXT_ITEM_BYTES = 64 * 1024;
@@ -15,7 +15,7 @@ export const MissionLabels = z.record(z.string().regex(/^[a-z][a-z0-9._:-]{0,63}
 export const MissionSubmit = z.object({
   session_id: z.string().guid().optional(),
   objective: z.string().trim().min(1).max(16000),
-  mission: TeamMission,
+  mission: TeamMission.omit({ extensions: true }).extend({ allowed_actions: z.array(CoreTeamAction).min(1).max(8).refine(actions => new Set(actions).size === actions.length, 'Duplicate action') }),
   context_items: z.array(ContextItem).max(64).optional()
     .refine(items => Buffer.byteLength((items ?? []).map(item => item.title + item.text).join(''), 'utf8') <= MAX_CONTEXT_ITEM_BYTES,
       `Context items exceed ${MAX_CONTEXT_ITEM_BYTES / 1024} KiB`),

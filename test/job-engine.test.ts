@@ -340,3 +340,22 @@ describe('job engine clock and shutdown', () => {
     expect((await f.engine.tick(new Date('2026-09-28T09:05:00Z'))).claimed).toBe(1);
   });
 });
+
+
+it('retains external owner labels without admitting work or rewriting definitions', async () => {
+ const definitions: JobDefinitions = {...base,jobs:[{...base.jobs[0]!,owner:'external-scheduler'}]};
+ const parsed=validateJobDefinitions(definitions,{'test.v1':{input:z.object({label:z.string()}),effect:'none',run:async()=>{throw Error('External work must never run');}}});
+ expect(parsed.definitions.jobs[0]?.owner).toBe('external-scheduler');
+ const setup=await fixture(definitions);await setup.engine.load();
+ await setup.engine.tick(new Date('2026-09-28T09:05:00.000Z'),new AbortController().signal);
+ expect(setup.store.db.prepare('SELECT count(*) AS count FROM job_windows').get()).toEqual({count:0});
+});
+
+it('custom delivery kinds require the registered handler to validate their exact descriptor', () => {
+ const definitions:JobDefinitions={...base,jobs:[{...base.jobs[0]!,delivery:{kind:'webhook',target_ref:'fixture_endpoint'}}]};
+ const handler={input:z.object({label:z.string()}),effect:'none' as const,run:async()=>({state:'completed' as const,receipt:{effect_status:'none' as const}})};
+ expect(()=>validateJobDefinitions(definitions,{'test.v1':handler})).toThrow('does not support delivery');
+ const registry={'test.v1':{...handler,delivery:z.object({kind:z.literal('webhook'),target_ref:z.literal('fixture_endpoint')}).strict()}};
+ expect(validateJobDefinitions(definitions,registry).definitions.jobs[0]?.delivery).toEqual(definitions.jobs[0]?.delivery);
+ expect(()=>validateJobDefinitions({...definitions,jobs:[{...definitions.jobs[0]!,delivery:{kind:'webhook',target_ref:'other_endpoint'}}]},registry)).toThrow();
+});

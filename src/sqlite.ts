@@ -27,12 +27,19 @@ export function assertPatchedSqliteVersion(version: unknown): void {
 }
 
 /** Application storage boundary. Keep transaction ownership on the same connection. */
+function applicationRow(row: unknown): unknown {
+  if (row === undefined || row === null || typeof row !== 'object') return row;
+  // SQLite BLOBs were Buffers at the application boundary before the driver
+  // migration. Preserve that contract for byte validation and hashing clients.
+  return Object.fromEntries(Object.entries(row).map(([key, value]: [string, unknown]) =>
+    [key, value instanceof Uint8Array ? Buffer.from(value) : value]));
+}
 class Statement {
   constructor(private readonly statement: StatementSync) {}
   run(...parameters: unknown[]): ReturnType<StatementSync['run']> { return sqliteOperation(() => this.statement.run(...parameters)); }
-  get(...parameters: unknown[]): unknown { return sqliteOperation(() => this.statement.get(...parameters)); }
-  all(...parameters: unknown[]): unknown[] { return sqliteOperation(() => this.statement.all(...parameters)); }
-  iterate(...parameters: unknown[]): IterableIterator<unknown> { return this.statement.iterate(...parameters); }
+  get(...parameters: unknown[]): unknown { return applicationRow(sqliteOperation(() => this.statement.get(...parameters))); }
+  all(...parameters: unknown[]): unknown[] { return sqliteOperation(() => this.statement.all(...parameters)).map(applicationRow); }
+  *iterate(...parameters: unknown[]): IterableIterator<unknown> { for (const row of this.statement.iterate(...parameters)) yield applicationRow(row); }
 }
 
 export class Database {
