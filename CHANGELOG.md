@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Security
+
+- Require patched Node.js 24.22.3 or 26.13.1 for supported runtime lines and update container and CI pins.
+- Upgrade Hono to 4.13.18 to include the tiny-chunk request-body memory exhaustion fix (GHSA-39q9-qp46-w8xg).
+- Remove unused package managers and their vulnerable bundled dependencies from the native-export image. The Node binary and application packages retain their existing paths.
+
 ## 3.1.1 - 2026-11-11
 
 - Allow trusted extensions to declare bounded HTTP ingress capacity for chunked workflows. Management and independent ingress use separate buckets, and conflicting mounts fail before registration. Body limits, reserved routes and authentication remain enforced.

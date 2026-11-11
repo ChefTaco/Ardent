@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Build a reviewed runtime image, then export its native artifact. No model
 # runtime or weights are installed. Repository root context; only public package inputs.
-ARG NODE_IMAGE=node:24.22.1-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
+ARG NODE_IMAGE=node:24.22.3-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /opt/ardent-build
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
@@ -20,6 +20,11 @@ RUN npm ci --no-audit --no-fund --ignore-scripts \
     && tar -xzf /packages/hivemagnus-ardent-*.tgz --strip-components=1 -C /opt/ardent/node_modules/@hivemagnus/ardent
 
 FROM ${NODE_IMAGE} AS runtime
+# Native exports and the CLI run on node alone. Package managers are build-only
+# tools; retaining their bundled dependencies would ship avoidable vulnerabilities.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 LABEL org.opencontainers.image.title="ardent" \
       org.opencontainers.image.description="Optional native Ardent runtime export; inference remains external" \
       org.opencontainers.image.source="https://github.com/ChefTaco/Ardent" \

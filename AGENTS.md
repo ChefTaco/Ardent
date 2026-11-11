@@ -25,7 +25,7 @@ messages:
 
 ## Ground rules
 
-- Node.js 24.22.1+ or 26.13.0+, ESM, strict TypeScript (`noUncheckedIndexedAccess`,
+- Node.js 24.22.3+ or 26.13.1+, ESM, strict TypeScript (`noUncheckedIndexedAccess`,
   `exactOptionalPropertyTypes`). Match the style of the file you edit.
 - Validate every external input with Zod 4 before use: config, HTTP bodies,
   A2A messages, tool arguments, tool results from remote services, and files
