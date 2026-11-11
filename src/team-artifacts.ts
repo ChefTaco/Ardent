@@ -4,7 +4,7 @@ import { TaskState, type Task } from '@a2a-js/sdk';
 import type { ArdentRuntime } from './runtime.js';
 import type { ArdentConfig } from './config.js';
 import { ArdentA2AClient } from './a2a-client.js';
-import { TeamEnvelope } from './team-contract.js';
+import { collectPluginTeamEvidence } from './plugin-evidence.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = z.string().regex(/^[a-f0-9]{32}$/);
@@ -65,15 +65,16 @@ export class TeamArtifacts {
     const operation = this.runtime.store.get(bound.operation_id);
     if (operation?.state !== 'completed' || operation.context !== 'peer' ||
         operation.caller !== `a2a:${bound.tenant}:${bound.caller}`) return [];
-    const envelope = TeamEnvelope.parse(JSON.parse(bound.envelope_json) as unknown);
-    if (!envelope.mission.allowed_actions.includes('create_artifact')) return [];
+    const envelope = this.runtime.decodeTeamEnvelope(JSON.parse(bound.envelope_json) as unknown);
+    const extensions = await collectPluginTeamEvidence(this.runtime, operation, envelope, this.env);
     const events = this.runtime.store.events(bound.operation_id, 0, 500);
     const event = events.find(item => item.kind === 'research_artifacts');
     const actual = z.object({ report: z.object({ id: digest }), markdown: z.object({ id: digest }) }).safeParse(event?.detail);
-    const entries: Array<{ name: string; mime: string; digest: string; producer: string; sourceId: string }> = actual.success ? [
+    const entries: Array<{ name: string; mime: string; digest: string; producer: string; sourceId: string }> = envelope.mission.allowed_actions.includes('create_artifact') && actual.success ? [
       { name: 'research-brief.json', mime: 'application/json', digest: actual.data.report.id, producer: 'ardent-research', sourceId: '' },
       { name: 'research-brief.md', mime: 'text/markdown', digest: actual.data.markdown.id, producer: 'ardent-research', sourceId: '' }
     ] : [];
+    entries.push(...extensions.artifacts.map(item => ({ name: item.name, mime: item.mime, digest: item.sha256, producer: item.producer, sourceId: item.source })));
     const result: TeamArtifactDescriptor[] = [];
     for (const entry of entries) {
       const bytes = await this.runtime.artifacts.get(entry.digest);

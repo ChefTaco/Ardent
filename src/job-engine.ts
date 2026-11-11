@@ -21,13 +21,14 @@ const intervalSchedule = z.object({
 }).strict();
 const definition = z.object({
   id: jobId,
-  /** `external` marks a job retained for reference but owned by another scheduler. */
-  owner: z.enum(['ardent', 'external']),
+  /** Only `ardent` admits work. Other bounded labels retain the original external owner. */
+  owner: identifier,
   enabled: z.boolean(),
   handler: identifier,
   schedule: z.union([cronSchedule, intervalSchedule]),
   input: z.unknown().optional(),
-  delivery: z.object({ kind: z.enum(['none', 'telegram', 'mattermost']), target_ref: identifier.optional() }).strict(),
+  /** A handler must explicitly validate every delivery kind other than `none`. */
+  delivery: z.object({ kind: identifier, target_ref: identifier.optional() }).strict(),
   policy: z.object({ max_attempts: z.number().int().min(1).max(5), retry_backoff_seconds: z.number().int().min(1).max(3600) }).strict()
 }).strict();
 export const JobDefinitionSchema = definition;

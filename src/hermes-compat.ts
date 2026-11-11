@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArdentConfig } from './config.js';
+import { z } from 'zod';
+import { pluginContext } from './plugins.js';
 import type { ArdentRuntime } from './runtime.js';
 
 /**
@@ -36,7 +38,9 @@ function toolset(name: string): string {
 export type HermesTeamCard = { description: string; metadata: { hermesTeam: object };
   skills: Array<{ id: string; name: string; description: string; tags: string[] }> };
 
-export async function hermesTeamCard(runtime: Pick<ArdentRuntime, 'tools'>, config: ArdentConfig): Promise<HermesTeamCard> {
+function isRuntime(value: Pick<ArdentRuntime, 'tools'>): value is ArdentRuntime { return 'store' in value && 'profileDir' in value && 'plugins' in value; }
+
+export async function hermesTeamCard(runtime: Pick<ArdentRuntime, 'tools'> & Partial<Pick<ArdentRuntime, 'plugins' | 'config' | 'profileDir'>>, config: ArdentConfig, env: NodeJS.ProcessEnv = process.env): Promise<HermesTeamCard> {
   const now = Math.floor(Date.now() / 1000);
   const description = config.a2a.skill?.description ?? `${config.name}: bounded tasks with this profile's registered tools`;
   const grouped = new Map<string, string[]>();
@@ -56,7 +60,7 @@ export async function hermesTeamCard(runtime: Pick<ArdentRuntime, 'tools'>, conf
     tags: [entry.id, 'task-conditional'] }));
   const sourceDigest = await digestRuntimeSource();
   const taskPolicyDigest = await digestModules(['a2a', 'a2a-client', 'a2a-idempotency', 'a2a-peers', 'runtime', 'team-contract', 'tools']);
-  return { description, skills, metadata: { hermesTeam: {
+  const card: HermesTeamCard = { description, skills, metadata: { hermesTeam: {
     schemaVersion: '1.0', missionContractVersions: ['1.0'], coordinationProtocolVersions: [],
     lifecycleProtocolVersions: ['1.0'], missionControlScopes: [], taskExecutionBoundaryVersion: '1.0',
     genericSurfacePolicyVersion: '1.0', sourceDigest, role: config.profile,
@@ -66,4 +70,14 @@ export async function hermesTeamCard(runtime: Pick<ArdentRuntime, 'tools'>, conf
     taskPolicyDigest, runtimeKind: 'ardent', discovery: { schemaVersion: '1.0', observedAt: now, expiresAt: now + 300,
       registryStatus: 'observed', configurationStatus: 'observed', toolsets }
   } } };
+  const configured = runtime.plugins?.filter(plugin => plugin.teamCard) ?? [];
+  if (configured.length > 1) throw new Error('Multiple plugins own the team card');
+  const plugin = configured[0];
+  if (!plugin?.teamCard) return card;
+  // A real runtime supplies this context; tools-only callers retain the default card.
+  if (!isRuntime(runtime)) throw new Error('A plugin team card requires the selected runtime');
+  const custom = await plugin.teamCard(pluginContext(runtime, env), card);
+  if (Buffer.byteLength(JSON.stringify(custom)) > 64_000) throw new Error('Plugin team card exceeds 64 KiB');
+  return z.object({ description: z.string().min(1).max(1000), metadata: z.object({ hermesTeam: z.record(z.string(), z.json()) }).strict(),
+    skills: z.array(z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(100), description: z.string().min(1).max(1000), tags: z.array(z.string().max(100)).max(32) }).strict()).max(64) }).strict().parse(custom);
 }

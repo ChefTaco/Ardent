@@ -51,3 +51,22 @@ it('opens an existing SQLite database without replacing data and never creates a
     expect(existsSync(missing)).toBe(false);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+it('preserves BLOB bytes as Buffers through single, multiple, and streamed reads', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ardent-blob-')), file = join(dir, 'existing.sqlite');
+    const prior = new PriorDatabase(file);
+    const bytes = Buffer.from([0, 255, 128, 1, 0]);
+    prior.exec('CREATE TABLE uploads (id INTEGER PRIMARY KEY, data BLOB, note TEXT)');
+    prior.prepare('INSERT INTO uploads VALUES (?,?,?)').run(1, bytes, 'retained');
+    prior.prepare('INSERT INTO uploads VALUES (?,?,?)').run(2, null, 'empty'); prior.close();
+    const db = new Database(file, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db.prepare('SELECT data,note FROM uploads ORDER BY id');
+      const expected = [{ data: bytes, note: 'retained' }, { data: null, note: 'empty' }];
+      expect(rows.get()).toEqual(expected[0]); expect(rows.all()).toEqual(expected); expect([...rows.iterate()]).toEqual(expected);
+      const first = rows.get(); if (!first || typeof first !== 'object' || !('data' in first)) throw new Error('Missing retained blob');
+      expect(Buffer.isBuffer(first.data)).toBe(true);
+      expect(db.prepare('SELECT * FROM uploads WHERE id=3').get()).toBeUndefined();
+    } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+

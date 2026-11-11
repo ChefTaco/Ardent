@@ -17,6 +17,9 @@ export const SessionMessageSchema = z.object({ sequence: z.number().int(), sessi
 export type SessionMessage = z.infer<typeof SessionMessageSchema>;
 export const EventSchema = z.object({ sequence: z.number().int(), task_id: z.string(), kind: z.string(), detail: z.unknown().optional(), created_ms: z.number().int() });
 export type TaskEvent = z.infer<typeof EventSchema>;
+/** Historical transport labels remain distinct; adapters must retain their original identity. */
+export type InboundChannelType = 'unknown' | 'telegram_private' | 'telegram_group' | 'telegram_supergroup' |
+  'mattermost_dm' | 'mattermost_channel' | 'chattermost_dm' | 'chattermost_channel';
 
 export class TaskStore {
   readonly db: Database;
@@ -42,7 +45,7 @@ export class TaskStore {
         task_id TEXT REFERENCES tasks(id), created_ms INTEGER NOT NULL,
         channel_type TEXT NOT NULL DEFAULT 'unknown' CHECK(channel_type IN
           ('unknown','telegram_private','telegram_group','telegram_supergroup',
-           'mattermost_dm','mattermost_channel')),
+           'mattermost_dm','mattermost_channel','chattermost_dm','chattermost_channel')),
         PRIMARY KEY(platform, account, update_id));
       CREATE TABLE IF NOT EXISTS channel_cursors (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL);
@@ -93,7 +96,7 @@ export class TaskStore {
     if (!inboundColumns.some(column => column.name === 'channel_type')) this.db.exec(`ALTER TABLE channel_inbound ADD COLUMN
       channel_type TEXT NOT NULL DEFAULT 'unknown' CHECK(channel_type IN
         ('unknown','telegram_private','telegram_group','telegram_supergroup',
-         'mattermost_dm','mattermost_channel'))`);
+         'mattermost_dm','mattermost_channel','chattermost_dm','chattermost_channel'))`);
     this.db.exec(`CREATE TRIGGER IF NOT EXISTS channel_inbound_type_immutable
       BEFORE UPDATE OF channel_type ON channel_inbound
       WHEN OLD.channel_type != NEW.channel_type
@@ -220,13 +223,12 @@ export class TaskStore {
       .get(platform, account, updateId) !== undefined;
   }
   claimInbound(platform: string, account: string, updateId: string,
-    channelType: 'unknown' | 'telegram_private' | 'telegram_group' | 'telegram_supergroup' |
-      'mattermost_dm' | 'mattermost_channel' = 'unknown'): { claimed: boolean; taskId: string | null } {
+    channelType: InboundChannelType = 'unknown'): { claimed: boolean; taskId: string | null } {
     if (!platform || !account || !updateId || updateId.length > 256) throw new Error('Invalid channel update identity');
-    if ((platform === 'telegram' && channelType.startsWith('mattermost_')) ||
-        (platform === 'mattermost' && channelType.startsWith('telegram_')) ||
+    if ((platform === 'telegram' && (channelType.startsWith('mattermost_') || channelType.startsWith('chattermost_'))) ||
+        (['mattermost', 'chattermost'].includes(platform) && channelType.startsWith('telegram_')) ||
         !['unknown', 'telegram_private', 'telegram_group', 'telegram_supergroup',
-          'mattermost_dm', 'mattermost_channel'].includes(channelType))
+          'mattermost_dm', 'mattermost_channel', 'chattermost_dm', 'chattermost_channel'].includes(channelType))
       throw new Error('Inbound channel type differs from platform');
     return this.db.transaction(() => {
       if (this.admissionFence()) throw new Error('Profile admission is fenced for rollback');

@@ -443,6 +443,10 @@ export default definePlugin({
   jobHandlers: ctx => ({ /* 'weather.daily': JobHandler */ }),
   jobOwnership: ctx => async (job, now) => { /* throw to refuse a job window */ },
   peerTool: (tool, task, envelope) => false, // allow a peer to call one of your tools
+  taskTools: ctx => [],                   // additions bound to the exact persisted task
+  filterTool: (ctx, tool) => true,         // restrictive final filter
+  drain: async (ctx, timeoutMs) => true,   // stop intake and await owned work
+  close: ctx => {},                       // synchronous cleanup after a successful drain
 });
 ```
 
@@ -460,6 +464,73 @@ loading plugins. Plugin tools join the profile's shared tool registry; a tool's
 peer still needs an explicit mission grant (`tool:<name>`) or `peerTool`.
 Plugin routes sit behind the same bearer-token check as the rest of the
 management API.
+
+A module may also export an asynchronous factory receiving `{ config, profileDir,
+env }`. It returns a plugin or an array of plugins. This allows profile-specific
+configuration and offline validation without constructing a runtime, claiming jobs,
+or starting channel consumers. The CLI supplies the selected profile environment;
+embedders can pass it as the third argument of `loadPlugins`.
+
+Import supported extension primitives from `@hivemagnus/ardent/plugin-sdk` rather
+than reaching into `dist`. This entry point includes the runtime, tool and job
+contracts, profile/configuration helpers, provider clients, artifact and identity
+helpers, and the application SQLite boundary (`SqliteDatabase`). Task additions retain their declared contexts and peer/mission grants. Preview
+additions must be read-only. Restrictive filters apply to built-in and extension
+tools; duplicate names cannot replace a tool silently. Stateful plugins must stop
+intake and await their owned work in `drain`. A false or timed-out drain keeps the
+journal open and ownership unsettled; `close` cannot bypass it. Cleanup runs in
+reverse registration order, including partially initialized plugins.
+
+Additional hooks support extensions that retain an existing workflow contract:
+
+| Hook | Boundary |
+| --- | --- |
+| `systemPrompt` | Supplies trusted policy text; the full model input is still budgeted. |
+| `allowMemory` | Can deny an admitted read; cannot grant a different scope. |
+| `observeToolResult`, `beforeFinish`, `taskSettled` | Track actual task evidence, validate before success, and release task-local resources. |
+| `teamEnvelope`, `admitTeamEnvelope` | Validate a legacy wire shape and apply extra admission restrictions. Identity, deadlines, parent reservations, constraints and resources remain core-validated. |
+| `taskExecutor` | Runs one owned deterministic workflow. Attempts precede invocation in the journal; lost or unknown effects stay held across restart. Preview and mission execution cannot be replaced. |
+| `inputImages` | Supplies at most five owned, digest-verified PNG/JPEG artifacts to a direct Codex task. Paths outside the selected profile's artifacts are rejected. |
+| `teamEvidence` | Validates retained extension receipts. Artifacts require an exact mission grant and verified bytes; format-only citation aliases must target observed references. |
+| `teamCard` | Describes private role capabilities without granting permissions or claiming backend readiness. |
+| `prepareGateway`, `start` | Verify prior consumer ownership, then start background intake only in gateway mode. CLI inspection does not start consumers. |
+| `channelAdapter` | Replaces one enabled built-in channel consumer. Multiple owners are refused. Intake and delivery receive separate abort signals. |
+| `httpRoutes` | Adds explicit compatibility paths; overlapping core routes and authentication-boundary changes are refused. |
+
+An envelope extension uses `mission.extensions[plugin.name]` and action names
+`extension:<plugin-name>:<action>`. No extension is accepted without its configured
+validator. A codec may retain an old wire action while translating it into its
+own namespace; it cannot add a resource or substitute a core action grant.
+Ardent retains the original wire envelope in its journal and revalidates it
+when reading lifecycle controls or export receipts.
+
+Normal plugin `routes` remain under `/api/v1/plugins/<name>/` and require the
+management bearer token. `httpRoutes` declares each mount as `management` or
+`independent`. Management aliases must remain under `/api/v1/` and inherit its
+authentication. Independent device/webhook ingress must authenticate every
+handler with its own credential and replay protection; it cannot use API,
+health or A2A paths. All compatibility handlers receive a 1 MiB body bound and
+share a bounded per-plugin rate bucket (600/minute, burst 120), applied before
+handler authentication and parsing. Wildcard routes and middleware mounts are
+refused so an extension cannot intercept unrelated core requests.
+
+Offline job-validation contexts expose `runtimeAvailable: false`; their runtime
+and tool registry getters throw. CLI extensions receive `rawArgs` for their own
+option grammar, declare `valueOptions` to recognize values before the command, and can use `matches(invocation)` to select one subcommand while
+leaving other core subcommands available. Plugin code has the profile owner's
+process privileges: install only reviewed, pinned artifacts. These hooks preserve
+authority boundaries between tasks; they do not sandbox an untrusted plugin.
+
+Job owner labels other than `ardent` remain external references and never admit
+work. A custom delivery kind requires its registered handler to validate the exact
+descriptor. Existing definition bytes, revisions and receipts need not be rewritten
+to rename an external scheduler. Historical channel labels also remain distinct;
+a compatibility adapter must retain its original platform, account and receipt
+identity instead of creating a second consumer under a renamed transport.
+
+Extensions should
+use `ctx.runtime.store` for the active journal and must not introduce a second
+SQLite driver or rewrite another extension's state.
 
 ## Security model
 

@@ -28,7 +28,7 @@ import { BUILTIN_JOB_VALIDATION_REGISTRY, builtinJobHandlers } from './job-news-
 import { acquireGatewayLock, createLockFile } from './gateway-lock.js';
 import { ContextCheckpoints } from './context-checkpoints.js';
 import { loadModelPolicy } from './model-policy.js';
-import { loadPlugins, pluginContext, pluginJobHandlers, validationContext, type ArdentPlugin } from './plugins.js';
+import { loadPlugins, pluginContext, pluginChannelAdapter, pluginJobHandlers, validationContext, type ArdentPlugin } from './plugins.js';
 
 import { ARDENT_VERSION } from './version.js';
 import { acceptRuntime } from './acceptance.js';
@@ -38,10 +38,10 @@ import { developmentQuery, missionSubmitInput, previewInput } from './cli-comman
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
-function args(argv: string[]): Parsed {
+function args(argv: string[], extraValues: readonly string[] = []): Parsed {
   const words: string[] = [];
   const options = new Map<string, string | true>();
-  const valued = new Set(['env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model']);
+  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg) continue;
@@ -112,8 +112,8 @@ Commands:
   gateway run                              Serve the management API, A2A, channels and jobs`;
 
 async function main(): Promise<void> {
-  const parsed = args(process.argv.slice(2));
-  const [command, subcommand, id] = parsed.words;
+  let parsed = args(process.argv.slice(2));
+  let [command, subcommand, id] = parsed.words;
   if (parsed.options.has('version')) { stdout.write(`${ARDENT_VERSION}\n`); return; }
   if (!command || command === 'help' || parsed.options.has('help')) { stdout.write(`${USAGE}\n`); return; }
   const profile = value(parsed.options, 'profile') ?? DEFAULT_PROFILE;
@@ -139,11 +139,15 @@ async function main(): Promise<void> {
     if (!result.ok) process.exitCode = 1;
     return;
   }
-  const plugins = await loadPlugins(loaded.config, dir);
+  const plugins = await loadPlugins(loaded.config, dir, env);
+  parsed = args(process.argv.slice(2), plugins.flatMap(plugin => Object.values(plugin.cliCommands ?? {}).flatMap(command => [...command.valueOptions ?? []])));
+  [command, subcommand, id] = parsed.words;
   for (const plugin of plugins) {
     const pluginCommand = command ? plugin.cliCommands?.[command] : undefined;
     if (pluginCommand) {
-      await pluginCommand.run({ words: parsed.words.slice(1), options: parsed.options, profileDir: dir, config: loaded.config, env, print });
+      const invocation = { rawArgs: process.argv.slice(2), words: parsed.words.slice(1), options: parsed.options, profileDir: dir, config: loaded.config, env, print };
+      if (pluginCommand.matches?.(invocation) === false) continue;
+      await pluginCommand.run(invocation);
       return;
     }
   }
@@ -258,9 +262,16 @@ async function main(): Promise<void> {
   if (command === 'doctor') { print({ profile: loaded.config.profile, config_valid: true, runtime_problems: runtimeProblems(loaded.config, env), checked_at: new Date().toISOString() }); return; }
   if (command === 'a2a' && subcommand === 'team-card') {
     if (!loaded.config.a2a.hermes_compat) throw new Error('Hermes team card requires a2a.hermes_compat: true');
-    const runtime = new ArdentRuntime(dir, loaded.config, env);
-    try { await runtime.usePlugins(plugins, env); print(await hermesTeamCard(runtime, loaded.config)); }
-    finally { runtime.close(); }
+    const lock = await createLockFile(join(dir, 'state', 'gateway.lock'));
+    let runtime: ArdentRuntime | undefined;
+    try { runtime = new ArdentRuntime(dir, loaded.config, env); await runtime.usePlugins(plugins, env); print(await hermesTeamCard(runtime, loaded.config, env)); }
+    finally {
+      if (runtime) {
+        if (await runtime.drain(30_000)) runtime.close();
+        else { stderr.write('Plugin work remains unsettled; retain the owner record.\n'); process.exit(1); }
+      }
+      await lock.release();
+    }
     return;
   }
   if (command === 'providers' && subcommand === 'list') { print([{ name: 'llamacpp', selected: loaded.config.execution.backend === 'llamacpp' }, { name: 'codex', selected: loaded.config.execution.backend === 'codex' }]); return; }
@@ -370,6 +381,7 @@ async function main(): Promise<void> {
       try {
         runtime = new ArdentRuntime(dir, loaded.config, env);
         await runtime.usePlugins(plugins, env);
+        await runtime.prepareGateway(env);
         // Legacy scheduled tasks are not replayed by a new gateway generation.
         // The job engine owns its own window recovery and never replays uncertain effects.
         for (const task of runtime.recovered.queued) if (task.caller === 'management') void runtime.run(task.id, env).catch(() => {});
@@ -433,15 +445,17 @@ async function main(): Promise<void> {
             });
             if (loaded.config.a2a.bindings.includes('grpc')) { await startA2AGrpc(surface, loaded.config.a2a.listen_host); a2aGrpc = surface.grpcServer; }
           }
+          await runtime.startPlugins(env);
           if (loaded.config.channels.telegram.enabled) {
             const fixtureBase = env.ARDENT_TELEGRAM_API_FIXTURE_URL;
             if (fixtureBase && (env.NODE_ENV !== 'test' || !/^http:\/\/(?:127\.0\.0\.1|localhost):\d+$/.test(fixtureBase))) throw new Error('Telegram API fixture URL is permitted only for loopback tests');
-            const telegram = new TelegramAdapter(runtime, loaded.config.channels.telegram, env, fixtureBase ?? 'https://api.telegram.org', jobEngine);
+            const telegram = pluginChannelAdapter(plugins, ctx, 'telegram', jobEngine) ?? new TelegramAdapter(runtime, loaded.config.channels.telegram, env, fixtureBase ?? 'https://api.telegram.org', jobEngine);
             telegramRun = telegram.run(channelAbort.signal, deliveryAbort.signal);
           }
           if (loaded.config.channels.mattermost.enabled) {
-            const mattermost = new MattermostAdapter(runtime, loaded.config.channels.mattermost, env, jobEngine);
-            mattermostRun = mattermost.run(channelAbort.signal);
+            const replacement = pluginChannelAdapter(plugins, ctx, 'mattermost', jobEngine);
+            const mattermost = replacement ?? { run: (intake: AbortSignal, _delivery: AbortSignal) => new MattermostAdapter(runtime!, loaded.config.channels.mattermost, env, jobEngine).run(intake) };
+            mattermostRun = mattermost.run(channelAbort.signal, deliveryAbort.signal);
           }
           print({ profile, host: loaded.config.api.host, port: loaded.config.api.port, a2a: a2aHttp ? 'listening' : 'disabled', status: 'listening' });
           await new Promise<void>((resolve, reject) => {
@@ -486,7 +500,7 @@ async function main(): Promise<void> {
           shutdownUnsettled ||= !settled;
           if (settled) runtime.close();
         }
-        await lock.release();
+        if (!shutdownUnsettled) await lock.release();
       }
       if (shutdownUnsettled) {
         stderr.write('Gateway shutdown left unresolved work; interrupted tasks will be marked unknown on restart.\n');
@@ -502,9 +516,18 @@ async function main(): Promise<void> {
     }
     throw error;
   });
-  let runtime: ArdentRuntime;
+  let runtime!: ArdentRuntime;
   try { runtime = new ArdentRuntime(dir, loaded.config, env); await runtime.usePlugins(plugins, env); }
-  catch (error) { await ownerLock.release(); throw error; }
+  catch (error) {
+    if (runtime) {
+      if (!await runtime.drain(30_000)) {
+        stderr.write('Plugin initialization left unresolved work; retain the owner record for recovery.\n');
+        process.exit(1);
+      }
+      runtime.close();
+    }
+    await ownerLock.release(); throw error;
+  }
   try {
     if (command === 'tasks') {
       if (subcommand === 'list') { print(runtime.store.list()); return; }
@@ -643,7 +666,14 @@ async function main(): Promise<void> {
         }
       } finally { process.off('SIGINT', interrupt); rl.off('SIGINT', interrupt); rl.close(); }
     }
-  } finally { try { runtime.close(); } finally { await ownerLock.release(); } }
+  } finally {
+    if (!await runtime.drain(30_000)) {
+      stderr.write('Command shutdown left unresolved work; retain the owner record for recovery.\n');
+      process.exit(1);
+    }
+    runtime.close();
+    await ownerLock.release();
+  }
 }
 main().catch((error: unknown) => {
   stderr.write(`ardent: ${error instanceof Error ? error.message : 'Unknown error'}\n`);

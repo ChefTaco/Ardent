@@ -44,7 +44,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   const publicUrl = new URL(publicAddress);
   if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password) throw new Error('Invalid A2A public URL');
   const { authenticate, peers } = await loadPeers(runtime.profileDir, config, env);
-  const teamCard = config.a2a.hermes_compat ? await hermesTeamCard(runtime, config) : undefined;
+  const teamCard = config.a2a.hermes_compat ? await hermesTeamCard(runtime, config, env) : undefined;
   const grpcPort = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80)) + 1;
   if (grpcPort > 65535) throw new Error('A2A gRPC port is unavailable');
   const listenPort = config.a2a.listen_port ?? Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80));

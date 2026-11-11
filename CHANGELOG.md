@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+## 3.1.0 - 2026-11-11
+
+- Add profile-specific asynchronous plugin factories, a supported plugin SDK, task-bound tool additions and restrictive tool filters, and drain/cleanup hooks that keep unresolved services and journals held.
+- Preserve SQLite BLOB reads as Buffers for existing binary validators and retained upload receipts.
+- Add validated wire extensions, retained workflow evidence and exports, owner-bound channel adapters and independently authenticated compatibility ingress. Deterministic extension execution journals attempts and holds unknown effects without replay.
+- Separate background consumer startup from inspection, retain selected CLI environments and raw arguments, and protect offline discovery with exclusive ownership.
+- Preserve historical inbound transport labels and external scheduler owner labels. Custom delivery descriptors require explicit handler validation; existing definitions and receipts are retained.
+
 ## 3.0.0 - 2026-11-10
 
 ### Changed

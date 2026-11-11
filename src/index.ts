@@ -5,5 +5,5 @@ export { TaskStore, type Task } from './store.js';
 export { defineTool, ToolRegistry, ProvenNoEffectError, type Tool, type ToolContext, type ToolEffect, type ToolResult } from './tools.js';
 export { createArdentApi, ardentOpenApi } from './api.js';
 export { JobEngine, validateJobDefinitions, type JobContext, type JobDefinition, type JobHandler, type JobRegistry, type JobResult, type OwnershipCheck } from './job-engine.js';
-export { definePlugin, registerPlugin, registeredPlugins, clearRegisteredPlugins, loadPlugins, type ArdentPlugin, type ArdentPluginContext, type ArdentCliCommand, type ArdentCliInvocation } from './plugins.js';
+export { definePlugin, registerPlugin, registeredPlugins, clearRegisteredPlugins, loadPlugins, type ArdentPlugin, type ArdentPluginContext, type ArdentCliCommand, type ArdentCliInvocation, type ArdentPluginFactory, type ArdentPluginFactoryContext, type ArdentTaskPluginContext } from './plugins.js';
 export type { TeamEnvelope, TeamMission, TeamResult } from './team-contract.js';

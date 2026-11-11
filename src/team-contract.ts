@@ -8,7 +8,11 @@ const role = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/);
 const boundedId = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 const text = (bytes: number) => z.string().trim().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= bytes, `Exceeds ${bytes} bytes`);
 const texts = (minimum = 0) => z.array(text(1000)).min(minimum).max(32).refine(value => new Set(value).size === value.length, 'Duplicate entries');
-const Action = z.enum(['observe', 'analyze', 'create_artifact', 'create_draft', 'reversible_change', 'deploy', 'external_publish', 'destructive_response']);
+export const CoreTeamAction = z.enum(['observe', 'analyze', 'create_artifact', 'create_draft', 'reversible_change', 'deploy', 'external_publish', 'destructive_response']);
+const Action = z.union([
+  CoreTeamAction,
+  z.string().regex(/^extension:[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9_]{0,63}$/)
+]);
 
 /** The mission shape without its cross-field rules (Zod 4 cannot omit fields from a refined object). */
 export const TeamMissionShape = z.object({
@@ -20,7 +24,9 @@ export const TeamMissionShape = z.object({
   resources: texts(1),
   deadline: z.number().int().min(1).max(253402300799),
   acceptance_criteria: texts(1),
-  expected_artifacts: texts()
+  expected_artifacts: texts(),
+  /** Validated only by the explicitly configured extension that owns the key. */
+  extensions: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), z.json()).optional()
 }).strict();
 export const TeamMission = TeamMissionShape;
 export type TeamMission = z.infer<typeof TeamMission>;
@@ -39,13 +45,13 @@ export const TeamResult = z.object({
 }).strict();
 export type TeamResult = z.infer<typeof TeamResult>;
 
-export function validateTeamEnvelope(value: unknown, authenticatedPeer: string, messageId: string, objective: string, nowSeconds = Date.now() / 1000, child = false): TeamEnvelope {
-  const envelope = TeamEnvelope.parse(value);
+export function validateTeamEnvelope(value: unknown, authenticatedPeer: string, messageId: string, objective: string, nowSeconds = Date.now() / 1000, child = false, decode: (value: unknown) => TeamEnvelope = value => TeamEnvelope.parse(value)): TeamEnvelope {
+  const envelope = TeamEnvelope.parse(decode(value));
   if (envelope.caller !== authenticatedPeer || envelope.task_id !== messageId || envelope.objective !== objective) throw new Error('Team envelope does not match authenticated message');
   if (child ? envelope.mission.parent_task === null : envelope.mission.parent_task !== null)
     throw new Error('Child mission requires an exact retained root reservation');
   if (envelope.mission.deadline <= nowSeconds) throw new Error('Team mission deadline expired');
-  if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > 48_000) throw new Error('Team envelope exceeds 48 KiB');
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 48_000 || Buffer.byteLength(JSON.stringify(envelope), 'utf8') > 48_000) throw new Error('Team envelope exceeds 48 KiB');
   return envelope;
 }
 

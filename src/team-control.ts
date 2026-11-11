@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ArdentRuntime } from './runtime.js';
-import { TeamEnvelope } from './team-contract.js';
+import type { TeamEnvelope } from './team-contract.js';
 
 const id = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 const EventsPayload = z.object({ native_task_id: id, after_cursor: z.number().int().min(0), limit: z.number().int().min(1).max(100) }).strict();
@@ -53,7 +53,7 @@ export class TeamControlService {
     const bound = MissionRow.parse(row);
     if (bound.tenant !== tenant || bound.caller !== caller) throw new Error('Team task owner differs');
     const raw: unknown = JSON.parse(bound.envelope_json);
-    return { envelope: TeamEnvelope.parse(raw), operationId: bound.operation_id };
+    return { envelope: this.runtime.decodeTeamEnvelope(raw), operationId: bound.operation_id };
   }
   #events(payload: z.infer<typeof EventsPayload>, tenant: string, caller: string): object {
     const { envelope } = this.#mission(payload.native_task_id, tenant, caller);
