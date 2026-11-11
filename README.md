@@ -579,3 +579,10 @@ Hermes team plugin or require a sibling Magnus checkout. The compatibility probe
 explicitly enables `hermes_compat` and allows its combined functional workload
 through the fixture's rate buckets. Default throttling remains covered by the
 separate rate-limit tests.
+
+HTTP mounts may set `rateLimit: { perMinute, burst }` for their authentication
+boundary. Defaults are 600 requests per minute and a burst of 120. Limits must be
+positive integers no greater than 6000 and 1200 respectively. All mounts from one
+plugin in the same boundary must agree; management and independent ingress retain
+separate buckets. This capacity is trusted plugin policy and grants no authentication
+or task authority. The one MiB body limit remains in force.

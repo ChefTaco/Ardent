@@ -94,6 +94,8 @@ export type ArdentHttpRoutes = {
   /** Management aliases keep bearer auth. Independent ingress must authenticate inside every handler. */
   security: 'management' | 'independent';
   app: Hono;
+  /** Bounded capacity for this plugin's authentication boundary; all mounts in it must agree. */
+  rateLimit?: { perMinute: number; burst: number };
 };
 
 /**

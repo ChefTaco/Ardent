@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 3.1.1 - 2026-11-11
+
+- Allow trusted extensions to declare bounded HTTP ingress capacity for chunked workflows. Management and independent ingress use separate buckets, and conflicting mounts fail before registration. Body limits, reserved routes and authentication remain enforced.
+
 ## 3.1.0 - 2026-11-11
 
 - Add profile-specific asynchronous plugin factories, a supported plugin SDK, task-bound tool additions and restrictive tool filters, and drain/cleanup hooks that keep unresolved services and journals held.
