@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Mattermost: a post longer than 16,000 characters is cut to that length. It used to be rejected on every reconciliation that still listed it, which stopped intake for the other channels and, after ten failed reconnects, ended the gateway.
+- Mattermost: `@name:`, `@name;` and `(@name)` count as mentions, and a longer username such as `@name.helper` no longer does. A socket whose authentication is refused is closed.
+- Telegram: a document that Telegram refuses to hand out (expired or unavailable) is passed on as metadata only. The failed lookup used to make every poll refetch the same update, so no later message was read.
+- llama.cpp: a response stream that Ardent stops reading (for example after a malformed event) is cancelled, so the server does not keep generating into it.
+- Artifacts: two tasks storing identical bytes in the same millisecond no longer collide on the temporary file.
+
 ## 3.1.2 - 2026-11-11
 
 ### Security
