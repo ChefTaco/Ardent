@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.1.3 - 2026-11-13
+
 ### Fixed
 
 - Mattermost: a post longer than 16,000 characters is cut to that length. It used to be rejected on every reconciliation that still listed it, which stopped intake for the other channels and, after ten failed reconnects, ended the gateway.
