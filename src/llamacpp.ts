@@ -45,7 +45,12 @@ export async function* sseData(stream: ReadableStream<Uint8Array>): AsyncGenerat
     }
     pending += decoder.decode();
     if (pending.trim()) throw new Error('Incomplete SSE event');
-  } finally { reader.releaseLock(); }
+  } finally {
+    // A consumer that stops early (a malformed event, [DONE]) must end the
+    // response, or the server keeps generating into an unread stream.
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 export class NativeLlmBackend {
