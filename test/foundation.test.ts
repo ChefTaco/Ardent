@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile, mkdir, symlink, unlink } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initProfile, loadConfig, saveConfig } from '../src/config.js';
@@ -679,6 +679,24 @@ describe('network contracts', () => {
     const values: string[] = [];
     for await (const value of sseData(stream)) values.push(value);
     expect(values).toEqual(['{"text":"café"}', '[DONE]']);
+  });
+  it('ends the SSE response when its consumer stops early', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: first\n\ndata: second\n\n')); },
+      cancel() { cancelled = true; }
+    });
+    for await (const value of sseData(stream)) { expect(value).toBe('first'); break; }
+    expect(cancelled).toBe(true);
+  });
+  it('stores identical artifact bytes written at the same instant', async () => {
+    const dir = await temp();
+    const store = new ArtifactStore(join(dir, 'artifacts'));
+    const bytes = Buffer.from('identical deliverable');
+    const stored = await Promise.all(Array.from({ length: 16 }, () => store.put('report.txt', 'text/plain', bytes)));
+    expect(new Set(stored.map(item => item.id)).size).toBe(1);
+    expect(Buffer.from(await store.get(stored[0]!.id)).toString()).toBe('identical deliverable');
+    expect((await readdir(join(dir, 'artifacts'))).filter(name => name.startsWith('.'))).toEqual([]);
   });
   it('repairs one non-JSON research answer using only observed source IDs', async () => {
     const sourceUrl = 'https://93.184.216.34/repair-source';

@@ -27,9 +27,15 @@ function splitMessage(text: string): string[] {
   }
   return result;
 }
-function mentionPattern(username: string): RegExp {
+/** The longest message text a channel event carries; longer posts are cut, as the task prompt is. */
+const MAX_EVENT_TEXT = 16_000;
+/**
+ * Matches `@username` as a whole mention. Trailing punctuation ("@bot:", "@bot.")
+ * still mentions the bot, while a longer name ("@bot.helper", "@bot-two") does not.
+ */
+export function mentionPattern(username: string): RegExp {
   const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|\\s)@${escaped}(?=\\s|$|[.,!?])`, 'i');
+  return new RegExp(`(^|[^A-Za-z0-9_.@-])@${escaped}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9_-])`, 'i');
 }
 
 export class MattermostAdapter {
@@ -95,7 +101,9 @@ export class MattermostAdapter {
     if (freshOnly && this.runtime.store.hasInbound('mattermost', me.id, post.id)) return;
     const cursorKey = `mattermost:${me.id}:${post.channel_id}:last_ms`;
     const previous = Number(this.runtime.store.cursor(cursorKey) ?? '0');
-    const text = isDm ? post.message : post.message.replace(mentionPattern(me.username), '$1').trim();
+    // A post may be longer than one channel event. Cut it here: a rejected event
+    // would fail every later reconciliation that still lists the post.
+    const text = (isDm ? post.message : post.message.replace(mentionPattern(me.username), '$1').trim()).slice(0, MAX_EVENT_TEXT);
     const event: ChannelEvent = { platform: 'mattermost', channel_type: isDm ? 'mattermost_dm' : 'mattermost_channel',
       account: me.id, user: post.user_id, conversation: post.channel_id, thread: post.root_id || null, update_id: post.id, reply_to: post.id, text, attachments, authorized: true, bot_message: false };
     const operation = this.#core.handle(event, async reply => this.#deliver(post, channelType, reply)).catch(error => {
@@ -182,7 +190,7 @@ export class MattermostAdapter {
       };
       socket.on('message', onMessage);
       socket.once('close', () => { clearTimeout(timer); reject(new Error('Mattermost WebSocket closed before authentication')); });
-    });
+    }).catch((error: unknown) => { socket.terminate(); throw error; }); // A refused socket must not stay open.
     const polling = new AbortController();
     socket.on('message', data => {
       try {

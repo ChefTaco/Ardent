@@ -386,6 +386,49 @@ describe('Telegram Bot API adapter', () => {
       expect(offsets).toEqual([0, 1]);
     } finally { runtime.close(); }
   });
+  it('keeps a refused document as metadata instead of refetching the update forever', async () => {
+    const sent: { text: string }[] = [];
+    let fileLookups = 0;
+    const api = await fixture((request, response) => {
+      let body = '';
+      request.on('data', chunk => { body += String(chunk); });
+      request.on('end', () => {
+        response.setHeader('Content-Type', 'application/json');
+        const method = request.url?.split('/').at(-1);
+        if (method === 'getMe') response.end(JSON.stringify({ ok: true, result: { id: 999, is_bot: true, username: 'assistant_test_bot' } }));
+        else if (method === 'getWebhookInfo') response.end(JSON.stringify({ ok: true, result: { url: '' } }));
+        else if (method === 'getUpdates') {
+          const input = JSON.parse(body) as { offset: number };
+          response.end(JSON.stringify({ ok: true, result: [{ update_id: 1, message: { message_id: 11, from: { id: 123, is_bot: false }, chat: { id: 123, type: 'private' }, caption: '/status',
+            document: { file_id: 'expired-file', file_name: 'notes.txt', mime_type: 'text/plain', file_size: 12 } } }].filter(update => update.update_id >= input.offset) }));
+        } else if (method === 'getFile') {
+          fileLookups++;
+          response.writeHead(400).end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: wrong file_id or the file is temporarily unavailable' }));
+        } else if (method === 'sendMessage') {
+          sent.push(JSON.parse(body) as { text: string });
+          response.end(JSON.stringify({ ok: true, result: { message_id: 100, chat: { id: 123, type: 'private' } } }));
+        } else if (method === 'sendChatAction') response.end(JSON.stringify({ ok: true, result: true }));
+        else response.writeHead(404).end('{}');
+      });
+    });
+    const dir = await temp();
+    await initTestProfile(dir);
+    const config = (await loadConfig(dir)).config;
+    config.channels.telegram.enabled = true;
+    config.channels.telegram.allowed_user_ids = [123];
+    const env = { TELEGRAM_BOT_TOKEN: '123456:12345678901234567890' };
+    const runtime = new ArdentRuntime(dir, config, env);
+    try {
+      const adapter = new TelegramAdapter(runtime, config.channels.telegram, env, api);
+      expect(await adapter.pollOnce()).toBe(1);
+      await adapter.drain();
+      expect(fileLookups).toBe(1);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.text).toContain('Session:');
+      expect(runtime.store.cursor('telegram:999:offset')).toBe('2');
+      expect(runtime.store.cursor('telegram:999:last_error')).toBeUndefined();
+    } finally { runtime.close(); }
+  });
   it('rejects webhook ownership before polling and does not delete it', async () => {
     const methods: string[] = [];
     const api = await fixture((request, response) => {

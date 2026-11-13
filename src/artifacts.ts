@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -24,7 +24,8 @@ export class ArtifactStore {
     if (bytes.length > this.maxBytes) throw new Error(`Artifact exceeds ${formatBytes(this.maxBytes)}`);
     const digest = createHash('sha256').update(bytes).digest('hex');
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = join(this.directory, `.${digest}.${process.pid}.${Date.now()}`);
+    // Unique per call: two tasks may store identical bytes at the same instant.
+    const temporary = join(this.directory, `.${digest}.${randomUUID()}.tmp`);
     await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
     await rename(temporary, join(this.directory, digest));
     return { id: digest, sha256: digest, bytes: bytes.length, media_type: mediaType, name };
