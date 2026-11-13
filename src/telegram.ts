@@ -181,8 +181,12 @@ export class TelegramAdapter {
       const doc = message.document;
       const attachment: ChannelEvent['attachments'][number] = { name: doc.file_name.slice(0, 128), media_type: doc.mime_type.slice(0, 100), external_id: doc.file_id.slice(0, 256) };
       if ((doc.file_size ?? Number.POSITIVE_INFINITY) <= 2 * 1024 * 1024 && ['text/plain', 'text/markdown', 'application/json'].includes(doc.mime_type)) {
-        const file = z.object({ file_path: z.string() }).passthrough().parse(await this.#call('getFile', { file_id: doc.file_id }, signal));
-        if (/^[A-Za-z0-9_./-]{1,512}$/.test(file.file_path) && !file.file_path.split('/').includes('..')) {
+        // A refused file (expired or unavailable) stays metadata only. Failing the
+        // update instead would refetch it on every poll and stop all later intake.
+        const file = await this.#call('getFile', { file_id: doc.file_id }, signal).then(
+          value => z.object({ file_path: z.string() }).passthrough().parse(value),
+          (error: unknown) => { if (error instanceof DeliveryRejectedError) return undefined; throw error; });
+        if (file && /^[A-Za-z0-9_./-]{1,512}$/.test(file.file_path) && !file.file_path.split('/').includes('..')) {
           const response = await fetch(`${this.#base}/file/bot${this.#token}/${file.file_path}`, { ...(signal ? { signal } : {}), redirect: 'error' });
           if (response.ok) {
             const bytes = new Uint8Array(await response.arrayBuffer());
