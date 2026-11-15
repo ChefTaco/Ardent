@@ -81,6 +81,10 @@ ardent gateway run                       # management API, A2A, channels, jobs
 
 `ardent help` lists every command.
 
+Each [Magnus](https://github.com/ChefTaco/magnus) release is built and tested
+against one pinned Ardent version: Magnus 3.0.2 pins Ardent 3.1.3. Every Ardent
+release is followed by a Magnus update.
+
 ### Native suite artifact
 
 Build this repository's `Dockerfile` from the repository root, then select that
@@ -514,6 +518,13 @@ share a bounded per-plugin rate bucket (600/minute, burst 120), applied before
 handler authentication and parsing. Wildcard routes and middleware mounts are
 refused so an extension cannot intercept unrelated core requests.
 
+HTTP mounts may set `rateLimit: { perMinute, burst }` for their authentication
+boundary. Defaults are 600 requests per minute and a burst of 120. Limits must be
+positive integers no greater than 6000 and 1200 respectively. All mounts from one
+plugin in the same boundary must agree; management and independent ingress retain
+separate buckets. This capacity is trusted plugin policy and grants no authentication
+or task authority. The one MiB body limit remains in force.
+
 Offline job-validation contexts expose `runtimeAvailable: false`; their runtime
 and tool registry getters throw. CLI extensions receive `rawArgs` for their own
 option grammar, declare `valueOptions` to recognize values before the command, and can use `matches(invocation)` to select one subcommand while
@@ -557,13 +568,6 @@ npm run pack:check      # packs, installs, and smoke-tests the tarball
 npm run verify          # every gate CI runs, in order
 ```
 
-See [AGENTS.md](AGENTS.md) for contributor guidance.
-
-## License
-
-Apache-2.0. The vendored A2A protocol definition in `protocol/` carries its own
-license, [`protocol/LICENSE-A2A.txt`](protocol/LICENSE-A2A.txt).
-
 ### Interoperability checks
 
 Run `npm run interop` from this standalone checkout. The runner installs pinned
@@ -580,9 +584,9 @@ explicitly enables `hermes_compat` and allows its combined functional workload
 through the fixture's rate buckets. Default throttling remains covered by the
 separate rate-limit tests.
 
-HTTP mounts may set `rateLimit: { perMinute, burst }` for their authentication
-boundary. Defaults are 600 requests per minute and a burst of 120. Limits must be
-positive integers no greater than 6000 and 1200 respectively. All mounts from one
-plugin in the same boundary must agree; management and independent ingress retain
-separate buckets. This capacity is trusted plugin policy and grants no authentication
-or task authority. The one MiB body limit remains in force.
+See [AGENTS.md](AGENTS.md) for contributor guidance.
+
+## License
+
+Apache-2.0. The vendored A2A protocol definition in `protocol/` carries its own
+license, [`protocol/LICENSE-A2A.txt`](protocol/LICENSE-A2A.txt).
