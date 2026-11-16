@@ -81,9 +81,22 @@ ardent gateway run                       # management API, A2A, channels, jobs
 
 `ardent help` lists every command.
 
+### Under Magnus and in the Hive suite
+
 Each [Magnus](https://github.com/ChefTaco/magnus) release is built and tested
-against one pinned Ardent version: Magnus 3.0.2 pins Ardent 3.1.3. Every Ardent
-release is followed by a Magnus update.
+against one pinned Ardent version: Magnus 3.1.1 pins Ardent 3.1.3. Every Ardent
+release is followed by a Magnus release that moves the pin, regenerates its
+Ardent contract and updates the node agent; until then, managed nodes keep the
+pinned version.
+
+Magnus installs that pinned package on a node and creates profiles with its
+**New Agent** workflow, which always enables HiveMem. In a
+[Hive](https://github.com/ChefTaco/hive) suite installation, run
+`./hive.sh ardent setup` after enrolling the host agent: it creates an
+`assistant` profile through Magnus and tests a real model response. See Hive's
+[Create an Ardent assistant](https://github.com/ChefTaco/hive/blob/main/deployment/FULL.md#create-an-ardent-assistant)
+and Magnus's [Ardent guide](https://github.com/ChefTaco/magnus/blob/main/docs/ARDENT.md).
+Ardent Project Studio and the UI reach those profiles only through Magnus.
 
 ### Native suite artifact
 
