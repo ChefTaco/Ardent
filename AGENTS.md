@@ -1,8 +1,27 @@
 # AGENTS.md - Ardent
 
-Guidance for contributors (human or AI) working on Ardent. This public
-Apache-2.0 product was extracted from the Magnus monorepo. Preserve LICENSE,
-NOTICE, `protocol/LICENSE-A2A.txt` and `provenance.json`.
+Guidance for contributors (human or AI) working on Ardent, the headless agent
+runtime of the Hive:Magnus suite, published as `@hivemagnus/ardent`. It runs
+standalone or under [Magnus](https://github.com/ChefTaco/magnus), which installs
+the pinned package on fleet nodes and manages its profiles. In a Hive suite,
+assistants are provisioned through Magnus's New Agent workflow
+(`./hive.sh ardent setup`); ArdentStudio and the UI (HiveXUI) reach profiles
+only through Magnus. This public Apache-2.0 product was extracted from the
+Magnus monorepo. Preserve LICENSE, NOTICE, `protocol/LICENSE-A2A.txt` and
+`provenance.json`.
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `src/` | Runtime, CLI (`cli.ts`, `cli-commands.ts`), management API (`api.ts`), A2A (`a2a*.ts`), channels, jobs, plugins (`plugins.ts`, `plugin-sdk.ts`), native launcher (`native-entry.ts`) |
+| `test/` | Vitest suites; `test/interop/` needs Python, `test/generated/` holds the typed OpenAPI client, `test/fixtures/` the Codex App Server fake and the Python A2A, Hermes and team reference peers |
+| `profiles/assistant/` | Bundled template that `ardent init` copies (config, persona, `grounded-answers` skill) |
+| `openapi/ardent.json` | Pinned management OpenAPI document |
+| `protocol/` | Vendored A2A protobuf and its lock (see `protocol/README.md`) |
+| `scripts/` | Release, privacy, secret-scan, protocol, OpenAPI, package and end-to-end checks |
+| `Dockerfile` | Native-export image that Magnus turns into a native suite artifact |
+| `model-policy.default.json` | Starting point for `$ARDENT_HOME/model-policy/active.json` |
 
 ## Privacy
 
@@ -20,8 +39,10 @@ messages:
   tracked content.
 - Install the hooks with `npm run hooks:install` and never bypass them
   (`--no-verify`). They run `scripts/check-private-data.sh` (forbidden paths and
-  the optional, gitignored `.private-terms` denylist, also on commit messages)
-  and `scripts/scan-secrets.sh`.
+  the optional, gitignored `.private-terms` denylist, also on commit messages),
+  `scripts/scan-secrets.sh` and the pinned Gitleaks (`scripts/gitleaks.sh`).
+  Install Gitleaks first with `bash scripts/install-gitleaks.sh`; a missing
+  binary fails the hooks (see CONTRIBUTING.md).
 
 ## Ground rules
 
@@ -72,17 +93,27 @@ tools stay subject to the same context and mission scoping as built-in tools.
 
 ## Management API and OpenAPI
 
-The dashboard and the Magnus node agent call the management API. Do not change
-the shape of existing endpoints. When routes or schemas change, regenerate the
+The Magnus node agent calls the management API on loopback; Magnus, its
+console, the UI and ArdentStudio reach a profile only through Magnus. Do not
+change the shape of existing endpoints. When routes or schemas change, regenerate the
 pinned document with `npm run openapi:write` and commit `openapi/ardent.json` and
 `test/generated/ardent-openapi.ts`. Magnus generates its own typed client from
 the published package, so a shape change also needs a Magnus update.
 
 Magnus deploys and manages Ardent agents, so **every Ardent release is followed
-by a Magnus update**: bump its `@hivemagnus/ardent` pins, regenerate its typed
-client, allow any new management routes or actions in its node agent, and
-release the agent. Magnus's `ardent:latest:check` fails while it pins an older
-Ardent than the latest published release.
+by a Magnus release**: bump its `@hivemagnus/ardent` pins (root and agent
+`package.json`, agent `npm-shrinkwrap.json`), regenerate its typed client and
+contract (`npm run ardent:openapi:write`), allow any new management routes or
+actions in its node agent, and release the agent. Magnus's
+`npm run ardent:latest:check` fails while it pins an older Ardent than the
+latest published release. The Hive suite only gets a new Ardent through the
+Magnus release it pins: Magnus stages the Ardent package that New Agent and
+`./hive.sh ardent setup` install.
+
+Plugin packages that pin an exact `@hivemagnus/ardent` peer version need a
+matching release **before** Magnus moves its pin: a managed upgrade reinstalls
+an installation's retained extension archives with strict peers and holds the
+current runtime when a peer does not match.
 
 ## Tests and gates
 
