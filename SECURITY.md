@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are released for the latest `2.x` version of `@hivemagnus/ardent`.
+Security fixes are released for the latest `3.x` version of `@hivemagnus/ardent`.
 
 ## Reporting a vulnerability
 
