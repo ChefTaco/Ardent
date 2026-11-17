@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.1.4 - 2026-11-17
+
+### Changed
+
+- Update `@hono/node-server` to 2.1.6 and raise the minimum accepted version to `^2.1.6`, so installs no longer resolve the older 2.1.5.
+
 ## 3.1.3 - 2026-11-13
 
 ### Fixed
