@@ -87,7 +87,7 @@ describe.skipIf(!mattermostAvailable)('real Mattermost JSON store process (requi
     const adminPassword = `Fixture-${randomUUID()}!`;
     const child = spawn(process.execPath, ['--import', 'tsx', 'src/server/index.ts'], {
       cwd: mattermostRepo,
-      env: { ...process.env, MATTERMOST_ENV_FILE: join(dir, 'none.env'), NODE_ENV: 'test', ENABLE_DEV_DEFAULTS: 'true', STORE_BACKEND: 'json', STORE_PATH: join(dir, 'mattermost.json'), FILE_STORAGE_PATH: join(dir, 'files'), PROFILE_IMAGE_STORAGE_PATH: join(dir, 'images'), SERVER_URL: base, PORT: String(port), ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: adminPassword, ADMIN_EMAIL: 'admin@example.test', HERMES_BOT_USERNAME: 'assistant', HERMES_BOT_DISPLAY_NAME: 'Assistant', HERMES_BOT_TOKEN: botToken },
+      env: { ...process.env, MATTERMOST_ENV_FILE: join(dir, 'none.env'), CHATTERMOST_ENV_FILE: join(dir, 'none.env'), NODE_ENV: 'test', ENABLE_DEV_DEFAULTS: 'true', STORE_BACKEND: 'json', STORE_PATH: join(dir, 'mattermost.json'), FILE_STORAGE_PATH: join(dir, 'files'), PROFILE_IMAGE_STORAGE_PATH: join(dir, 'images'), SERVER_URL: base, PORT: String(port), ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: adminPassword, ADMIN_EMAIL: 'admin@example.test', HERMES_BOT_USERNAME: 'assistant', HERMES_BOT_DISPLAY_NAME: 'Assistant', HERMES_BOT_TOKEN: botToken },
       stdio: 'ignore'
     });
     children.push(child);
@@ -207,4 +207,84 @@ describe.skipIf(!mattermostAvailable)('real Mattermost JSON store process (requi
       await reconnected;
     } finally { stop.abort(); runtime.close(); }
   }, 30000);
+
+  it('recovers 250 posts sent while the agent was stopped, once each', async () => {
+    const dir = await temp();
+    const port = await openPort();
+    const base = `http://127.0.0.1:${port}`;
+    const botToken = `fixture-${randomUUID()}`;
+    const adminPassword = `Fixture-${randomUUID()}!`;
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/server/index.ts'], {
+      cwd: mattermostRepo,
+      env: { ...process.env, MATTERMOST_ENV_FILE: join(dir, 'none.env'), CHATTERMOST_ENV_FILE: join(dir, 'none.env'), NODE_ENV: 'test', ENABLE_DEV_DEFAULTS: 'true', STORE_BACKEND: 'json', STORE_PATH: join(dir, 'mattermost.json'), FILE_STORAGE_PATH: join(dir, 'files'), PROFILE_IMAGE_STORAGE_PATH: join(dir, 'images'), SERVER_URL: base, PORT: String(port), ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: adminPassword, ADMIN_EMAIL: 'admin@example.test', HERMES_BOT_USERNAME: 'assistant', HERMES_BOT_DISPLAY_NAME: 'Assistant', HERMES_BOT_TOKEN: botToken, TRUSTED_PROXIES: '127.0.0.1' },
+      stdio: 'ignore'
+    });
+    children.push(child);
+    await until(async () => (await fetch(`${base}/api/v4/system/ping`)).ok ? true : undefined);
+    const login = await fetch(`${base}/api/v4/users/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ login_id: 'admin', password: adminPassword }) });
+    const user = await login.json() as { id: string };
+    const userHeaders = { Authorization: `Bearer ${login.headers.get('token') ?? ''}`, 'Content-Type': 'application/json' };
+    const bot = await (await fetch(`${base}/api/v4/users/username/assistant`, { headers: userHeaders })).json() as { id: string };
+    const channel = await (await fetch(`${base}/api/v4/channels/direct`, { method: 'POST', headers: userHeaders, body: JSON.stringify([bot.id]) })).json() as { id: string };
+    const model = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        if (request.url !== '/v1/chat/completions') { response.writeHead(404).end(); return; }
+        response.setHeader('Content-Type', 'text/event-stream');
+        response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'CATCHUP_OK' } }] })}\n\ndata: [DONE]\n\n`);
+      });
+    });
+    servers.push(model);
+    await new Promise<void>(resolve => model.listen(0, '127.0.0.1', resolve));
+    const modelAddress = model.address();
+    if (!modelAddress || typeof modelAddress === 'string') throw new Error('No model port');
+    const profileDir = join(dir, 'ardent');
+    await initTestProfile(profileDir);
+    const config = (await loadConfig(profileDir)).config;
+    config.research.enabled = false;
+    config.providers.llamacpp.base_url = `http://127.0.0.1:${modelAddress.port}/`;
+    config.providers.llamacpp.model = 'fixture';
+    config.channels.mattermost.base_url = base;
+    config.channels.mattermost.allowed_user_ids = [user.id];
+    const env = { MATTERMOST_TOKEN: botToken };
+    const runtime = new ArdentRuntime(profileDir, config, env);
+    const stop = new AbortController();
+    try {
+      const adapter = new MattermostAdapter(runtime, config.channels.mattermost, env);
+      await adapter.initialize();
+      // Seed the channel boundary, then post while no adapter is connected.
+      await adapter.reconcile(false);
+      const sent: string[] = [];
+      for (let i = 0; i < 250; i++) {
+        // Distinct forwarded sources keep the operator's own posts under the server's per-source limit.
+        const response = await fetch(`${base}/api/v4/posts`, { method: 'POST', headers: { ...userHeaders, 'X-Forwarded-For': `198.51.100.${1 + i % 200}` }, body: JSON.stringify({ channel_id: channel.id, message: `question ${i}` }) });
+        expect(response.status).toBe(201);
+        sent.push((await response.json() as { id: string }).id);
+      }
+      // The 250 replies exceed ChatterMost's 240 requests a minute per source; the
+      // adapter waits out the 429 instead of dropping the rest.
+      const connected = adapter.connectOnce(stop.signal);
+      const count = (sql: string) => (runtime.store.db.prepare(sql).get(bot.id) as { n: number }).n;
+      await until(async () => count("SELECT count(*) AS n FROM channel_deliveries WHERE account=? AND state='sent'") === 250 ? true : undefined, 120_000);
+      expect(count("SELECT count(*) AS n FROM tasks WHERE caller='mattermost:' || ? || ':" + user.id + "'")).toBe(250);
+      expect(runtime.store.catchup.status('mattermost').find(item => item.channel === channel.id)).toMatchObject({ state: 'complete', recovered: 250, pages: 2 });
+      type Listing = { order: string[]; posts: Record<string, { user_id: string; root_id: string; create_at: number }> };
+      const listing = async (before = ''): Promise<Listing> => {
+        const response = await fetch(`${base}/api/v4/channels/${channel.id}/posts?per_page=200${before ? `&before=${before}` : ''}`, { headers: { ...userHeaders, 'X-Forwarded-For': '203.0.113.1' } });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`listing ${response.status} ${text.slice(0, 200)}`);
+        return JSON.parse(text) as Listing;
+      };
+      const replies: string[] = [];
+      const oldest = (page: Listing) => Object.values(page.posts).sort((a, b) => a.create_at - b.create_at)[0];
+      for (let page = await listing(); page.order.length; page = await listing(Object.keys(page.posts).find(id => page.posts[id] === oldest(page))))
+        for (const id of page.order) if (page.posts[id]?.user_id === bot.id) replies.push(page.posts[id]?.root_id ?? '');
+      // DM replies are flat, so match them to their posts through the delivery journal.
+      expect(replies).toHaveLength(250);
+      const delivered = runtime.store.db.prepare("SELECT update_id FROM channel_deliveries WHERE account=? AND state='sent'").all(bot.id) as { update_id: string }[];
+      expect(new Set(delivered.map(row => row.update_id))).toEqual(new Set(sent));
+      stop.abort();
+      await connected;
+    } finally { stop.abort(); runtime.close(); }
+  }, 180_000);
 });

@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from './sqlite.js';
 import { z } from 'zod';
+import { CatchupJournal } from './channel-catchup.js';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
@@ -20,9 +21,12 @@ export type TaskEvent = z.infer<typeof EventSchema>;
 /** Historical transport labels remain distinct; adapters must retain their original identity. */
 export type InboundChannelType = 'unknown' | 'telegram_private' | 'telegram_group' | 'telegram_supergroup' |
   'mattermost_dm' | 'mattermost_channel' | 'chattermost_dm' | 'chattermost_channel';
+/** How a claimed inbound post was settled: admitted to the normal channel path, or claimed by catch-up as too old to answer. */
+export type InboundDisposition = 'admitted' | 'skipped_stale';
 
 export class TaskStore {
   readonly db: Database;
+  readonly catchup: CatchupJournal;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path);
@@ -102,6 +106,8 @@ export class TaskStore {
       channel_type TEXT NOT NULL DEFAULT 'unknown' CHECK(channel_type IN
         ('unknown','telegram_private','telegram_group','telegram_supergroup',
          'mattermost_dm','mattermost_channel','chattermost_dm','chattermost_channel'))`);
+    if (!inboundColumns.some(column => column.name === 'disposition')) this.db.exec(`ALTER TABLE channel_inbound ADD COLUMN
+      disposition TEXT NOT NULL DEFAULT 'admitted' CHECK(disposition IN ('admitted','skipped_stale'))`);
     this.db.exec(`CREATE TRIGGER IF NOT EXISTS channel_inbound_type_immutable
       BEFORE UPDATE OF channel_type ON channel_inbound
       WHEN OLD.channel_type != NEW.channel_type
@@ -110,6 +116,7 @@ export class TaskStore {
       BEFORE UPDATE ON session_messages BEGIN SELECT RAISE(ABORT, 'Session messages are immutable'); END;
       CREATE TRIGGER IF NOT EXISTS session_messages_immutable_delete
       BEFORE DELETE ON session_messages BEGIN SELECT RAISE(ABORT, 'Session messages are immutable'); END;`);
+    this.catchup = new CatchupJournal(this.db);
   }
   close(): void { this.db.close(); }
   admissionFence(): { release_id: string; closed_ms: number } | null {
@@ -132,7 +139,7 @@ export class TaskStore {
         inbound_unbound: count(`SELECT count(*) AS count FROM channel_inbound AS inbound
           LEFT JOIN channel_deliveries AS delivery ON delivery.platform=inbound.platform
             AND delivery.account=inbound.account AND delivery.update_id=inbound.update_id
-          WHERE inbound.task_id IS NULL AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`) };
+          WHERE inbound.task_id IS NULL AND inbound.disposition='admitted' AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`) };
     })();
   }
   session(caller: string, context: TaskContext, key: string): Session {
@@ -228,7 +235,7 @@ export class TaskStore {
       .get(platform, account, updateId) !== undefined;
   }
   claimInbound(platform: string, account: string, updateId: string,
-    channelType: InboundChannelType = 'unknown'): { claimed: boolean; taskId: string | null } {
+    channelType: InboundChannelType = 'unknown', disposition: InboundDisposition = 'admitted'): { claimed: boolean; taskId: string | null } {
     if (!platform || !account || !updateId || updateId.length > 256) throw new Error('Invalid channel update identity');
     if ((platform === 'telegram' && (channelType.startsWith('mattermost_') || channelType.startsWith('chattermost_'))) ||
         (['mattermost', 'chattermost'].includes(platform) && channelType.startsWith('telegram_')) ||
@@ -245,8 +252,8 @@ export class TaskStore {
         return { claimed: false, taskId: prior.task_id };
       }
       this.db.prepare(`INSERT INTO channel_inbound
-        (platform,account,update_id,task_id,created_ms,channel_type) VALUES (?,?,?,?,?,?)`)
-        .run(platform, account, updateId, null, Date.now(), channelType);
+        (platform,account,update_id,task_id,created_ms,channel_type,disposition) VALUES (?,?,?,?,?,?,?)`)
+        .run(platform, account, updateId, null, Date.now(), channelType, disposition);
       return { claimed: true, taskId: null };
     })();
   }

@@ -247,12 +247,46 @@ channels:
     allowed_user_ids: [user-id]
     require_mention: true
     reply_mode: thread                # thread | flat
+    catchup:                          # optional; these are the defaults
+      max_posts: 2000                 # 1-10000 posts from others per walk
+      max_age_hours: 24               # older missed posts are skipped, not answered
 ```
 
 Telegram uses long polling; Mattermost uses its v4 REST and WebSocket APIs.
 Both support `/help`, `/new`, `/status`, `/jobs`, `/model`, `/stop`, `/tasks`,
 and `/sources`. Each inbound message and outbound reply is journaled, so a
 restart never sends the same reply twice.
+
+**Mattermost catch-up.** Posts missed while Ardent was stopped or its
+WebSocket was down are recovered from history. Ardent keeps a boundary per
+channel (the newest post up to which everything older is settled). On start,
+after every reconnect, and every 30 seconds, it walks back from the newest post
+to that boundary in pages of 200 (`before=<post id>`), then handles the posts
+oldest first. This works with Mattermost and ChatterMost alike.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `catchup.max_posts` | `2000` (at most `10000`) | Posts from others that one walk reads. The bot's own posts do not count, but a walk reads at most `2 × max_posts / 200` pages. |
+| `catchup.max_age_hours` | `24` | A missed post older than this is claimed as `skipped_stale` and not answered. |
+
+Every eligible post in the walk ends in exactly one of four ways:
+
+- **Answered.** It goes through the normal channel path: an atomic claim, then the task, then the reply.
+- **Already claimed.** A live event, an earlier walk or an earlier run claimed it. It is never answered again, so a reply whose outcome is unknown is never replayed.
+- **Skipped as stale.** The claim is recorded with `disposition` `skipped_stale`.
+- **Lost to a permanent gap.** The gap is recorded as a row with `walk_bound` when the walk reached its bound before the boundary, or `retention` when the server no longer holds the history (for example, the `before` pivot disappeared).
+
+The boundary moves only past posts settled in order, so an interrupted walk
+resumes where it stopped. A channel seen for the first time is seeded without
+answering its history.
+
+Replies that the server rate-limits (`429`) wait out `Retry-After` under the
+`mattermost` retry policy (see [Retries](#retries)). `GET /api/v1/status` reports the latest walk of each channel under
+`channels.mattermost.catchup`:
+
+- `state`: `idle`, `catching_up`, `complete` or `gap`.
+- Counters: `recovered`, `skipped_stale`, `already_claimed` and `pages`.
+- Gaps: the gap count and `last_gap`.
 
 ### A2A
 
@@ -349,6 +383,7 @@ built on the shared `@hivemagnus/hive-common/retry` helpers:
 | A2A `SendMessage` | 3 | 500 ms → 5 s, equal jitter | as above, always with the same `messageId` |
 | A2A push delivery | 3 | `Retry-After` clamped to 1–5 s | 408/425/429/5xx (the callback did not accept the event) |
 | Telegram Bot API | 4 | Telegram's `retry_after`, capped at 60 s | 429 with `retry_after` |
+| Mattermost/ChatterMost REST | 3 | `Retry-After` up to 60 s (1 s without one) | 429 only (the request was not processed) |
 | Codex turns, tools with a possible effect | 1 | — | never |
 
 Nothing is repeated once its effect is uncertain, after any response byte was

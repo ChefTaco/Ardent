@@ -9,6 +9,14 @@
 - Tool contract (additive): `idempotent`, `concurrency`, a `reconcile` hook (declared for execution recovery, not called yet) and a third `invoke` argument `{ idempotencyKey, execution? }`, where `idempotencyKey` is `sha256("<task id>:<call id>")`. `defineTool` handlers receive it as their third argument. `ToolRegistry` gains `get`, `prepare` and `invokePrepared`; `call` accepts the context as an optional fifth argument.
 - Plugin lifecycle hooks: `messageReceived`, `messagePersisted`, `transformOutbound`, `messageDelivered`, `beforeToolCall` (deny only), `afterToolCall` and `toolCallCancelled`. `ArdentTaskPluginContext` gains an optional `execution`. See "Lifecycle hooks" in the README.
 - Journal events: `tool_not_dispatched`, `tool_denied_by_plugin`, `plugin_hook_failed` and `outbound_transformed`.
+- Mattermost and ChatterMost catch-up. After an outage, the adapter walks channel history back to a durable per-channel boundary, `{ last_ms, last_post_id }`. It reads pages of 200 posts with `before=<post id>` and handles the missed posts oldest first.
+  - Walks run on start, after every WebSocket reconnect, and every 30 seconds.
+  - The walk is bounded by the new `channels.mattermost.catchup.max_posts` setting (default 2000, at most 10000).
+  - Posts older than `catchup.max_age_hours` (default 24) are claimed as `skipped_stale` and not answered.
+  - History beyond the bound, or removed by retention, is recorded once as a permanent gap.
+  - Progress for each channel is reported in `GET /api/v1/status` under `channels.mattermost.catchup`.
+  - Claims stay atomic, so a live event that is also in the backlog is answered once. A post that was already claimed, including one whose reply outcome is unknown, is never answered again.
+- SQLite: a new `channel_inbound.disposition` column (`admitted` by default, or `skipped_stale`), and new `channel_catchup_gaps` and `channel_catchup_runs` tables. Skipped-stale claims are not counted as unbound inbound work when admission is fenced.
 
 ### Changed
 
@@ -24,6 +32,9 @@
 - The tool-call limit is checked when a call is dispatched, for both backends. A Codex call over the limit is refused by the shared scheduler instead of on arrival.
 - A plugin `observeToolResult` that throws is recorded as `plugin_hook_failed` and no longer fails the task (llama.cpp) or rejects the run (Codex).
 - The bundled profile template uses `max_parallel_tasks` and `max_parallel_tool_calls`.
+- Mattermost: the channel cursor is now `mattermost:<bot>:<channel>:last`, stored as JSON. A 3.1 `…:last_ms` cursor is read and upgraded in place, and is still written so that a rollback keeps working. An existing `…:reconcile_gap` record is moved into `channel_catchup_gaps` once.
+- Mattermost: a live WebSocket post no longer moves the channel cursor past posts that are still missing.
+- Mattermost: a request answered with `429` is repeated under a new `mattermost` retry policy (3 attempts, `Retry-After` up to 60 s). A burst of catch-up replies used to lose every reply past the server's rate limit.
 
 ### Deprecated
 
