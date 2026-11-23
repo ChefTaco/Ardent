@@ -129,7 +129,8 @@ describe('A2A surface limits', () => {
     const { base } = await surface({ ip_requests_per_minute: 1, ip_burst: 2 });
     expect((await fetch(`${base}/.well-known/agent-card.json`)).status).toBe(200);
     expect((await fetch(`${base}/a2a/jsonrpc`, { method: 'POST' })).status).toBe(401);
-    for (const [url, init] of [[`${base}/team/artifacts/x`, {}], [`${base}/a2a/rest/tasks`, {}], [`${base}/a2a/jsonrpc`, { method: 'POST' }],
+    for (const [url, init] of [[`${base}/team/artifacts/x`, {}], [`${base}/team/artifacts/x/manifest`, {}], [`${base}/team/artifacts/x/renditions`, {}],
+      [`${base}/a2a/rest/tasks`, {}], [`${base}/a2a/jsonrpc`, { method: 'POST' }],
       [`${base}/`, { method: 'POST' }], [`${base}/a2a/push/coordinator`, { method: 'POST' }], [`${base}/.well-known/hermes-team-card.json`, {}]] as const) {
       const response = await fetch(url, init);
       expect(response.status, url).toBe(429);
@@ -148,12 +149,13 @@ describe('A2A surface limits', () => {
     expect((await spoof(proxied.base, '192.0.2.1')).status).toBe(429);
   });
 
-  it('limits all six authorization routes before credentials or malformed bodies are processed', async () => {
+  it('limits all eight authorization routes before credentials or malformed bodies are processed', async () => {
     const { base, surface: created } = await surface({ ip_requests_per_minute: 1, ip_burst: 1 });
     const { token } = created.pushInbox.register('coordinator', 'limited-push');
     expect((await fetch(`${base}/.well-known/agent-card.json`)).status).toBe(200);
     const routes = [
-      ['/team/artifacts/missing?context=fixture', 'GET'], ['/.well-known/hermes-team-card.json', 'GET'],
+      ['/team/artifacts/missing?context=fixture', 'GET'], ['/team/artifacts/missing/manifest?context=fixture', 'GET'],
+      ['/team/artifacts/missing/renditions?context=fixture', 'GET'], ['/.well-known/hermes-team-card.json', 'GET'],
       ['/a2a/jsonrpc', 'POST'], ['/a2a/rest/message:send', 'POST'], ['/', 'POST'], ['/a2a/push/coordinator', 'POST']
     ] as const;
     for (const [path, method] of routes) {
@@ -173,7 +175,8 @@ describe('A2A surface limits', () => {
   it('limits each authenticated peer separately on every authenticated route', async () => {
     const { base } = await surface({ ...generous, peer_requests_per_minute: 1, peer_burst: 1 });
     expect((await fetch(`${base}/.well-known/hermes-team-card.json`, { headers: auth() })).status).toBe(200);
-    for (const [url, init] of [[`${base}/team/artifacts/x?context=y`, { headers: auth() }], [`${base}/a2a/rest/tasks`, { headers: auth() }],
+    for (const [url, init] of [[`${base}/team/artifacts/x?context=y`, { headers: auth() }], [`${base}/team/artifacts/x/manifest?context=y`, { headers: auth() }],
+      [`${base}/team/artifacts/x/renditions?context=y`, { headers: auth() }], [`${base}/a2a/rest/tasks`, { headers: auth() }],
       [`${base}/a2a/jsonrpc`, { method: 'POST', headers: rpcHeaders(), body: rpc('GetTask', 'x') }],
       [`${base}/`, { method: 'POST', headers: rpcHeaders(), body: rpc('GetTask', 'x') }]] as const) {
       const response = await fetch(url, init);
