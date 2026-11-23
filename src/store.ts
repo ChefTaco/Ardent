@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import Database from './sqlite.js';
 import { z } from 'zod';
 import { CatchupJournal } from './channel-catchup.js';
+import { TaskExecutions, type ExecutionContext, type TaskExecution } from './execution.js';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
@@ -27,6 +28,8 @@ export type InboundDisposition = 'admitted' | 'skipped_stale';
 export class TaskStore {
   readonly db: Database;
   readonly catchup: CatchupJournal;
+  /** Execution ancestry (attribution only; never read for tool, memory or mission scope). */
+  readonly executions: TaskExecutions;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path);
@@ -117,7 +120,10 @@ export class TaskStore {
       CREATE TRIGGER IF NOT EXISTS session_messages_immutable_delete
       BEFORE DELETE ON session_messages BEGIN SELECT RAISE(ABORT, 'Session messages are immutable'); END;`);
     this.catchup = new CatchupJournal(this.db);
+    this.executions = new TaskExecutions(this.db);
   }
+  /** The execution context a task was accepted with, if it has one (attribution only). */
+  executionFor(taskId: string): ExecutionContext | undefined { return this.executions.get(taskId)?.context; }
   close(): void { this.db.close(); }
   admissionFence(): { release_id: string; closed_ms: number } | null {
     const row = this.db.prepare('SELECT release_id,closed_ms FROM admission_fence WHERE singleton=1').get();
@@ -172,9 +178,11 @@ export class TaskStore {
    * Record a new task, or return the task already accepted for the same idempotency key.
    * `content` adds structured input (a mission, context items) to the idempotency digest;
    * `onAccepted` journals it in the same transaction, only for a newly accepted task.
+   * `execution` builds the task's execution context; it is recorded in
+   * `task_execution` and in the `accepted` event, and never enters the digest.
    */
   accept(input: { caller: string; context: TaskContext; sessionId?: string; prompt: string; idempotencyKey?: string; backend: 'llamacpp' | 'codex'; deadlineMs: number;
-    content?: unknown; onAccepted?: (task: Task) => void }): Task {
+    content?: unknown; onAccepted?: (task: Task) => void; execution?: (task: Task) => TaskExecution }): Task {
     if (!input.caller || input.caller.length > 128 || !input.prompt.trim() || input.prompt.length > 16000 || (input.idempotencyKey && input.idempotencyKey.length > 128)) throw new Error('Invalid task input');
     const hash = createHash('sha256').update(JSON.stringify(input.content === undefined ? [input.prompt, input.backend] : [input.prompt, input.backend, input.content])).digest('hex');
     return this.db.transaction(() => {
@@ -198,7 +206,9 @@ export class TaskStore {
       this.db.prepare(`INSERT INTO tasks (id,caller,context,session_id,prompt,content_hash,idempotency_key,backend,state,result,error,deadline_ms,created_ms,updated_ms)
         VALUES (@id,@caller,@context,@session_id,@prompt,@content_hash,@idempotency_key,@backend,@state,@result,@error,@deadline_ms,@created_ms,@updated_ms)`).run(task);
       if (task.session_id) this.db.prepare('INSERT INTO session_messages(session_id,task_id,role,content,created_ms) VALUES (?,?,?,?,?)').run(task.session_id, task.id, 'user', task.prompt, now);
-      this.append(task.id, 'accepted', { caller: input.caller, context: input.context, backend: input.backend });
+      const execution = input.execution?.(task);
+      if (execution) this.executions.insert(execution);
+      this.append(task.id, 'accepted', { caller: input.caller, context: input.context, backend: input.backend, ...(execution ? { execution: execution.context } : {}) });
       input.onAccepted?.(task);
       return task;
     })();

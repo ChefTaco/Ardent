@@ -299,6 +299,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/lineage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description What this profile knows about the task's causal tree: its execution context and parent, local child and continuation tasks, model attempts with their request ids, tool calls and artifacts. Rebuilt from SQLite, so it survives a restart. Attribution only. */
+        get: operations["getTaskLineage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/events": {
         parameters: {
             query?: never;
@@ -892,6 +909,21 @@ export interface components {
             deadline_ms: number;
             created_ms: number;
             updated_ms: number;
+            /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+            execution?: {
+                /** @enum {number} */
+                v: 1;
+                request_id?: string;
+                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                root: string;
+                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                parent?: string;
+                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                self?: string;
+                readonly inputs?: string[];
+                attempt?: number;
+                deadline_ms?: number;
+            };
         };
         TaskEvent: {
             sequence: number;
@@ -1623,6 +1655,21 @@ export interface operations {
                             deadline_ms: number;
                             created_ms: number;
                             updated_ms: number;
+                            /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                            execution?: {
+                                /** @enum {number} */
+                                v: 1;
+                                request_id?: string;
+                                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                                root: string;
+                                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                                parent?: string;
+                                /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                                self?: string;
+                                readonly inputs?: string[];
+                                attempt?: number;
+                                deadline_ms?: number;
+                            };
                         }[];
                     };
                 };
@@ -1649,6 +1696,21 @@ export interface operations {
                     /** Format: uuid */
                     session_id?: string;
                     idempotency_key?: string;
+                    /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                    execution?: {
+                        /** @enum {number} */
+                        v: 1;
+                        request_id?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        root: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        parent?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        self?: string;
+                        readonly inputs?: string[];
+                        attempt?: number;
+                        deadline_ms?: number;
+                    };
                 };
             };
         };
@@ -1729,6 +1791,21 @@ export interface operations {
                         [key: string]: string;
                     };
                     idempotency_key: string;
+                    /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                    execution?: {
+                        /** @enum {number} */
+                        v: 1;
+                        request_id?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        root: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        parent?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        self?: string;
+                        readonly inputs?: string[];
+                        attempt?: number;
+                        deadline_ms?: number;
+                    };
                 };
             };
         };
@@ -1798,6 +1875,21 @@ export interface operations {
                     /** Format: uuid */
                     session_id?: string;
                     idempotency_key?: string;
+                    /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                    execution?: {
+                        /** @enum {number} */
+                        v: 1;
+                        request_id?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        root: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        parent?: string;
+                        /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                        self?: string;
+                        readonly inputs?: string[];
+                        attempt?: number;
+                        deadline_ms?: number;
+                    };
                 };
             };
         };
@@ -2120,6 +2212,115 @@ export interface operations {
                         deadline_ms: number;
                         created_ms: number;
                         updated_ms: number;
+                        /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                        execution?: {
+                            /** @enum {number} */
+                            v: 1;
+                            request_id?: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            root: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            parent?: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            self?: string;
+                            readonly inputs?: string[];
+                            attempt?: number;
+                            deadline_ms?: number;
+                        };
+                    };
+                };
+            };
+            /** @description Task absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getTaskLineage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task lineage */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        task_id: string;
+                        /** @description Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected. */
+                        execution?: {
+                            /** @enum {number} */
+                            v: 1;
+                            request_id?: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            root: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            parent?: string;
+                            /** @description Qualified reference hx1:<product>:<instance>:<kind>:<id> */
+                            self?: string;
+                            readonly inputs?: string[];
+                            attempt?: number;
+                            deadline_ms?: number;
+                        };
+                        /** @enum {string} */
+                        source?: "caller" | "a2a" | "minted" | "continuation";
+                        traceparent?: string;
+                        parent?: {
+                            ref: string;
+                            local_task_id?: string;
+                        };
+                        children: {
+                            ref: string;
+                            local_task_id: string;
+                            /** @enum {string} */
+                            source: "caller" | "a2a" | "minted" | "continuation";
+                            created_ms: number;
+                        }[];
+                        continuations: {
+                            ref: string;
+                            local_task_id: string;
+                            /** @enum {string} */
+                            source: "caller" | "a2a" | "minted" | "continuation";
+                            created_ms: number;
+                        }[];
+                        model_attempts: {
+                            step: number;
+                            attempt: number;
+                            backend: string | null;
+                            request_id: string | null;
+                            ref: string | null;
+                            started_ms: number;
+                            usage: unknown;
+                            repair?: boolean;
+                        }[];
+                        tools: {
+                            call_id: string;
+                            name: string;
+                            effect: string | null;
+                            /** @enum {string} */
+                            state: "attempted" | "succeeded" | "failed" | "denied" | "not_dispatched";
+                        }[];
+                        artifacts: {
+                            sha256: string;
+                            name: string;
+                            mime: string | null;
+                            size: number | null;
+                            artifact_id: string | null;
+                            /** @enum {string} */
+                            source: "artifact_registered" | "research_artifacts";
+                            created_ms: number;
+                        }[];
                     };
                 };
             };

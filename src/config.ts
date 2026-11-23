@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { z } from 'zod';
+import { instanceRefProblem } from './execution.js';
 
 const envName = /^[A-Z][A-Z0-9_]*$/;
 const pathName = /^[A-Za-z0-9._-]+\.md$/;
@@ -174,6 +175,8 @@ export function runtimeProblems(config: ArdentConfig, env: NodeJS.ProcessEnv = p
     need('integrations.magnus_control.base_url', config.integrations.magnus_control.base_url);
     if (!env[config.integrations.magnus_control.token_env]) problems.push('Magnus Control read token is missing');
   }
+  const instance = instanceRefProblem(env);
+  if (instance) problems.push(instance);
   return [...problems, ...configNotices(config)];
 }
 

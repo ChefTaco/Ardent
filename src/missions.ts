@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ExecutionInput } from './execution.js';
 import type { ChatMessage } from './llamacpp.js';
 import type { Task, TaskStore } from './store.js';
 import { TEAM_VERSION, CoreTeamAction, TeamMission, TeamResult, validateTeamResult, type TeamEnvelope } from './team-contract.js';
@@ -20,7 +21,9 @@ export const MissionSubmit = z.object({
     .refine(items => Buffer.byteLength((items ?? []).map(item => item.title + item.text).join(''), 'utf8') <= MAX_CONTEXT_ITEM_BYTES,
       `Context items exceed ${MAX_CONTEXT_ITEM_BYTES / 1024} KiB`),
   labels: MissionLabels.optional(),
-  idempotency_key: z.string().min(1).max(128)
+  idempotency_key: z.string().min(1).max(128),
+  /** Optional execution context v1 (attribution only). An invalid value is treated as absent. */
+  execution: ExecutionInput.optional()
 }).strict();
 export type MissionSubmit = z.infer<typeof MissionSubmit>;
 /** What a mission task journals at acceptance. */

@@ -96,6 +96,65 @@
             "type": "integer",
             "minimum": -9007199254740991,
             "maximum": 9007199254740991
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "request_id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "root": {
+                "type": "string",
+                "maxLength": 256,
+                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+              },
+              "parent": {
+                "type": "string",
+                "maxLength": 256,
+                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+              },
+              "self": {
+                "type": "string",
+                "maxLength": 256,
+                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+              },
+              "inputs": {
+                "readOnly": true,
+                "maxItems": 16,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                  "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                }
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "deadline_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "v",
+              "root"
+            ],
+            "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
           }
         },
         "required": [
@@ -989,6 +1048,65 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
+                  },
+                  "execution": {
+                    "type": "object",
+                    "properties": {
+                      "v": {
+                        "type": "number",
+                        "enum": [
+                          1
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "root": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "parent": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "self": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "inputs": {
+                        "readOnly": true,
+                        "maxItems": 16,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        }
+                      },
+                      "attempt": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "v",
+                      "root"
+                    ],
+                    "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
                   }
                 },
                 "required": [
@@ -1165,6 +1283,65 @@
                             "type": "integer",
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
+                          },
+                          "execution": {
+                            "type": "object",
+                            "properties": {
+                              "v": {
+                                "type": "number",
+                                "enum": [
+                                  1
+                                ]
+                              },
+                              "request_id": {
+                                "type": "string",
+                                "maxLength": 128
+                              },
+                              "root": {
+                                "type": "string",
+                                "maxLength": 256,
+                                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                              },
+                              "parent": {
+                                "type": "string",
+                                "maxLength": 256,
+                                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                              },
+                              "self": {
+                                "type": "string",
+                                "maxLength": 256,
+                                "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                                "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                              },
+                              "inputs": {
+                                "readOnly": true,
+                                "maxItems": 16,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "maxLength": 256,
+                                  "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                                  "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                                }
+                              },
+                              "attempt": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              "deadline_ms": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "v",
+                              "root"
+                            ],
+                            "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
                           }
                         },
                         "required": [
@@ -1368,6 +1545,65 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
+                  },
+                  "execution": {
+                    "type": "object",
+                    "properties": {
+                      "v": {
+                        "type": "number",
+                        "enum": [
+                          1
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "root": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "parent": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "self": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "inputs": {
+                        "readOnly": true,
+                        "maxItems": 16,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        }
+                      },
+                      "attempt": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "v",
+                      "root"
+                    ],
+                    "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
                   }
                 },
                 "required": [
@@ -1490,6 +1726,65 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
+                  },
+                  "execution": {
+                    "type": "object",
+                    "properties": {
+                      "v": {
+                        "type": "number",
+                        "enum": [
+                          1
+                        ]
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "root": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "parent": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "self": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                        "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                      },
+                      "inputs": {
+                        "readOnly": true,
+                        "maxItems": 16,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        }
+                      },
+                      "attempt": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "v",
+                      "root"
+                    ],
+                    "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
                   }
                 },
                 "required": [
@@ -2268,6 +2563,65 @@
                       "type": "integer",
                       "minimum": -9007199254740991,
                       "maximum": 9007199254740991
+                    },
+                    "execution": {
+                      "type": "object",
+                      "properties": {
+                        "v": {
+                          "type": "number",
+                          "enum": [
+                            1
+                          ]
+                        },
+                        "request_id": {
+                          "type": "string",
+                          "maxLength": 128
+                        },
+                        "root": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "parent": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "self": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "inputs": {
+                          "readOnly": true,
+                          "maxItems": 16,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                            "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                          }
+                        },
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "deadline_ms": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "v",
+                        "root"
+                      ],
+                      "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
                     }
                   },
                   "required": [
@@ -2302,6 +2656,341 @@
                   "deadline_ms": 1790438400000,
                   "created_ms": 1790431200000,
                   "updated_ms": 1790431200000
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task absent"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/lineage": {
+      "get": {
+        "operationId": "getTaskLineage",
+        "description": "What this profile knows about the task's causal tree: its execution context and parent, local child and continuation tasks, model attempts with their request ids, tool calls and artifacts. Rebuilt from SQLite, so it survives a restart. Attribution only.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task lineage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string"
+                    },
+                    "execution": {
+                      "type": "object",
+                      "properties": {
+                        "v": {
+                          "type": "number",
+                          "enum": [
+                            1
+                          ]
+                        },
+                        "request_id": {
+                          "type": "string",
+                          "maxLength": 128
+                        },
+                        "root": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "parent": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "self": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                          "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                        },
+                        "inputs": {
+                          "readOnly": true,
+                          "maxItems": 16,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "pattern": "^hx1:[a-z][a-z0-9-]{1,31}:[A-Za-z0-9._-]{1,96}:[a-z]+:[A-Za-z0-9._:/-]{1,128}$",
+                            "description": "Qualified reference hx1:<product>:<instance>:<kind>:<id>"
+                          }
+                        },
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "deadline_ms": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "v",
+                        "root"
+                      ],
+                      "description": "Execution context v1. Attribution only: it never grants a tool, memory scope or artifact. An invalid value is treated as absent and never rejected."
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "caller",
+                        "a2a",
+                        "minted",
+                        "continuation"
+                      ]
+                    },
+                    "traceparent": {
+                      "type": "string"
+                    },
+                    "parent": {
+                      "type": "object",
+                      "properties": {
+                        "ref": {
+                          "type": "string"
+                        },
+                        "local_task_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "ref"
+                      ]
+                    },
+                    "children": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ref": {
+                            "type": "string"
+                          },
+                          "local_task_id": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "caller",
+                              "a2a",
+                              "minted",
+                              "continuation"
+                            ]
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "ref",
+                          "local_task_id",
+                          "source",
+                          "created_ms"
+                        ]
+                      }
+                    },
+                    "continuations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ref": {
+                            "type": "string"
+                          },
+                          "local_task_id": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "caller",
+                              "a2a",
+                              "minted",
+                              "continuation"
+                            ]
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "ref",
+                          "local_task_id",
+                          "source",
+                          "created_ms"
+                        ]
+                      }
+                    },
+                    "model_attempts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "step": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "attempt": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "backend": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "request_id": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "ref": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "started_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "usage": {
+                            "nullable": true
+                          },
+                          "repair": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "step",
+                          "attempt",
+                          "backend",
+                          "request_id",
+                          "ref",
+                          "started_ms",
+                          "usage"
+                        ]
+                      }
+                    },
+                    "tools": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "call_id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "effect": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "attempted",
+                              "succeeded",
+                              "failed",
+                              "denied",
+                              "not_dispatched"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "call_id",
+                          "name",
+                          "effect",
+                          "state"
+                        ]
+                      }
+                    },
+                    "artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "mime": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "size": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "artifact_id": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "artifact_registered",
+                              "research_artifacts"
+                            ]
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "sha256",
+                          "name",
+                          "mime",
+                          "size",
+                          "artifact_id",
+                          "source",
+                          "created_ms"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "children",
+                    "continuations",
+                    "model_attempts",
+                    "tools",
+                    "artifacts"
+                  ]
                 }
               }
             }

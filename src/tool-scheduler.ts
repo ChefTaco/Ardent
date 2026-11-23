@@ -116,7 +116,8 @@ export class ToolScheduler {
       }
       this.#dispatched++;
       const idempotencyKey = toolIdempotencyKey(options.taskId, call.id);
-      options.journal('tool_attempt', { id: call.id, name: call.name, args: options.journalArguments ? options.journalArguments(call.name, call.arguments) : call.arguments });
+      options.journal('tool_attempt', { id: call.id, name: call.name, args: options.journalArguments ? options.journalArguments(call.name, call.arguments) : call.arguments,
+        ...(tool ? { effect: tool.effect } : {}) });
       entry = { call: this.#hookCall(call, tool, call.arguments, idempotencyKey), tool };
       this.#inFlight.add(entry);
       await options.admissionGate(options.signal);

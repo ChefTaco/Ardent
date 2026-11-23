@@ -29,6 +29,7 @@ import { registerDevelopmentNoteTool, registerMissionTools, type MissionToolDeps
 import { acceptPreview, previewOverrides, PREVIEW_ARTIFACT_TTL_SECONDS, type PreviewOverrides, type PreviewSubmit } from './preview.js';
 import { acceptMission, contextItemMessages, missionEnvelope, missionRecord, missionTeamResult, type MissionSubmit } from './missions.js';
 import { compactToolArguments } from './tool-arguments.js';
+import { buildTaskExecution, executionInstance, TaskPropagation, type ExecutionAcceptance, type ExecutionContext } from './execution.js';
 
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
@@ -102,7 +103,10 @@ export class ArdentRuntime {
   #closed = false;
   #pluginsDrained = true;
   get plugins(): readonly ArdentPlugin[] { return this.#plugins; }
+  /** The instance part of this runtime's qualified references (`ARDENT_INSTANCE_REF`, else `local.<profile>`). */
+  readonly instanceRef: string;
   constructor(readonly profileDir: string, readonly config: ArdentConfig, env: NodeJS.ProcessEnv = process.env) {
+    this.instanceRef = executionInstance(config.profile, env);
     this.store = new TaskStore(join(profileDir, 'state', 'ardent.sqlite'));
     this.recovered = this.store.recover();
     this.artifacts = new ArtifactStore(join(profileDir, 'artifacts'), config.artifacts.max_bytes);
@@ -181,31 +185,46 @@ export class ArdentRuntime {
     this.#pluginsDrained = settled;
     return settled;
   }
-  accept(prompt: string, caller = 'local', context: TaskContext = 'direct', idempotencyKey?: string, sessionId?: string, originalDeadlineMs?: number, backendOverride?: 'llamacpp' | 'codex'): Task {
+  /**
+   * Accept a task. `execution` carries the caller's execution context, if any;
+   * an invalid or absent one becomes a root minted for this task. It is
+   * attribution only and does not enter the idempotency digest.
+   */
+  accept(prompt: string, caller = 'local', context: TaskContext = 'direct', idempotencyKey?: string, sessionId?: string, originalDeadlineMs?: number, backendOverride?: 'llamacpp' | 'codex',
+    execution: ExecutionAcceptance = {}): Task {
     if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
     const deadlineMs = Math.min(Date.now() + this.config.execution.deadline_seconds * 1000, originalDeadlineMs ?? Number.POSITIVE_INFINITY);
-    return this.store.accept({ caller, context, prompt, ...(idempotencyKey ? { idempotencyKey } : {}), ...(sessionId ? { sessionId } : {}), backend: backendOverride ?? this.config.execution.backend, deadlineMs });
+    return this.store.accept({ caller, context, prompt, ...(idempotencyKey ? { idempotencyKey } : {}), ...(sessionId ? { sessionId } : {}), backend: backendOverride ?? this.config.execution.backend, deadlineMs,
+      execution: this.#execution(execution) });
   }
-  /** Accept a team mission as a `mission` task. Its tools come from `mission.resources`. */
-  acceptMission(input: MissionSubmit, caller = 'management'): Task {
+  /** The execution context a task was accepted with, if any. Attribution only; for provenance and lineage. */
+  executionFor(taskId: string): ExecutionContext | undefined { return this.store.executionFor(taskId); }
+  #execution(acceptance: ExecutionAcceptance): (task: Task) => ReturnType<typeof buildTaskExecution> {
+    return task => buildTaskExecution(this.instanceRef, task, acceptance);
+  }
+  /**
+   * Accept a team mission as a `mission` task. Its tools come from `mission.resources`.
+   * `execution` defaults to the submission's own `execution` field.
+   */
+  acceptMission(input: MissionSubmit, caller = 'management', execution: ExecutionAcceptance = { context: input.execution }): Task {
     if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
     return acceptMission(request => this.store.accept({ caller, context: 'mission', prompt: request.prompt, idempotencyKey: request.idempotencyKey,
       ...(request.sessionId ? { sessionId: request.sessionId } : {}), backend: this.config.execution.backend,
       deadlineMs: Math.min(Date.now() + this.config.execution.deadline_seconds * 1000, request.deadlineMs),
-      content: request.content, onAccepted: request.onAccepted }), this.store, input);
+      content: request.content, onAccepted: request.onAccepted, execution: this.#execution(execution) }), this.store, input);
   }
   /**
    * Accept a preview task: a direct-style task that tries unsaved soul, identity,
    * skill or model changes. It never writes memory, development records or the
    * profile, has only read tools, and its artifacts expire after 24 hours.
    */
-  acceptPreview(input: PreviewSubmit, caller = 'management'): Task {
+  acceptPreview(input: PreviewSubmit, caller = 'management', execution: ExecutionAcceptance = { context: input.execution }): Task {
     if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
     void this.artifactManifests.sweepExpired().catch(() => { /* A later sweep retries. */ });
     return acceptPreview(request => this.store.accept({ caller, context: 'preview', prompt: request.prompt,
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}), ...(request.sessionId ? { sessionId: request.sessionId } : {}),
       backend: this.config.execution.backend, deadlineMs: Date.now() + this.config.execution.deadline_seconds * 1000,
-      content: request.content, onAccepted: request.onAccepted }), this.store, input);
+      content: request.content, onAccepted: request.onAccepted, execution: this.#execution(execution) }), this.store, input);
   }
   cancel(id: string): Task {
     const task = this.store.get(id);
@@ -337,8 +356,12 @@ export class ArdentRuntime {
       if (task.context === 'mission' && !selectedMission) throw new Error('Mission task has no recorded mission');
       const taskEnvelope = selectedMission ? missionEnvelope(task, selectedMission.mission)
         : task.context === 'peer' ? this.#peerEnvelope(task) : undefined;
+      // Ancestry is attribution only: it is read after tools and scope were selected, and never selects them.
+      const recordedExecution = this.store.executions.get(task.id);
+      const propagation = TaskPropagation.forTask(this.instanceRef, task, recordedExecution);
       const taskContext: ArdentTaskPluginContext = { ...pluginContext(this, env), task,
-        baseTools: baseTools.list(task.context), ...(taskEnvelope ? { envelope: taskEnvelope } : {}) };
+        baseTools: baseTools.list(task.context), ...(taskEnvelope ? { envelope: taskEnvelope } : {}),
+        ...(recordedExecution ? { execution: recordedExecution.context } : {}) };
       this.#taskContexts.set(task.id, taskContext);
       const taskTools = pluginTaskTools(this.#plugins, taskContext);
       const executors = this.#plugins.flatMap(plugin => {
@@ -377,8 +400,16 @@ export class ArdentRuntime {
       const llamaConfig = preview?.model ? { ...policyLlama, model: preview.model } : policyLlama;
       const llamaBackend = task.backend === 'llamacpp' ? new LlamaCppBackend(llamaConfig, env) : null;
       // Model requests stop retrying at the task deadline, and each retry is journaled.
-      const llamaRequest = (step: number | null): LlamaRequestOptions => ({ deadlineMs: task.deadline_ms,
-        onRetry: retry => this.store.append(task.id, 'model_retry', { step, ...retry }) });
+      // Every request carries a new x-request-id, a child span of the task trace and the execution context.
+      const llamaRequest = (step: number | null, headers: Record<string, string> = propagation.headers()): LlamaRequestOptions => ({ deadlineMs: task.deadline_ms,
+        requestHeaders: headers, onRetry: retry => this.store.append(task.id, 'model_retry', { step, ...retry }) });
+      /** Journal `model_started` for one completion with its attempt reference and request id. */
+      const startModel = (step: number, extra: Record<string, unknown> = {}) => {
+        const attempt = propagation.modelAttempt(step, this.#nextModelAttempt(task.id, step));
+        this.store.append(task.id, 'model_started', { backend: task.backend, step, ...extra, attempt: attempt.attempt,
+          ref: attempt.ref, request_id: task.backend === 'llamacpp' ? attempt.request_id : null, ...(task.backend === 'llamacpp' ? { traceparent: attempt.traceparent } : {}) });
+        return attempt;
+      };
       const llamaCapabilities = llamaBackend ? await llamaBackend.discover() : null;
       if (llamaCapabilities?.modelListed === false) throw new Error('Configured llama.cpp model is absent from the discovered model list');
       const llamaInputBudget = llamaBackend ? Math.min(
@@ -425,7 +456,7 @@ export class ArdentRuntime {
       };
       const inputImages = await pluginInputImages(this.#plugins, taskContext);
       if (task.backend === 'codex') {
-        this.store.append(task.id, 'model_started', { backend: 'codex' });
+        startModel(0);
         const policyCodex = modelPolicy ? { ...this.config.providers.codex, model: modelPolicy.policy.primary.codex.model } : this.config.providers.codex;
         const codexConfig = preview?.model ? { ...policyCodex, model: preview.model } : policyCodex;
         const harness = new CodexHarnessBackend(codexConfig, this.profileDir, env);
@@ -463,8 +494,8 @@ export class ArdentRuntime {
         }
         this.store.append(task.id, 'model_input_budget', { step, input_tokens: fitted.inputTokens,
           max_input_tokens: fitted.maxInputTokens, tokenizer: fitted.tokenizer });
-        this.store.append(task.id, 'model_started', { backend: task.backend, step });
-        const reply = await backend.complete(messages, schemas, abort.signal, true, chunk => onText?.(chunk, step), onBackendEvent, llamaRequest(step));
+        const modelAttempt = startModel(step);
+        const reply = await backend.complete(messages, schemas, abort.signal, true, chunk => onText?.(chunk, step), onBackendEvent, llamaRequest(step, modelAttempt.headers));
         this.store.append(task.id, 'model_result', { step, tool_calls: reply.toolCalls.map(call => call.function.name), usage: reply.usage ?? null, content_chars: reply.content.length, reasoning_chars: reply.reasoning?.length ?? 0 });
         if (reply.toolCalls.length === 0) {
           let answer = reply.content;
@@ -480,7 +511,8 @@ export class ArdentRuntime {
               this.store.append(task.id, 'model_input_budget', { step, repair: true,
                 input_tokens: repairInput.inputTokens, max_input_tokens: repairInput.maxInputTokens,
                 tokenizer: repairInput.tokenizer });
-              const repaired = await backend.complete(repairInput.messages, [], abort.signal, false, undefined, undefined, llamaRequest(step));
+              const repairAttempt = startModel(step, { repair: true });
+              const repaired = await backend.complete(repairInput.messages, [], abort.signal, false, undefined, undefined, llamaRequest(step, repairAttempt.headers));
               this.store.append(task.id, 'model_repair_result', { usage: repaired.usage ?? null, tool_calls: repaired.toolCalls.length, content_chars: repaired.content.length });
               if (repaired.toolCalls.length) throw new Error('Research repair attempted an unexpected tool call');
               answer = repaired.content;
@@ -534,6 +566,11 @@ export class ArdentRuntime {
         catch { this.store.append(task.id, 'plugin_cleanup_failed', { plugin: plugin.name }); }
       }
     }
+  }
+  /** The next model attempt number for a step, from the journal, so it survives a restart. */
+  #nextModelAttempt(taskId: string, step: number): number {
+    const row = this.store.db.prepare("SELECT count(*) AS count FROM events WHERE task_id=? AND kind='model_started' AND json_extract(detail_json,'$.step')=?").get(taskId, step);
+    return z.object({ count: z.number().int() }).parse(row).count + 1;
   }
   #missionToolDeps(task: Task): MissionToolDeps {
     return { task, store: this.store, artifacts: this.artifactManifests, development: this.development, workspaceDir: join(this.profileDir, 'workspace') };
