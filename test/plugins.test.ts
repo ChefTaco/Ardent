@@ -19,7 +19,10 @@ import { LlamaCppBackend } from '../src/llamacpp.js';
 import { HiveMemClient } from '../src/memory.js';
 import { createArdentApi } from '../src/api.js';
 import { BUILTIN_JOB_VALIDATION_REGISTRY } from '../src/job-news-handlers.js';
-import { clearRegisteredPlugins, definePlugin, loadPlugins, pluginContext, pluginJobHandlers, pluginTaskTools, pluginChannelAdapter, pluginTeamEnvelope, validationContext, registerPlugin } from '../src/plugins.js';
+import { clearRegisteredPlugins, definePlugin, loadPlugins, pluginContext, pluginJobHandlers, pluginTaskTools, pluginChannelAdapter, pluginTeamEnvelope, validationContext, registerPlugin,
+  pluginBeforeToolCall, pluginTransformOutbound, type ArdentPlugin, type ArdentTaskPluginContext, type ArdentToolCall } from '../src/plugins.js';
+import { ChannelCore, type ChannelReply } from '../src/channels.js';
+import { defineTool } from '../src/tools.js';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -450,4 +453,170 @@ describe('plugin API', () => {
     }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));surface.grpcServer.forceShutdown();await surface.pushSender.drain();runtime.close();}
   });
 
+
+describe('message and tool lifecycle hooks', () => {
+  async function hookRuntime(plugins: ArdentPlugin[], replies: { content: string; toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }[]) {
+    const dir = await temp(); await initProfile(dir);
+    const config = (await loadConfig(dir)).config;
+    vi.spyOn(LlamaCppBackend.prototype, 'discover').mockResolvedValue({ modelListed: true, contextTokens: 32768, supportsTools: true, supportsReasoningEffort: false, sampling: { temperature: null, topP: null }, reasoningFormat: null, chatFormat: null });
+    vi.spyOn(LlamaCppBackend.prototype, 'countInputTokens').mockResolvedValue(100);
+    const complete = vi.spyOn(LlamaCppBackend.prototype, 'complete');
+    for (const reply of replies) complete.mockResolvedValueOnce(reply);
+    const runtime = new ArdentRuntime(dir, config, {});
+    await runtime.usePlugins(plugins, {});
+    return runtime;
+  }
+  const event = (updateId: string, text: string) => ({ platform: 'mattermost' as const, account: 'bot', channel_type: 'mattermost_dm' as const, user: 'operator',
+    conversation: 'dm', thread: null, update_id: updateId, reply_to: null, text, attachments: [], authorized: true as const, bot_message: false });
+  const calls = (...names: string[]) => names.map((name, index) => ({ id: `call-${index + 1}`, type: 'function' as const, function: { name, arguments: '{}' } }));
+  const fixtureTool = (name: string, effect: 'read' | 'external-write', invoked: string[], ms = 0) => defineTool({ name, description: name, input: z.object({}).passthrough(),
+    output: z.object({ ok: z.boolean() }), effect, contexts: ['direct'], timeoutMs: 10_000, handler: async (_input, signal) => {
+      invoked.push(name);
+      if (ms) await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, ms); signal.addEventListener('abort', () => { clearTimeout(timer); reject(Error('aborted')); }, { once: true }); });
+      return { ok: true };
+    } });
+
+  it('follows a channel message from receipt through persistence, the task and transformed delivery', async () => {
+    const seen: string[] = [];
+    const runtime = await hookRuntime([
+      { name: 'lifecycle',
+        messageReceived(_ctx, message) { seen.push(`received:${message.update_id}:${message.channel_type}:${message.caller}`); expect(Object.isFrozen(message)).toBe(true); },
+        messagePersisted(_ctx, message, task) { seen.push(`persisted:${message.update_id}:${task.state}`); },
+        taskSettled(ctx) { seen.push(`task:${ctx.task.id === runtime.store.list(1)[0]?.id}`); },
+        transformOutbound(_ctx, delivery) { seen.push('transform:lifecycle'); return { text: delivery.text.toUpperCase() }; },
+        messageDelivered(_ctx, delivery, outcome) { seen.push(`delivered:${outcome.state}:${outcome.external_id}:${delivery.text}`); } },
+      { name: 'suffix', transformOutbound(_ctx, delivery) { seen.push('transform:suffix'); return { text: `${delivery.text} [checked]` }; } }
+    ], [{ content: 'fixture answer', toolCalls: [] }]);
+    try {
+      const sent: ChannelReply[] = [];
+      const outcome = await new ChannelCore(runtime, {}).handle(event('post-1', 'hello'), async reply => { sent.push(reply); return 'reply-1'; });
+      expect(outcome.delivery).toBe('sent');
+      expect(sent.map(reply => reply.text)).toEqual(['FIXTURE ANSWER [checked]']);
+      expect(seen).toEqual(['received:post-1:mattermost_dm:mattermost:bot:operator', 'persisted:post-1:queued', 'task:true',
+        'transform:lifecycle', 'transform:suffix', 'delivered:sent:reply-1:FIXTURE ANSWER [checked]']);
+      const taskId = outcome.taskId ?? '';
+      expect(runtime.store.events(taskId, 0, 500).find(item => item.kind === 'outbound_transformed')?.detail)
+        .toMatchObject({ plugins: ['lifecycle', 'suffix'], text: 'FIXTURE ANSWER [checked]' });
+    } finally { runtime.close(); }
+  });
+
+  it('journals failing message hooks, continues, and fails closed to the original reply text', async () => {
+    const runtime = await hookRuntime([{ name: 'broken',
+      messageReceived() { throw Error('received'); },
+      messagePersisted() { throw Error('persisted'); },
+      transformOutbound() { throw Error('transform'); },
+      messageDelivered() { return Promise.reject(Error('delivered')); } }], [{ content: 'original answer', toolCalls: [] }]);
+    try {
+      const sent: string[] = [];
+      const core = new ChannelCore(runtime, {});
+      const outcome = await core.handle(event('post-2', 'hello'), async reply => { sent.push(reply.text); return 'reply-2'; });
+      expect(outcome.delivery).toBe('sent');
+      expect(sent).toEqual(['original answer']);
+      expect(runtime.store.get(outcome.taskId ?? '')?.state).toBe('completed');
+      expect(runtime.store.events(outcome.taskId ?? '', 0, 500).filter(item => item.kind === 'plugin_hook_failed').map(item => item.detail))
+        .toEqual([{ plugin: 'broken', hook: 'messagePersisted' }, { plugin: 'broken', hook: 'transformOutbound' }, { plugin: 'broken', hook: 'messageDelivered' }]);
+      // A message that never creates a task keeps its failure under the message identity.
+      expect(runtime.store.pluginHookFailures('mattermost', 'bot', 'post-2')).toEqual([{ plugin: 'broken', hook: 'messageReceived' }]);
+      await core.handle(event('post-3', '/help'), async reply => { sent.push(reply.text); return 'reply-3'; });
+      expect(sent[1]).toContain('/help');
+      expect(runtime.store.pluginHookFailures('mattermost', 'bot', 'post-3').map(item => item.hook)).toEqual(['messageReceived', 'transformOutbound', 'messageDelivered']);
+    } finally { runtime.close(); }
+    const ctx = {} as Parameters<typeof pluginTransformOutbound>[1];
+    const delivery = { delivery_id: 'd', task_id: null, platform: 'mattermost' as const, account: 'bot', update_id: 'u', text: 'original', attempt: 1 };
+    const failures: string[] = [];
+    for (const text of ['', '   ', 'x'.repeat(64 * 1024 + 1)])
+      expect(await pluginTransformOutbound([{ name: 'invalid', transformOutbound: () => ({ text }) }], ctx, delivery, (plugin, hook) => failures.push(`${plugin}:${hook}`))).toEqual({ text: 'original', plugins: [] });
+    expect(await pluginTransformOutbound([{ name: 'same', transformOutbound: () => undefined }], ctx, delivery, () => {})).toEqual({ text: 'original', plugins: [] });
+    expect(failures).toHaveLength(3);
+  });
+
+  it('runs before and after hooks for each call in a batch and lets a hook deny without effect', async () => {
+    const seen: string[] = [], invoked: string[] = [];
+    const frozen: boolean[] = [];
+    const runtime = await hookRuntime([
+      { name: 'first',
+        beforeToolCall(_ctx, call) {
+          seen.push(`first:before:${call.name}`); frozen.push(Object.isFrozen(call) && Object.isFrozen(call.arguments));
+          expect(call).toMatchObject({ task_id: expect.any(String), call_id: expect.stringMatching(/^call-/), idempotency_key: expect.stringMatching(/^[0-9a-f]{64}$/) });
+          // Returning anything other than a denial is ignored.
+          return { allow: true } as never;
+        },
+        afterToolCall(_ctx, call, result) { seen.push(`first:after:${call.name}:${result.ok ? 'ok' : result.code}`); } },
+      { name: 'second',
+        beforeToolCall(_ctx, call) { seen.push(`second:before:${call.name}`); return call.name === 'write_b' ? { deny: { code: 'POLICY_DENIED', message: 'Not on this channel' } } : undefined; } }
+    ], [{ content: '', toolCalls: calls('read_a', 'write_b', 'read_c') }, { content: 'done', toolCalls: [] }]);
+    runtime.tools.register(fixtureTool('read_a', 'read', invoked));
+    runtime.tools.register(fixtureTool('write_b', 'external-write', invoked));
+    runtime.tools.register(fixtureTool('read_c', 'read', invoked));
+    try {
+      const task = runtime.accept('Use tools');
+      expect((await runtime.run(task.id, {})).answer).toBe('done');
+      expect(invoked).toEqual(['read_a', 'read_c']);
+      expect(frozen.every(Boolean)).toBe(true);
+      expect(seen).toEqual(['first:before:read_a', 'second:before:read_a', 'first:after:read_a:ok',
+        'first:before:write_b', 'second:before:write_b', 'first:after:write_b:POLICY_DENIED',
+        'first:before:read_c', 'second:before:read_c', 'first:after:read_c:ok']);
+      const events = runtime.store.events(task.id, 0, 500);
+      expect(events.find(item => item.kind === 'tool_denied_by_plugin')?.detail).toEqual({ id: 'call-2', name: 'write_b', plugin: 'second', code: 'POLICY_DENIED' });
+      expect(events.find(item => item.kind === 'tool_result' && (item.detail as { id: string }).id === 'call-2')?.detail)
+        .toEqual({ id: 'call-2', name: 'write_b', result: { ok: false, code: 'POLICY_DENIED', message: 'Not on this channel', effect: 'none' } });
+    } finally { runtime.close(); }
+  });
+
+  it('reports cancelled calls queued and in flight, in reverse registration order, before task cleanup', async () => {
+    const seen: string[] = [], invoked: string[] = [];
+    const record = (name: string): ArdentPlugin => ({ name,
+      toolCallCancelled(_ctx, call, outcome) { seen.push(`${name}:${call.name}:${outcome.dispatched}:${outcome.effect}`); },
+      taskSettled() { seen.push(`${name}:settled`); } });
+    const runtime = await hookRuntime([record('first'), record('second')], [{ content: '', toolCalls: calls('write_a', 'read_b') }]);
+    runtime.tools.register(fixtureTool('write_a', 'external-write', invoked, 5_000));
+    runtime.tools.register(fixtureTool('read_b', 'read', invoked));
+    try {
+      const task = runtime.accept('Cancel me');
+      const pending = runtime.run(task.id, {});
+      for (let i = 0; i < 200 && !invoked.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      runtime.cancel(task.id);
+      await expect(pending).rejects.toThrow();
+      expect(runtime.store.get(task.id)?.state).toBe('unknown');
+      expect(invoked).toEqual(['write_a']);
+      expect(seen).toEqual(['second:write_a:true:unknown', 'first:write_a:true:unknown', 'second:read_b:false:none', 'first:read_b:false:none', 'second:settled', 'first:settled']);
+    } finally { runtime.close(); }
+  });
+
+  it('gives each failing tool hook its documented outcome and no longer fails the task for observers', async () => {
+    const invoked: string[] = [];
+    const runtime = await hookRuntime([{ name: 'broken',
+      beforeToolCall(_ctx, call) { if (call.name === 'write_b') throw Error('policy service down'); },
+      afterToolCall() { throw Error('after'); },
+      observeToolResult() { throw Error('observe'); } }],
+    [{ content: '', toolCalls: calls('read_a', 'write_b') }, { content: 'still completed', toolCalls: [] }]);
+    runtime.tools.register(fixtureTool('read_a', 'read', invoked));
+    runtime.tools.register(fixtureTool('write_b', 'external-write', invoked));
+    try {
+      const task = runtime.accept('Use tools');
+      expect((await runtime.run(task.id, {})).answer).toBe('still completed');
+      expect(invoked).toEqual(['read_a']);
+      const events = runtime.store.events(task.id, 0, 500);
+      expect(events.find(item => item.kind === 'tool_denied_by_plugin')?.detail).toMatchObject({ id: 'call-2', plugin: 'broken', code: 'TOOL_DENIED_BY_PLUGIN' });
+      expect(events.filter(item => item.kind === 'plugin_hook_failed').map(item => (item.detail as { hook: string }).hook))
+        .toEqual(['observeToolResult', 'afterToolCall', 'beforeToolCall', 'observeToolResult', 'afterToolCall']);
+    } finally { runtime.close(); }
+  });
+
+  it('denies a call whose hook does not answer within five seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const failures: string[] = [];
+      const call = { task_id: 't', call_id: 'c', name: 'write', arguments: {}, effect: 'external-write' as const, idempotency_key: 'k' } satisfies ArdentToolCall;
+      const verdict = pluginBeforeToolCall([{ name: 'slow', beforeToolCall: () => new Promise<never>(() => {}) }], {} as ArdentTaskPluginContext, call, (plugin, hook) => failures.push(`${plugin}:${hook}`));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await verdict).toEqual({ plugin: 'slow', code: 'TOOL_DENIED_BY_PLUGIN', message: 'Plugin slow could not approve this call' });
+      expect(failures).toEqual(['slow:beforeToolCall']);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rejects a plugin whose lifecycle hook is not a function', async () => {
+    expect(() => registerPlugin({ name: 'bad-hook', beforeToolCall: 'deny' } as unknown as ArdentPlugin)).toThrow('hook beforeToolCall must be a function');
+  });
+});
 });

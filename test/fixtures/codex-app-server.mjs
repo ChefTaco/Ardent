@@ -14,6 +14,9 @@ let turnCount = 0;
 let loginPending = false;
 let selectedModel; let selectedEffort;
 const selectedTool = process.env.ARDENT_FIXTURE_TOOL || 'fixture_search';
+// ARDENT_FIXTURE_TOOLS_JSON: [{ tool, arguments? }] emitted together as concurrent item/tool/call requests in turn 1.
+const concurrentTools = process.env.ARDENT_FIXTURE_TOOLS_JSON ? JSON.parse(process.env.ARDENT_FIXTURE_TOOLS_JSON) : null;
+const pendingTools = new Set();
 rl.on('line', line => {
   const message = JSON.parse(line);
   if (process.env.ARDENT_FIXTURE_RPC_FILE && message.method) appendFileSync(process.env.ARDENT_FIXTURE_RPC_FILE, message.method+'\n');
@@ -65,6 +68,11 @@ rl.on('line', line => {
     } else if (process.env.ARDENT_FIXTURE_IMAGE_PROTOCOL_FILE) {
       send({ method: 'item/completed', params: { threadId: 'thread-1', turnId, item: { type: 'agentMessage', id: 'image-1', text: 'Exact image reviewed', phase: 'final_answer' } } });
       send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed', error: null } } });
+    } else if (turnCount === 1 && concurrentTools) {
+      concurrentTools.forEach((call, index) => {
+        pendingTools.add(901 + index);
+        send({ method: 'item/tool/call', id: 901 + index, params: { threadId: 'thread-1', turnId, callId: `call-${index + 1}`, namespace: null, tool: call.tool, arguments: call.arguments ?? {} } });
+      });
     } else if (turnCount === 1) send({ method: 'item/tool/call', id: 900, params: { threadId: 'thread-1', turnId, callId: 'call-1', namespace: null, tool: selectedTool, arguments: process.env.ARDENT_FIXTURE_TOOL_ARGS ? JSON.parse(process.env.ARDENT_FIXTURE_TOOL_ARGS) : selectedTool === 'fixture_search' ? { query: 'test' } : {} } });
     else {
       const answer = message.params.input[0].text.includes('"ok":true') ? 'Sourced fixture answer' : 'Tool failed';
@@ -77,6 +85,13 @@ rl.on('line', line => {
     if (process.env.ARDENT_FIXTURE_LOSE_INTERRUPT_REPLY) return;
     send({ id: message.id, result: {} });
     send({ method: 'turn/completed', params: { threadId: message.params.threadId, turn: { id: message.params.turnId, status: 'interrupted', error: null } } });
+  } else if (pendingTools.has(message.id)) {
+    pendingTools.delete(message.id);
+    if (process.env.ARDENT_FIXTURE_TOOL_RESPONSES_FILE) appendFileSync(process.env.ARDENT_FIXTURE_TOOL_RESPONSES_FILE, `${message.id}\n`);
+    if (!pendingTools.size) {
+      send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', id: 'item-1', text: 'No visible tool output', phase: 'final_answer' } } });
+      send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', error: null } } });
+    }
   } else if (message.id === 900) {
     send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', id: 'item-1', text: 'No visible tool output', phase: 'final_answer' } } });
     send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', error: null } } });
