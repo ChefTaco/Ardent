@@ -17,6 +17,11 @@
   - Progress for each channel is reported in `GET /api/v1/status` under `channels.mattermost.catchup`.
   - Claims stay atomic, so a live event that is also in the backlog is answered once. A post that was already claimed, including one whose reply outcome is unknown, is never answered again.
 - SQLite: a new `channel_inbound.disposition` column (`admitted` by default, or `skipped_stale`), and new `channel_catchup_gaps` and `channel_catchup_runs` tables. Skipped-stale claims are not counted as unbound inbound work when admission is fenced.
+- Artifact transfer v2 (`urn:hive:artifact-transfer:2`): resumable pulls of peer artifacts up to `artifacts.max_bytes` over HTTP Range with If-Range, whole-file SHA-256 verification and bounded memory. `POST /api/v1/artifacts/imports`, `GET /api/v1/artifacts/imports[/{id}]` and `ardent artifact import | imports` record progress in the new `artifact_transfers` table and a partial file under `artifacts/.partial`; a restart resumes from the committed bytes, and a digest mismatch discards them with `DIGEST_MISMATCH`. Older peers keep the v1 path up to 2 MiB and fail with `TRANSFER_REQUIRES_V2` above it.
+- `GET /api/v1/artifacts/{sha256}/content` with Range (206/416), `ETag`, `Repr-Digest`, `X-Content-SHA256`, the manifest media type and file name; `GET /api/v1/artifacts/{sha256}/renditions`; `GET /api/v1/artifacts/{sha256}/manifest/v2`. `GET /api/v1/status` reports `capabilities.artifact_transfer: 2`, and the Agent Card advertises the URN with `{max_bytes, range, renditions}`.
+- Manifest 1.1, a strict superset of 1.0 with optional `rendition` and `provenance.execution`, shown only to v2 consumers. Renditions are separate artifacts linked to their original in the new immutable `artifact_renditions` table.
+- Team exports are limited by `artifacts.max_bytes` and emit a v2 descriptor data part beside the unchanged v1 text descriptor (up to 2 MiB) or an explicit `TRANSFER_REQUIRES_V2` result (above it). `/team/artifacts/{id}` gains Range and the digest headers; `/team/artifacts/{id}/manifest` and `/renditions` are new.
+- Plugin SDK: `ArtifactStore.putStream`, `openRead`, `stat`, `verify` and `adoptFile`; `ArtifactManifests.registerStream`, `registerRendition`, `renditions` and `manifestV2`; the manifest 1.1 schemas and `ArtifactTransfers`.
 
 ### Changed
 
@@ -35,10 +40,16 @@
 - Mattermost: the channel cursor is now `mattermost:<bot>:<channel>:last`, stored as JSON. A 3.1 `…:last_ms` cursor is read and upgraded in place, and is still written so that a rollback keeps working. An existing `…:reconcile_gap` record is moved into `channel_catchup_gaps` once.
 - Mattermost: a live WebSocket post no longer moves the channel cursor past posts that are still missing.
 - Mattermost: a request answered with `429` is repeated under a new `mattermost` retry policy (3 attempts, `Retry-After` up to 60 s). A burst of catch-up replies used to lose every reply past the server's rate limit.
+- `GET /api/v1/artifacts/{id}` keeps its octet-stream response but streams it, verifying the digest as it goes. Team exports and extension evidence hash artifacts as streams instead of reading them whole.
+- `/api/v1/tasks/{id}/artifacts` lists originals only; a task's renditions are listed with their original.
 
 ### Deprecated
 
 - `execution.max_parallel_tools`. It limited tasks, not tools. It is still used when `max_parallel_tasks` is absent, and `runtimeProblems()` (`ardent config validate`, `ardent doctor`) then lists a `notice:` entry. `/health/ready` ignores notices.
+
+### Removed
+
+- The unused buffered `TeamArtifacts.fetchHermes` downloader, replaced by `ArtifactTransfers`.
 
 ## 3.1.4 - 2026-11-17
 
