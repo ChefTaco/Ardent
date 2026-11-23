@@ -159,6 +159,14 @@ only the *names* of the environment variables that hold them.
 `ardent config schema` prints the full JSON Schema, and `ardent config
 validate` checks a profile without starting it.
 
+A few settings come from the environment rather than `config.yaml`:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ARDENT_HOME` | `~/.ardent` | Root of the profiles directory and the shared model policy. |
+| `ARDENT_API_TOKEN` | — | Management API bearer token (the name is `api.token_env`). |
+| `ARDENT_INSTANCE_REF` | `local.<profile>` | The instance part of this runtime's qualified execution references (`hx1:ardent:<instance>:...`). Magnus sets `<node id>.<profile>`. 1 to 96 characters of `A-Z a-z 0-9 . _ -`; any other value stops the runtime from starting and is listed by `ardent config validate`. See [Execution ancestry](#execution-ancestry). |
+
 ### Tool scheduling
 
 Task concurrency and tool concurrency are separate settings:
@@ -609,6 +617,80 @@ It merges:
 `agent_ref` is the profile name. `ardent development list [--after CURSOR]
 [--limit N] [--kind KIND]` prints the same pages.
 
+### Execution ancestry
+
+Every task accepted by this version has an execution context (execution
+context v1 from `@hivemagnus/hive-common/execution`): the causal tree it
+belongs to, across products. It is **attribution only**: tools, memory scope,
+mission scope, team-child admission and artifacts are never selected from it.
+
+```json
+{"v": 1, "request_id": "req-1", "root": "hx1:studio:inst-1:request:r-1",
+ "parent": "hx1:studio:inst-1:node:n-1", "self": "hx1:ardent:node-a.assistant:task:<task id>",
+ "deadline_ms": 1790431800000}
+```
+
+- **Where it comes from.** `POST /api/v1/tasks`, `POST /api/v1/missions` and
+  `POST /api/v1/preview/tasks` take an optional `execution` field (else the
+  `x-hive-execution` header); an A2A message carries it as
+  `metadata.hiveExecution`. The task keeps the caller's `root` and
+  `request_id`, takes the caller's `self` as its `parent`, and its `self` is
+  always `hx1:ardent:<instance>:task:<task id>`, where the instance is
+  `ARDENT_INSTANCE_REF`. A missing, malformed or unknown-version value is
+  never rejected: the task gets a new root at its own reference. The context
+  is not part of the idempotency digest. `deadline_ms` is the earlier of the
+  caller's and the task's deadline; it does not change the task deadline.
+- **Where it is kept.** The `task_execution` table (`self_ref`, `root_ref`,
+  `parent_ref`, `inputs_json`, `context_json` with the task's W3C trace,
+  `source`: `caller`, `a2a`, `minted` or `continuation`), written in the same
+  transaction as the task, and the `accepted` event's `execution`. A team
+  child's context is also stored next to its retained grant, outside the
+  grant's digest.
+- **Where it goes.** Every llama.cpp request carries a new `x-request-id`, a
+  `traceparent` that is a child span of the task trace, and `x-hive-execution`
+  with `self` `hx1:ardent:<instance>:attempt:<task id>/<step>/<n>`, `attempt`
+  `n` and the deadline. `model_started` events journal `attempt`, `ref`,
+  `request_id` and `traceparent`, so a gateway's request log links back to the
+  task. `ArdentA2AClient.sendWithReceipt` / `send` / `sendStreaming` take
+  `{ execution }` and send it as `metadata.hiveExecution`, so the receiving
+  agent's task keeps the root and has the delegating task as its parent.
+  Tools receive it as `ctx.execution`, and plugin hooks as `execution` on the
+  task context and tool calls. `tool_attempt` events now record the tool's
+  `effect`.
+- **Artifacts.** An artifact a task registers (`artifact_write`,
+  `document_render`, preview research briefs, plugin `register` /
+  `registerStream` calls, imports) is stored as manifest 1.1 with
+  `provenance.execution: {root, task, step?}`: the task's root, its task
+  reference and, while the task runs, the model step
+  (`hx1:ardent:<instance>:step:<task id>/<step>`). An imported artifact keeps
+  its producer's `execution`, and its import task takes the producer task as
+  parent. Every 1.0 view is unchanged, and a task without a context still
+  stores manifest 1.0. `ArtifactManifests.executionProvenance(taskId)` returns
+  the value.
+- **Reading it.** Task responses (`GET /api/v1/tasks`, `GET /api/v1/tasks/{id}`)
+  include `execution` when the task has one. `GET /api/v1/tasks/{id}/lineage`
+  rebuilds what this profile knows:
+
+```json
+{"task_id": "...", "execution": {"v": 1, "root": "...", "self": "..."}, "source": "caller",
+ "traceparent": "00-...-...-01", "parent": {"ref": "...", "local_task_id": "..."},
+ "children": [{"ref": "...", "local_task_id": "...", "source": "a2a", "created_ms": 0}],
+ "continuations": [],
+ "model_attempts": [{"step": 0, "attempt": 1, "backend": "llamacpp", "request_id": "...", "ref": "hx1:ardent:...:attempt:<id>/0/1", "started_ms": 0, "usage": null}],
+ "tools": [{"call_id": "call-1", "name": "artifact_write", "effect": "artifact-write", "state": "succeeded"}],
+ "artifacts": [{"sha256": "...", "name": "map.md", "mime": "text/markdown", "size": 12, "artifact_id": "...", "source": "manifest", "created_ms": 0,
+   "schema_version": "1.1", "execution": {"root": "...", "task": "...", "step": "..."}}]}
+```
+
+  `parent.local_task_id` is set when the parent is a task of this instance.
+  Tool `state` is `attempted`, `succeeded`, `failed`, `denied` or
+  `not_dispatched`. Artifacts come from the manifest table (`source:
+  manifest`, with renditions as `rendition_of`) and, for artifacts with no
+  manifest, the `artifact_registered` and `research_artifacts` events. Everything comes from SQLite, so lineage survives a
+  restart; a task accepted before this version has no `execution`, `parent`
+  or `children`, but still lists its model attempts, tools and artifacts.
+  The `/stream` events are unchanged apart from `accepted`.
+
 ## Plugins
 
 A plugin is an ES module whose default export (or named `plugin` export) is an
@@ -715,8 +797,10 @@ received_ms, execution? }` and carries no message text. `delivery` is
 `{ delivery_id, task_id, platform, account, update_id, text, attempt }`.
 `call` is `{ task_id, call_id, name, arguments, effect, idempotency_key,
 execution? }` with the validated arguments. `ctx.execution` and `execution` are
-attribution for the causal tree a task belongs to; they never grant access and
-are absent until a caller supplies them.
+attribution for the causal tree a task belongs to (see
+[Execution ancestry](#execution-ancestry)); they never grant access. They are
+set for every task accepted by this version, and absent for older tasks and for
+a channel `message`, which has no task yet.
 
 Order: `before*` and `transform*` hooks run in plugin registration order, and
 the first denial wins. Observers also run in registration order. Cleanup hooks

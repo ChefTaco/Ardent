@@ -13,6 +13,7 @@ import { ARTIFACT_MIME_TYPES, ArtifactManifest11Schema, ArtifactMimeSchema, arti
   type ArtifactManifest11 } from './artifact-manifests.js';
 import { ArtifactStoreError, hashFileRange } from './artifacts.js';
 import type { ArdentRuntime } from './runtime.js';
+import { buildTaskExecution } from './execution.js';
 import { TeamArtifactDescriptorSchema, TeamArtifactDescriptorV2Schema, TeamArtifactRequiresV2Schema } from './team-artifacts.js';
 import { ProvenNoEffectError } from './tools.js';
 
@@ -400,7 +401,7 @@ export class ArtifactTransfers {
       throw new ArtifactTransferError('Verified bytes are no longer retained; reissue the import', 'TRANSFER_INTERRUPTED');
     }
     const manifest = ArtifactManifest11Schema.parse(JSON.parse(row.manifest_json) as unknown);
-    const taskId = row.local_task_id ?? this.#importTask(row);
+    const taskId = row.local_task_id ?? this.#importTask(row, manifest);
     await this.runtime.artifactManifests.registerImported({ taskId, peer: row.peer_id, remoteTaskId: row.a2a_task_id, manifest,
       artifactId: row.id, onRegistered: () => this.#set(row.id, { state: 'completed', received_bytes: row.size, local_task_id: taskId, error: null, error_code: null }) });
   }
@@ -423,11 +424,15 @@ export class ArtifactTransfers {
   }
 
   /** A completed local task that owns an import made without one. Idempotent per import. */
-  #importTask(row: Resolved): string {
+  #importTask(row: Resolved, manifest: ArtifactManifest11): string {
     const store = this.runtime.store;
+    // Attribution only: the producer's execution, when the manifest names one, becomes the import task's parent.
+    const produced = manifest.provenance.execution;
+    const context = produced ? { v: 1, root: produced.root, ...(produced.task ? { self: produced.task } : {}) } : undefined;
     return store.db.transaction(() => {
       const task = store.accept({ caller: row.caller, context: 'direct', prompt: `Import artifact ${row.name} from A2A peer ${row.peer_id} task ${row.a2a_task_id}`.slice(0, 16000),
-        idempotencyKey: `artifact-import:${row.id}`, backend: this.runtime.config.execution.backend, deadlineMs: Date.now() });
+        idempotencyKey: `artifact-import:${row.id}`, backend: this.runtime.config.execution.backend, deadlineMs: Date.now(),
+        execution: created => buildTaskExecution(this.runtime.instanceRef, created, { context, source: 'a2a' }) });
       if (task.state === 'queued') store.setState(task.id, 'completed', `Imported artifact ${row.name} (sha256 ${row.sha256})`);
       this.#set(row.id, { local_task_id: task.id });
       return task.id;

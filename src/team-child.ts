@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ArdentRuntime } from './runtime.js';
 import { ArdentA2AClient } from './a2a-client.js';
 import { TeamEnvelope, type TeamResult } from './team-contract.js';
+import type { ExecutionContext } from './execution.js';
 
 const id = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
@@ -35,6 +36,10 @@ export class TeamChildService {
       child_id TEXT PRIMARY KEY, a2a_task_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
       claim_id TEXT NOT NULL, root TEXT NOT NULL, grant_json TEXT NOT NULL,
       operation_id TEXT, settlement_json TEXT, acknowledged INTEGER NOT NULL DEFAULT 0);`);
+    // The child's execution context sits next to its grant for attribution. It is
+    // outside the grant and its digest, and admission never reads it.
+    const columns = z.array(z.object({ name: z.string() })).parse(runtime.store.db.pragma('table_info(a2a_team_child_claims)'));
+    if (!columns.some(column => column.name === 'execution_json')) runtime.store.db.exec('ALTER TABLE a2a_team_child_claims ADD COLUMN execution_json TEXT');
   }
   #row(childId: string): z.infer<typeof Row> | undefined {
     const raw = this.runtime.store.db.prepare('SELECT * FROM a2a_team_child_claims WHERE child_id=?').get(childId);
@@ -82,11 +87,12 @@ export class TeamChildService {
     db.prepare('UPDATE a2a_team_child_claims SET grant_json=? WHERE child_id=?').run(stable(grant), ref.child_id);
     return ref;
   }
-  attach(ref: TeamChildReference, operationId: string): void {
+  attach(ref: TeamChildReference, operationId: string, execution?: ExecutionContext): void {
     const row = this.#row(ref.child_id);
     if (!row || row.grant_json === '{}') throw new Error('Child execution has no retained root claim');
     if (row.operation_id && row.operation_id !== operationId) throw new Error('Child native execution identity changed');
-    this.runtime.store.db.prepare('UPDATE a2a_team_child_claims SET operation_id=? WHERE child_id=?').run(operationId, ref.child_id);
+    this.runtime.store.db.prepare('UPDATE a2a_team_child_claims SET operation_id=?,execution_json=coalesce(execution_json,?) WHERE child_id=?')
+      .run(operationId, execution ? JSON.stringify(execution) : null, ref.child_id);
   }
   deadline(ref: TeamChildReference): number {
     const row = this.#row(ref.child_id);

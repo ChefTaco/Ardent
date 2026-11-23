@@ -62,7 +62,7 @@ export type ArdentTaskPluginContext = ArdentPluginContext & {
   task: Task;
   envelope?: TeamEnvelope;
   baseTools: readonly Tool[];
-  /** Attribution for the causal tree this task belongs to, when one was supplied. Never grants access. */
+  /** Attribution for the causal tree this task belongs to (absent for tasks accepted before ancestry was recorded). Never grants access. */
   execution?: ExecutionContext;
 };
 

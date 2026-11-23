@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ExecutionInput } from './execution.js';
 import type { Task, TaskStore } from './store.js';
 
 /** Artifacts a preview produces expire after this long. */
@@ -17,7 +18,9 @@ export const PreviewSubmit = z.object({
   prompt: z.string().trim().min(1).max(16000),
   overrides: PreviewOverrides.default({}),
   session_id: z.string().guid().optional(),
-  idempotency_key: z.string().min(1).max(128).optional()
+  idempotency_key: z.string().min(1).max(128).optional(),
+  /** Optional execution context v1 (attribution only). An invalid value is treated as absent. */
+  execution: ExecutionInput.optional()
 }).strict();
 export type PreviewSubmit = z.infer<typeof PreviewSubmit>;
 

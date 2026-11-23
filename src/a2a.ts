@@ -12,6 +12,7 @@ import { ARTIFACT_TRANSFER_V2_MEDIA_TYPE, ARTIFACT_TRANSFER_V2_URN } from '@hive
 import { CodexHarnessBackend } from './codex.js';
 import { LlamaCppBackend } from './llamacpp.js';
 import { ToolRegistry } from './tools.js';
+import { EXECUTION_METADATA_KEY } from './execution.js';
 
 const maxPartBytes = 2 * 1024 * 1024;
 
@@ -166,7 +167,9 @@ export class ArdentA2AExecutor implements AgentExecutor {
     const deadline = childReference ? this.#children.deadline(childReference) : envelope?.mission.deadline;
     const existedBefore = Boolean(request.userMessage.messageId && this.runtime.store.db.prepare(
       "SELECT 1 FROM tasks WHERE caller=? AND context='peer' AND idempotency_key=?").get(owner, request.userMessage.messageId));
-    const operation = this.runtime.accept(prompt, owner, 'peer', request.userMessage.messageId, session.id, deadline ? deadline * 1000 : undefined);
+    // Ancestry from the sender (`hiveExecution`) is attribution only; an invalid value mints a root.
+    const operation = this.runtime.accept(prompt, owner, 'peer', request.userMessage.messageId, session.id, deadline ? deadline * 1000 : undefined, undefined,
+      { context: metadata[EXECUTION_METADATA_KEY], source: 'a2a' });
     if (envelope && operation.state === 'queued') this.runtime.store.append(operation.id, 'team_envelope', wireEnvelope);
     try {
     this.runtime.store.db.transaction(() => {
@@ -190,7 +193,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
       } catch { /* Preserve the original binding error. */ }
       throw error;
     }
-    if (childReference) this.#children.attach(childReference, operation.id);
+    if (childReference) this.#children.attach(childReference, operation.id, this.runtime.executionFor(operation.id));
     this.#operations.set(taskId, operation.id);
     if (this.#cancelled.has(taskId)) {
       this.runtime.cancel(operation.id);

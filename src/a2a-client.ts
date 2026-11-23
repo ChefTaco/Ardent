@@ -7,6 +7,8 @@ import type { ArdentConfig } from './config.js';
 import { loadPeers, outboundTokenEnv } from './a2a-peers.js';
 import type { A2APushInbox } from './a2a-push-inbox.js';
 import { z } from 'zod';
+import { parseExecutionContext } from '@hivemagnus/hive-common/execution';
+import { EXECUTION_METADATA_KEY, type ExecutionContext } from './execution.js';
 import { isTransportError, lastAttemptError, responseFailure, retryWithPolicy, type AttemptFailure, type RetryWithPolicyOptions } from './retry.js';
 
 /**
@@ -49,6 +51,15 @@ export async function fetchHermesTeamCard(card: AgentCard, authorization: string
   if (Buffer.byteLength(encoded) > 256_000) throw new Error('Hermes team card exceeds bound');
   const raw: unknown = JSON.parse(encoded);
   return z.record(z.string(), z.unknown()).parse(raw);
+}
+
+/** Per-message options. `execution` is the delegating task's context (attribution only). */
+export type A2ASendOptions = { execution?: ExecutionContext | undefined };
+
+/** Message metadata carrying an execution context as `hiveExecution`; empty without a valid one. */
+function executionMetadata(options: A2ASendOptions): Record<string, unknown> {
+  const execution = parseExecutionContext(options.execution);
+  return execution ? { [EXECUTION_METADATA_KEY]: execution } : {};
 }
 
 export class ArdentA2AClient {
@@ -127,8 +138,8 @@ export class ArdentA2AClient {
     const parsed = z.object({ version: z.literal('1.0'), request_digest: z.string().regex(/^[a-f0-9]{64}$/), data: z.record(z.string(), z.unknown()) }).parse(receipt);
     return parsed;
   }
-  async send(peerId: string, prompt: string, signal?: AbortSignal, contextId?: string, taskId?: string): Promise<SendMessageResult> {
-    return (await this.sendWithReceipt(peerId, prompt, signal, contextId, taskId)).result;
+  async send(peerId: string, prompt: string, signal?: AbortSignal, contextId?: string, taskId?: string, options: A2ASendOptions = {}): Promise<SendMessageResult> {
+    return (await this.sendWithReceipt(peerId, prompt, signal, contextId, taskId, options)).result;
   }
   async getTask(peerId: string, id: string, historyLength?: number): Promise<Task> {
     const { client, authorization, observation } = await this.open(peerId);
@@ -152,16 +163,21 @@ export class ArdentA2AClient {
     const { client, authorization } = await this.open(peerId);
     yield* client.resubscribeTask({ tenant: '', id }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' }, ...(signal ? { signal } : {}) });
   }
-  async *sendStreaming(peerId: string, prompt: string, signal?: AbortSignal): AsyncGenerator<StreamResponse> {
+  async *sendStreaming(peerId: string, prompt: string, signal?: AbortSignal, options: A2ASendOptions = {}): AsyncGenerator<StreamResponse> {
     if (!prompt.trim() || prompt.length > 16000) throw new Error('A2A prompt must be 1 to 16000 characters');
     const { client, authorization } = await this.open(peerId);
-    const message: Message = { messageId: randomUUID(), contextId: '', taskId: '', role: Role.ROLE_USER, parts: [{ content: { $case: 'text', value: prompt }, metadata: undefined, filename: '', mediaType: 'text/plain' }], metadata: {}, extensions: [], referenceTaskIds: [] };
+    const message: Message = { messageId: randomUUID(), contextId: '', taskId: '', role: Role.ROLE_USER, parts: [{ content: { $case: 'text', value: prompt }, metadata: undefined, filename: '', mediaType: 'text/plain' }], metadata: executionMetadata(options), extensions: [], referenceTaskIds: [] };
     yield* client.sendMessageStream({ tenant: '', message, configuration: undefined, metadata: undefined }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' }, ...(signal ? { signal } : {}) });
   }
-  async sendWithReceipt(peerId: string, prompt: string, signal?: AbortSignal, contextId?: string, taskId?: string): Promise<{ result: SendMessageResult; outboundId?: string }> {
+  /**
+   * Send one message. With `options.execution` (the delegating task's context)
+   * the message carries `metadata.hiveExecution`, so the receiving task keeps
+   * the root and takes the delegating task as its parent.
+   */
+  async sendWithReceipt(peerId: string, prompt: string, signal?: AbortSignal, contextId?: string, taskId?: string, options: A2ASendOptions = {}): Promise<{ result: SendMessageResult; outboundId?: string }> {
     if (!prompt.trim() || prompt.length > 16000) throw new Error('A2A prompt must be 1 to 16000 characters');
     const { card, client, authorization, observation } = await this.open(peerId, signal);
-    const message: Message = { messageId: randomUUID(), contextId: contextId ?? '', taskId: taskId ?? '', role: Role.ROLE_USER, parts: [{ content: { $case: 'text', value: prompt }, metadata: undefined, filename: '', mediaType: 'text/plain' }], metadata: {}, extensions: [], referenceTaskIds: [] };
+    const message: Message = { messageId: randomUUID(), contextId: contextId ?? '', taskId: taskId ?? '', role: Role.ROLE_USER, parts: [{ content: { $case: 'text', value: prompt }, metadata: undefined, filename: '', mediaType: 'text/plain' }], metadata: executionMetadata(options), extensions: [], referenceTaskIds: [] };
     const registered = this.pushInbox && card.capabilities?.pushNotifications ? this.pushInbox.register(peerId, message.messageId) : undefined;
     const request: SendMessageRequest = { tenant: '', message, configuration: registered ? {
       acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: false,

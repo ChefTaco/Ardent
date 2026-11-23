@@ -33,7 +33,7 @@ it('records a Codex tool attempt before dispatch so cancellation stays unknown a
     for (let attempt = 0; attempt < 500 && !invoked; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     expect(invoked).toBe(true);
     expect(runtime.store.events(task.id).some(event => event.kind === 'tool_attempt' &&
-      JSON.stringify(event.detail) === JSON.stringify({ id: 'call-1', name: 'fixture_effect', args: {} }))).toBe(true);
+      JSON.stringify(event.detail) === JSON.stringify({ id: 'call-1', name: 'fixture_effect', args: {}, effect: 'external-write' }))).toBe(true);
     runtime.cancel(task.id);
     await expect(pending).rejects.toThrow();
     expect(runtime.store.get(task.id)?.state).toBe('unknown');
