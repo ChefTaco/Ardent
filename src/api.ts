@@ -4,7 +4,7 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
 import { ConfigSchema, type LoadedConfig } from './config.js';
-import { runtimeProblems, saveConfig, loadConfig, resolveReference, parseConfig } from './config.js';
+import { isConfigNotice, runtimeProblems, saveConfig, loadConfig, resolveReference, parseConfig } from './config.js';
 import type { ArdentRuntime } from './runtime.js';
 import { listSkills, setSkillEnabled } from './skills.js';
 import { HiveMemClient } from './memory.js';
@@ -181,7 +181,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   app.get('/health/live', c => c.json({ status: 'live' }));
   app.get('/health/ready', async c => {
-    const problems = runtimeProblems(runtime.config, env);
+    // Advisory notices (such as a deprecated key) never make a profile unready.
+    const problems = runtimeProblems(runtime.config, env).filter(problem => !isConfigNotice(problem));
     if (!problems.length && runtime.config.execution.backend === 'codex') {
       const problem = await codexReadinessProblem();
       if (problem) problems.push(problem);

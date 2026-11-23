@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { magnusControlEnabled, resolveReference, type ArdentConfig } from './config.js';
+import { magnusControlEnabled, maxParallelTasks, resolveReference, type ArdentConfig } from './config.js';
 import { ArtifactStore } from './artifacts.js';
 import { CodexHarnessBackend, compactWithCodex } from './codex.js';
 import { LlamaCppBackend, type ChatMessage, type LlamaRequestOptions } from './llamacpp.js';
@@ -272,7 +272,7 @@ export class ArdentRuntime {
     this.#waiting.set(pending.task.id, pending);
   }
   #pump(): void {
-    const limit = Math.max(1, Math.min(this.config.execution.max_parallel_tools, 4));
+    const limit = Math.max(1, Math.min(maxParallelTasks(this.config), 4));
     while (this.#runningCount < limit && this.#roundRobin.length) {
       let caller: string | undefined;
       for (let inspected = 0, count = this.#roundRobin.length; inspected < count; inspected++) {

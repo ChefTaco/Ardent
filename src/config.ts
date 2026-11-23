@@ -40,6 +40,12 @@ const a2aRateLimitDefault = { enabled: true, ip_requests_per_minute: 600, ip_bur
 const a2aDefault = { rate_limit: a2aRateLimitDefault, enabled: false, protocol_version: '1.0' as const, bindings: ['jsonrpc' as const, 'http-json' as const], public_url: '${ARDENT_A2A_PUBLIC_URL}', listen_host: '127.0.0.1', peers_file: 'peers.yaml', hermes_compat: false };
 const researchDefault = { enabled: false, searxng_url: '${ARDENT_SEARXNG_URL}', firecrawl_url: '${ARDENT_FIRECRAWL_URL}', firecrawl_token_env: 'FIRECRAWL_API_KEY' };
 
+/** Default for `execution.max_parallel_tool_calls`. */
+export const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 4;
+/** Task concurrency when neither `max_parallel_tasks` nor the deprecated `max_parallel_tools` is set. */
+export const DEFAULT_MAX_PARALLEL_TASKS = 3;
+export const MAX_PARALLEL_TOOLS_DEPRECATION = 'notice: execution.max_parallel_tools is deprecated: it limits tasks; set max_parallel_tasks';
+
 export const ConfigSchema = z.object({
   schema_version: z.literal(1),
   profile: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
@@ -48,7 +54,14 @@ export const ConfigSchema = z.object({
   /** IANA timezone for schedules and dates shown to the model. Defaults to the host zone. */
   timezone: ianaTimezone.default(systemTimezone),
   identity: z.object({ soul_file: z.string().regex(pathName).default('SOUL.md'), identity_file: z.string().regex(pathName).default('IDENTITY.md') }).strict().default({ soul_file: 'SOUL.md', identity_file: 'IDENTITY.md' }),
-  execution: z.object({ backend: z.enum(['llamacpp', 'codex']), max_model_steps: z.number().int().min(1).max(200), max_tool_calls: z.number().int().min(0).max(500), max_parallel_tools: z.number().int().min(1).max(16), deadline_seconds: z.number().int().min(1).max(86400), max_delegation_depth: z.number().int().min(0).max(8) }).strict(),
+  execution: z.object({ backend: z.enum(['llamacpp', 'codex']), max_model_steps: z.number().int().min(1).max(200), max_tool_calls: z.number().int().min(0).max(500),
+    /** Tasks running at once (the runtime caps it at 4). */
+    max_parallel_tasks: z.number().int().min(1).max(16).optional(),
+    /** Parallel-eligible tool calls in flight at once within one model turn. */
+    max_parallel_tool_calls: z.number().int().min(1).max(16).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS),
+    /** Deprecated: despite its name it limits tasks. Used only when `max_parallel_tasks` is absent. */
+    max_parallel_tools: z.number().int().min(1).max(16).optional(),
+    deadline_seconds: z.number().int().min(1).max(86400), max_delegation_depth: z.number().int().min(0).max(8) }).strict(),
   providers: z.object({ llamacpp: provider, codex: z.object({ command: z.string().min(1).max(500), model: z.string().min(1).max(200), auth_mode: z.enum(['chatgpt', 'api_key']).default('chatgpt'), approval_policy: z.literal('never'), sandbox: z.literal('read-only') }).strict() }).strict(),
   /** Long-term memory. `none` (default) disables memory tools; `hivemem` uses a HiveMem server. */
   memory: z.discriminatedUnion('provider', [NoMemory, HiveMemConfigSchema]).default({ provider: 'none' }),
@@ -115,6 +128,21 @@ export function resolveReference(value: string, env: NodeJS.ProcessEnv = process
   return env[match[1] ?? ''];
 }
 
+/** The configured task concurrency, before the runtime's cap of 4. */
+export function maxParallelTasks(config: ArdentConfig): number {
+  return config.execution.max_parallel_tasks ?? config.execution.max_parallel_tools ?? DEFAULT_MAX_PARALLEL_TASKS;
+}
+
+/** Advisory notices, prefixed `notice:`. They never make a profile unready. */
+export function configNotices(config: ArdentConfig): string[] {
+  return config.execution.max_parallel_tasks === undefined && config.execution.max_parallel_tools !== undefined
+    ? [MAX_PARALLEL_TOOLS_DEPRECATION] : [];
+}
+
+/** Whether a `runtimeProblems` entry is an advisory notice rather than a problem. */
+export function isConfigNotice(problem: string): boolean { return problem.startsWith('notice: '); }
+
+/** Unresolved runtime dependencies, followed by advisory notices (see `isConfigNotice`). */
 export function runtimeProblems(config: ArdentConfig, env: NodeJS.ProcessEnv = process.env): string[] {
   const problems: string[] = [];
   const need = (field: string, value: string): string | undefined => {
@@ -143,7 +171,7 @@ export function runtimeProblems(config: ArdentConfig, env: NodeJS.ProcessEnv = p
     need('integrations.magnus_control.base_url', config.integrations.magnus_control.base_url);
     if (!env[config.integrations.magnus_control.token_env]) problems.push('Magnus Control read token is missing');
   }
-  return problems;
+  return [...problems, ...configNotices(config)];
 }
 
 export function redactedConfig(config: ArdentConfig): ArdentConfig {
