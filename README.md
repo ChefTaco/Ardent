@@ -143,7 +143,7 @@ only the *names* of the environment variables that hold them.
 | `product` | `Ardent` | Shown in the profile summary. |
 | `timezone` | host zone, else `UTC` | IANA zone used for dates shown to the model. Job schedules carry their own zone. |
 | `identity.soul_file`, `identity.identity_file` | `SOUL.md`, `IDENTITY.md` | Persona files in the profile. |
-| `execution` | required | `backend: llamacpp \| codex`, step, tool-call, parallelism, and deadline limits. |
+| `execution` | required | `backend: llamacpp \| codex`, step, tool-call, parallelism, and deadline limits. See [Tool scheduling](#tool-scheduling). |
 | `providers.llamacpp` | required | `base_url`, `model`, `api_key_env`, `request_timeout_seconds`, optional `context_window_tokens`, `max_output_tokens`, `reasoning_effort`. |
 | `providers.codex` | required | `command`, `model`, `auth_mode: chatgpt \| api_key` (default `chatgpt`); `approval_policy: never` and `sandbox: read-only` are fixed. |
 | `memory` | `{ provider: none }` | See [HiveMem](#hivemem-memory). |
@@ -158,6 +158,51 @@ only the *names* of the environment variables that hold them.
 
 `ardent config schema` prints the full JSON Schema, and `ardent config
 validate` checks a profile without starting it.
+
+### Tool scheduling
+
+Task concurrency and tool concurrency are separate settings:
+
+| Key | Default | Notes |
+|---|---|---|
+| `execution.max_parallel_tasks` | `3` | Tasks running at once, 1-16. The runtime runs at most 4. |
+| `execution.max_parallel_tool_calls` | `4` | Tool calls from one model turn in flight at once, 1-16. |
+| `execution.max_parallel_tools` | none | Deprecated. Despite its name it limits tasks. It is used only when `max_parallel_tasks` is absent, and `ardent config validate` and `ardent doctor` then report the notice `execution.max_parallel_tools is deprecated: it limits tasks; set max_parallel_tasks`. A notice never makes the profile unready. |
+
+The llama.cpp and Codex backends dispatch tool calls through the same scheduler:
+
+- A call is *parallel-eligible* when its tool is a `read` tool that does not
+  declare `concurrency: 'serial'`, or any tool that declares
+  `concurrency: 'parallel'`. Every other call, including an unknown tool and
+  `team_ask_user`, is serial.
+- Calls are admitted in the order the model emitted them (for Codex, the order
+  the calls arrive). Consecutive parallel-eligible calls overlap, at most
+  `max_parallel_tool_calls` at a time. A serial call is a barrier: it starts
+  after every earlier call has settled, and later calls wait for it. A write
+  therefore never overlaps anything unless its tool opts in.
+- Each dispatch waits while the task is paused, checks `max_tool_calls` (for the
+  whole task), journals `tool_attempt`, waits for team admission, runs plugin
+  `beforeToolCall` hooks, invokes the tool, journals `tool_result` with the call
+  `id`, and then runs `afterToolCall` hooks.
+- llama.cpp receives the results in the order it emitted the calls, each bound
+  to its call id. Codex binds each result to its own RPC request, and its
+  follow-up turn lists results in completion order.
+- On cancellation, calls that were not dispatched settle as
+  `{ ok: false, code: 'CANCELLED', effect: 'none' }` and are journaled as
+  `tool_not_dispatched` (with a `reason`). A call already started keeps its
+  uncertainty, so a cancelled task with a started call is `unknown`, never
+  `cancelled`. A call that would exceed `max_tool_calls` is not dispatched and
+  fails the task.
+
+Each tool receives `ctx.idempotencyKey`, `sha256("<task id>:<call id>")` in
+hex, as the third `invoke` argument (`defineTool` handlers receive it as their
+third argument). A tool may forward it to its service so that a repeated
+dispatch of the same model call is harmless. A tool can also declare
+`idempotent: true` (repeating it with identical arguments and key is safe) and a
+`reconcile(input, ctx, signal)` hook that asks its service what happened to an
+interrupted call. Execution recovery will use these; the runtime does not call
+`reconcile` yet. Tools that declare none of these keep their existing
+behaviour.
 
 ### HiveMem memory
 
@@ -542,6 +587,53 @@ Additional hooks support extensions that retain an existing workflow contract:
 | `prepareGateway`, `start` | Verify prior consumer ownership, then start background intake only in gateway mode. CLI inspection does not start consumers. |
 | `channelAdapter` | Replaces one enabled built-in channel consumer. Multiple owners are refused. Intake and delivery receive separate abort signals. |
 | `httpRoutes` | Adds explicit compatibility paths; overlapping core routes and authentication-boundary changes are refused. |
+
+### Lifecycle hooks
+
+Message and tool lifecycle hooks let one extension follow a channel message
+from receipt to delivery, and a tool call from invocation to its result or
+cancellation, without replacing a channel adapter. Every hook is optional and
+may be asynchronous. Each one gets a frozen copy of what it observes, and each
+must settle within 5 seconds.
+
+| Hook | When | Permitted | On a throw, rejection or timeout |
+| --- | --- | --- | --- |
+| `messageReceived(ctx, message)` | A built-in Telegram or Mattermost consumer has claimed a new, authenticated message, before command or task handling | Observe | Recorded; handling continues |
+| `messagePersisted(ctx, message, task)` | The message's task is accepted and bound to it, before it runs | Observe | Recorded; the task runs |
+| `transformOutbound(ctx, delivery)` | A reply is recorded for delivery, before it is sent | Return `{ text }` (1 byte to 64 KiB, not blank) to replace the text; return nothing to keep it. Transformations chain. When the text changes, the task journal records `outbound_transformed` with the sent text | The **original** text is sent, discarding every transformation; recorded |
+| `messageDelivered(ctx, delivery, outcome)` | The delivery is recorded `sent`, `failed` or `unknown` | Observe | Recorded |
+| `beforeToolCall(ctx, call)` | After context scoping, argument validation, the `tool_attempt` journal entry and team admission, before the tool is invoked | Return `{ deny: { code, message } }` to deny; the result is `{ ok: false, code, message, effect: 'none' }` and the journal records `tool_denied_by_plugin`. Anything else is ignored | The call is denied (`TOOL_DENIED_BY_PLUGIN`); recorded |
+| `afterToolCall(ctx, call, result)` | The result is journaled, successful or not | Observe | Recorded; the task continues |
+| `toolCallCancelled(ctx, call, { dispatched, effect })` | On cancellation, for calls not yet dispatched (`dispatched: false`, `effect: 'none'`) and calls in flight (`dispatched: true`; `effect: 'unknown'` unless the tool is `read`). Runs before `taskSettled` | Clean up | Recorded |
+
+`message` is `{ platform, account, update_id, channel_type, caller, session_key,
+received_ms, execution? }` and carries no message text. `delivery` is
+`{ delivery_id, task_id, platform, account, update_id, text, attempt }`.
+`call` is `{ task_id, call_id, name, arguments, effect, idempotency_key,
+execution? }` with the validated arguments. `ctx.execution` and `execution` are
+attribution for the causal tree a task belongs to; they never grant access and
+are absent until a caller supplies them.
+
+Order: `before*` and `transform*` hooks run in plugin registration order, and
+the first denial wins. Observers also run in registration order. Cleanup hooks
+(`toolCallCancelled`, `taskSettled`, `drain`, `close`) run in reverse
+registration order.
+
+A failed hook is recorded as a `plugin_hook_failed` task event `{ plugin, hook }`.
+For a message that never creates a task (a command such as `/help`), the
+failure is recorded against the message's identity instead
+(`runtime.store.pluginHookFailures(platform, account, update_id)`). An observer
+failure never fails the task or the delivery. This includes
+`observeToolResult`: a throwing `observeToolResult` is recorded and no longer
+fails the task.
+
+The hooks cannot widen authority. Context and mission scoping, plugin
+`taskTools` and `filterTool`, and argument validation all happen before
+`beforeToolCall`, which can only deny. A hook cannot change the arguments, the
+result, the declared effect or the effect accounting, and `transformOutbound`
+can change only the text of a reply that Ardent already decided to send.
+Message hooks run for the built-in consumers; a plugin `channelAdapter` that
+replaces one owns its own intake.
 
 An envelope extension uses `mission.extensions[plugin.name]` and action names
 `extension:<plugin-name>:<action>`. No extension is accepted without its configured
