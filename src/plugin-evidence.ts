@@ -25,7 +25,8 @@ export async function collectPluginTeamEvidence(runtime: ArdentRuntime, task: Ta
         !envelope.mission.allowed_actions.some(action => action.startsWith(`extension:${plugin.name}:`)))
       throw new Error('Plugin artifact lacks an exact mission grant');
     for (const artifact of evidence.artifacts) {
-      await runtime.artifacts.get(artifact.sha256);
+      // Stream-hash the bytes: verification never holds a large artifact in memory.
+      await runtime.artifacts.verify(artifact.sha256);
       const prior = artifacts.find(item => item.name === artifact.name);
       if (prior && prior.sha256 !== artifact.sha256) throw new Error('Conflicting plugin artifact name');
       if (!prior) artifacts.push({ ...artifact, reference: `ardent-artifact:${artifact.sha256}`, producer: `ardent-plugin:${plugin.name}`, source: artifact.source ?? '' });
