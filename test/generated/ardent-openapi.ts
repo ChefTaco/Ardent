@@ -2318,8 +2318,15 @@ export interface operations {
                             size: number | null;
                             artifact_id: string | null;
                             /** @enum {string} */
-                            source: "artifact_registered" | "research_artifacts";
+                            source: "manifest" | "artifact_registered" | "research_artifacts";
                             created_ms: number;
+                            schema_version?: string;
+                            execution?: {
+                                root: string;
+                                task?: string;
+                                step?: string;
+                            };
+                            rendition_of?: string;
                         }[];
                     };
                 };

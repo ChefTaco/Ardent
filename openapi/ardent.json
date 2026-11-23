@@ -2961,6 +2961,7 @@
                           "source": {
                             "type": "string",
                             "enum": [
+                              "manifest",
                               "artifact_registered",
                               "research_artifacts"
                             ]
@@ -2969,6 +2970,29 @@
                             "type": "integer",
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
+                          },
+                          "schema_version": {
+                            "type": "string"
+                          },
+                          "execution": {
+                            "type": "object",
+                            "properties": {
+                              "root": {
+                                "type": "string"
+                              },
+                              "task": {
+                                "type": "string"
+                              },
+                              "step": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "root"
+                            ]
+                          },
+                          "rendition_of": {
+                            "type": "string"
                           }
                         },
                         "required": [

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { z } from 'zod';
-import { isExecutionRef } from '@hivemagnus/hive-common/execution';
+import { formatExecutionRef, isExecutionRef, parseExecutionRef } from '@hivemagnus/hive-common/execution';
 import { ARTIFACT_MAX_BYTES_LIMIT, ArtifactStoreError, formatBytes, type Artifact, type ArtifactInspector, type ArtifactSource, type ArtifactStore } from './artifacts.js';
 import type { TaskStore } from './store.js';
 import { ProvenNoEffectError } from './tools.js';
@@ -192,15 +192,37 @@ export class ArtifactManifests {
   }
 
   /**
+   * The execution provenance of an artifact a task produces: the task's root,
+   * the task, and, while the task runs, the model step it is in. Undefined
+   * for a task with no recorded execution context. Attribution only.
+   */
+  executionProvenance(taskId: string): ArtifactExecution | undefined {
+    const record = this.store.executions.get(taskId);
+    if (!record) return undefined;
+    // The step is known only while the task runs: a later registration names the task alone.
+    const raw = this.store.get(taskId)?.state !== 'running' ? undefined
+      : this.store.db.prepare("SELECT json_extract(detail_json,'$.step') AS step FROM events WHERE task_id=? AND kind='model_started' ORDER BY sequence DESC LIMIT 1").get(taskId);
+    const step = z.object({ step: z.number().int().min(0).nullable() }).safeParse(raw).data?.step;
+    const instance = parseExecutionRef(record.self_ref)?.instance;
+    const stepRef = step === undefined || step === null || !instance ? undefined
+      : formatExecutionRef({ product: 'ardent', instance, kind: 'step', id: `${taskId}/${step}` });
+    return ArtifactExecutionSchema.parse({ root: record.root_ref, task: record.self_ref, ...(stepRef ? { step: stepRef } : {}) });
+  }
+
+  /**
    * Store bytes for a task and record their manifest and an `artifact_registered`
    * journal event. `revisesSha256` must name a current registered artifact.
+   * When the task has an execution context the stored manifest is 1.1 with
+   * `provenance.execution`; the returned record, like every 1.0 view, is 1.0.
    */
   async register(input: { taskId: string; name: string; mime: ArtifactMime; bytes: Uint8Array; source: string;
-    revisesSha256?: string | undefined; ttlSeconds?: number | undefined }): Promise<ArtifactRecord> {
+    revisesSha256?: string | undefined; ttlSeconds?: number | undefined; execution?: ArtifactExecution | undefined }): Promise<ArtifactRecord> {
     // Every check that can refuse the artifact runs before any byte is stored.
     if (!/^[A-Za-z0-9._-]{1,128}$/.test(input.name)) throw new ProvenNoEffectError('Invalid artifact name', 'INVALID_ARTIFACT');
     if (input.bytes.length > this.artifacts.maxBytes) throw new ProvenNoEffectError(`Artifact exceeds ${formatBytes(this.artifacts.maxBytes)}`, 'ARTIFACT_TOO_LARGE');
     checkArtifactContent(input.mime, input.bytes);
+    const execution = input.execution === undefined ? this.executionProvenance(input.taskId) : ArtifactExecutionSchema.safeParse(input.execution).data;
+    if (input.execution !== undefined && !execution) throw new ProvenNoEffectError('Invalid execution provenance', 'INVALID_ARTIFACT');
     const prior = input.revisesSha256 ? this.manifest(input.revisesSha256) : undefined;
     if (input.revisesSha256 && !prior) throw new ProvenNoEffectError('revises_sha256 does not name a current artifact', 'NOT_FOUND');
     if (prior && prior.manifest.sha256 === createHash('sha256').update(input.bytes).digest('hex'))
@@ -219,14 +241,17 @@ export class ArtifactManifests {
         lineage: [{ producer: this.producer, source_id: input.source }] },
       recovery: { on_expiry: 'request_verified_reexport' }, artifact_id: id
     });
-    this.store.db.transaction(() => this.#insert(input.taskId, manifest, created))();
+    const stored11 = execution ? ArtifactManifest11Schema.parse({ ...manifest, schema_version: '1.1',
+      provenance: { ...manifest.provenance, execution } }) : undefined;
+    this.store.db.transaction(() => this.#insert(input.taskId, stored11 ?? manifest, created))();
     return { task_id: input.taskId, superseded_by_sha256: null, manifest };
   }
 
   /**
    * Stream bytes into the store for a task and record a manifest 1.1 for them.
    * The content check, size bound and any expected digest are applied while the
-   * bytes arrive; a refusal stores nothing. `execution` is attribution only.
+   * bytes arrive; a refusal stores nothing. `execution` is attribution only;
+   * without it, the task's own execution provenance is recorded when it has one.
    */
   async registerStream(input: { taskId: string; name: string; mime: ArtifactMime; stream: ArtifactSource; source: string;
     expectedSha256?: string | undefined; expectedSize?: number | undefined; revisesSha256?: string | undefined;
@@ -237,6 +262,7 @@ export class ArtifactManifests {
     const execution = input.execution === undefined ? undefined : ArtifactExecutionSchema.safeParse(input.execution);
     if (execution && !execution.success) throw new ProvenNoEffectError('Invalid execution provenance', 'INVALID_ARTIFACT');
     if (!this.store.get(input.taskId)) throw new ProvenNoEffectError('Task not found', 'NOT_FOUND');
+    const derived = execution ? undefined : this.executionProvenance(input.taskId);
     const prior = input.revisesSha256 ? this.manifest(input.revisesSha256) : undefined;
     if (input.revisesSha256 && !prior) throw new ProvenNoEffectError('revises_sha256 does not name a current artifact', 'NOT_FOUND');
     const stored = await this.#putStream(input.stream, input.name, mime.data, input);
@@ -247,7 +273,7 @@ export class ArtifactManifests {
       ...this.#baseManifest(stored, mime.data, created, input.ttlSeconds), schema_version: '1.1',
       revision: prior ? prior.manifest.revision + 1 : 1, supersedes_sha256: prior?.manifest.sha256 ?? null,
       provenance: { producer: this.producer, source_id: input.source, producer_task_id: input.taskId,
-        lineage: [{ producer: this.producer, source_id: input.source }], ...(execution?.data ? { execution: execution.data } : {}) }
+        lineage: [{ producer: this.producer, source_id: input.source }], ...(execution?.data ?? derived ? { execution: execution?.data ?? derived } : {}) }
     });
     this.store.db.transaction(() => this.#insert(input.taskId, manifest, created))();
     return { task_id: input.taskId, superseded_by_sha256: null, manifest };
@@ -333,7 +359,9 @@ export class ArtifactManifests {
     const hop = { producer: `a2a:${input.peer}`.slice(0, 200), source_id: `a2a-task:${input.remoteTaskId}`.slice(0, 300) };
     const manifest = ArtifactManifest11Schema.parse({ ...remote, created_at: created / 1000, expires_at: NO_EXPIRY_SECONDS,
       artifact_id: input.artifactId ?? randomBytes(16).toString('hex'),
-      provenance: { ...remote.provenance, producer_task_id: input.remoteTaskId, lineage: [...remote.provenance.lineage.slice(-3), hop] } });
+      // The producer's execution stays; a manifest without one gets the importing task's.
+      provenance: { ...remote.provenance, producer_task_id: input.remoteTaskId, lineage: [...remote.provenance.lineage.slice(-3), hop],
+        ...(remote.provenance.execution ? {} : (() => { const local = this.executionProvenance(input.taskId); return local ? { execution: local } : {}; })()) } });
     this.store.db.transaction(() => { this.#insert(input.taskId, manifest, created); input.onRegistered?.(); })();
     return { task_id: input.taskId, superseded_by_sha256: null, manifest };
   }

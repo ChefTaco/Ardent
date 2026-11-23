@@ -22,7 +22,10 @@ export const TaskLineageSchema = z.object({
     repair: z.boolean().optional() })),
   tools: z.array(z.object({ call_id: z.string(), name: z.string(), effect: z.string().nullable(), state: ToolLineageState })),
   artifacts: z.array(z.object({ sha256: z.string(), name: z.string(), mime: z.string().nullable(), size: z.number().int().nullable(),
-    artifact_id: z.string().nullable(), source: z.enum(['artifact_registered', 'research_artifacts']), created_ms: z.number().int() }))
+    artifact_id: z.string().nullable(), source: z.enum(['manifest', 'artifact_registered', 'research_artifacts']), created_ms: z.number().int(),
+    /** Manifest version and `provenance.execution` (1.1), for artifacts in the manifest table. */
+    schema_version: z.string().optional(), execution: z.object({ root: z.string(), task: z.string().optional(), step: z.string().optional() }).optional(),
+    rendition_of: z.string().optional() }))
 });
 export type TaskLineage = z.infer<typeof TaskLineageSchema>;
 
@@ -30,6 +33,11 @@ const record = z.record(z.string(), z.unknown());
 const text = (value: unknown): string | null => typeof value === 'string' ? value : null;
 const integer = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
 const MAX_EVENTS = 20_000;
+const ManifestRow = z.object({ artifact_id: z.string(), sha256: z.string(), name: z.string(), mime: z.string(), size: z.number().int(),
+  manifest_json: z.string(), created_ms: z.number().int() });
+const ManifestView = z.object({ schema_version: z.string().optional(),
+  provenance: z.object({ execution: z.object({ root: z.string(), task: z.string().optional(), step: z.string().optional() }).optional() }).optional(),
+  rendition: z.object({ of_sha256: z.string() }).optional() });
 
 function allEvents(store: TaskStore, taskId: string): TaskEvent[] {
   const events: TaskEvent[] = [];
@@ -96,6 +104,20 @@ export function taskLineage(store: TaskStore, instance: string, taskId: string):
         artifacts.set(sha256, { sha256, name: text(item.name) ?? '', mime: text(item.media_type), size: integer(item.bytes),
           artifact_id: null, source: 'research_artifacts', created_ms: event.created_ms });
       }
+    }
+  }
+  // Registered manifests (including expired and renditions) are authoritative over journal entries for the same digest.
+  if (store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifact_manifests'").get()) {
+    const rows = store.db.prepare('SELECT artifact_id,sha256,name,mime,size,manifest_json,created_ms FROM artifact_manifests WHERE task_id=? ORDER BY created_ms, artifact_id LIMIT 500').all(taskId);
+    for (const raw of rows) {
+      const row = ManifestRow.safeParse(raw).data;
+      if (!row) continue;
+      let manifest: z.infer<typeof ManifestView> | undefined;
+      try { manifest = ManifestView.safeParse(JSON.parse(row.manifest_json) as unknown).data; } catch { manifest = undefined; }
+      artifacts.set(row.sha256, { sha256: row.sha256, name: row.name, mime: row.mime, size: row.size, artifact_id: row.artifact_id, source: 'manifest',
+        created_ms: row.created_ms, ...(manifest?.schema_version ? { schema_version: manifest.schema_version } : {}),
+        ...(manifest?.provenance?.execution ? { execution: manifest.provenance.execution } : {}),
+        ...(manifest?.rendition?.of_sha256 ? { rendition_of: manifest.rendition.of_sha256 } : {}) });
     }
   }
   return {

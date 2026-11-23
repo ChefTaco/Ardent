@@ -3,6 +3,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { decodeExecutionHeader, executionHeaders, type ExecutionContext } from '@hivemagnus/hive-common/execution';
 import { parseTraceparent } from '@hivemagnus/hive-common/context';
 import { loadConfig, runtimeProblems, type LoadedConfig } from '../src/config.js';
@@ -207,8 +208,19 @@ describe('execution ancestry', () => {
       expect(lineage.model_attempts.map(item => ({ step: item.step, attempt: item.attempt, ref: item.ref, request_id: item.request_id }))).toEqual(
         model.requests.map((request, step) => ({ step, attempt: 1, ref: `hx1:ardent:node-a.assistant:attempt:${id}/${step}/1`, request_id: request.headers['x-request-id'] })));
       expect(lineage.tools).toEqual([{ call_id: 'call-1-0', name: 'artifact_write', effect: 'artifact-write', state: 'succeeded' }]);
-      expect(lineage.artifacts).toMatchObject([{ name: 'map.md', source: 'artifact_registered' }]);
+      const provenance = { root: studio.root, task: taskRef, step: `hx1:ardent:node-a.assistant:step:${id}/0` };
+      expect(lineage.artifacts).toMatchObject([{ name: 'map.md', source: 'manifest', schema_version: '1.1', execution: provenance }]);
       expect(lineage.artifacts[0]!.artifact_id).toEqual(expect.any(String));
+      // The stored manifest is 1.1 with provenance.execution; every 1.0 view is unchanged.
+      const sha = lineage.artifacts[0]!.sha256;
+      expect(runtime.artifactManifests.manifestV2(sha)?.manifest).toMatchObject({ schema_version: '1.1', provenance: { producer_task_id: id, execution: provenance } });
+      const v10 = await get<{ artifacts: Array<{ manifest: { schema_version: string; provenance: Record<string, unknown> } }> }>(`/api/v1/tasks/${id}/artifacts`);
+      expect(v10.artifacts[0]!.manifest.schema_version).toBe('1.0');
+      expect(v10.artifacts[0]!.manifest.provenance).not.toHaveProperty('execution');
+      expect((await get<{ manifest: { schema_version: string } }>(`/api/v1/artifacts/${sha}/manifest`)).manifest.schema_version).toBe('1.0');
+      // A plugin registration for the task gets the same provenance without passing it.
+      const streamed = await runtime.artifactManifests.registerStream({ taskId: id, name: 'notes.md', mime: 'text/markdown', stream: Readable.from([Buffer.from('# Notes')]), source: 'plugin' });
+      expect(streamed.manifest.provenance.execution).toEqual({ root: studio.root, task: taskRef });
       // The manifest writer's seam: the context of the producing task is joinable by task id.
       expect(runtime.executionFor(id)?.self).toBe(taskRef);
     } finally { runtime.close(); }
@@ -307,6 +319,11 @@ describe('execution ancestry', () => {
       const context = decodeExecutionHeader(String(model.requests[1]!.headers['x-hive-execution']));
       expect(context).toMatchObject({ root: `hx1:ardent:node-a.assistant:task:${queued}`, self: `hx1:ardent:node-a.assistant:attempt:${queued}/0/1` });
       expect(runtime.store.executionFor(queued)).toBeUndefined();
+      // An artifact of a task without ancestry is still recorded as manifest 1.0.
+      const legacy = await runtime.artifactManifests.register({ taskId: done, name: 'old.md', mime: 'text/markdown', bytes: Buffer.from('# Old'), source: 'test' });
+      const row = runtime.store.db.prepare('SELECT manifest_json FROM artifact_manifests WHERE artifact_id=?').get(legacy.manifest.artifact_id) as { manifest_json: string };
+      expect(JSON.parse(row.manifest_json)).toMatchObject({ schema_version: '1.0' });
+      expect(runtime.artifactManifests.manifestV2(legacy.manifest.sha256)?.manifest.provenance.execution).toBeUndefined();
       const stream = runtime.store.events(queued, 0, 500);
       expect(stream.some(event => event.kind === 'model_started')).toBe(true);
       expect((await (await post(`/api/v1/tasks/${queued}/pause`, {})).json() as { error?: { code: string } }).error?.code).toBe('CONFLICT');

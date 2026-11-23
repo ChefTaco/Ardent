@@ -657,6 +657,16 @@ mission scope, team-child admission and artifacts are never selected from it.
   Tools receive it as `ctx.execution`, and plugin hooks as `execution` on the
   task context and tool calls. `tool_attempt` events now record the tool's
   `effect`.
+- **Artifacts.** An artifact a task registers (`artifact_write`,
+  `document_render`, preview research briefs, plugin `register` /
+  `registerStream` calls, imports) is stored as manifest 1.1 with
+  `provenance.execution: {root, task, step?}`: the task's root, its task
+  reference and, while the task runs, the model step
+  (`hx1:ardent:<instance>:step:<task id>/<step>`). An imported artifact keeps
+  its producer's `execution`, and its import task takes the producer task as
+  parent. Every 1.0 view is unchanged, and a task without a context still
+  stores manifest 1.0. `ArtifactManifests.executionProvenance(taskId)` returns
+  the value.
 - **Reading it.** Task responses (`GET /api/v1/tasks`, `GET /api/v1/tasks/{id}`)
   include `execution` when the task has one. `GET /api/v1/tasks/{id}/lineage`
   rebuilds what this profile knows:
@@ -668,12 +678,15 @@ mission scope, team-child admission and artifacts are never selected from it.
  "continuations": [],
  "model_attempts": [{"step": 0, "attempt": 1, "backend": "llamacpp", "request_id": "...", "ref": "hx1:ardent:...:attempt:<id>/0/1", "started_ms": 0, "usage": null}],
  "tools": [{"call_id": "call-1", "name": "artifact_write", "effect": "artifact-write", "state": "succeeded"}],
- "artifacts": [{"sha256": "...", "name": "map.md", "mime": "text/markdown", "size": 12, "artifact_id": "...", "source": "artifact_registered", "created_ms": 0}]}
+ "artifacts": [{"sha256": "...", "name": "map.md", "mime": "text/markdown", "size": 12, "artifact_id": "...", "source": "manifest", "created_ms": 0,
+   "schema_version": "1.1", "execution": {"root": "...", "task": "...", "step": "..."}}]}
 ```
 
   `parent.local_task_id` is set when the parent is a task of this instance.
   Tool `state` is `attempted`, `succeeded`, `failed`, `denied` or
-  `not_dispatched`. Everything comes from SQLite, so lineage survives a
+  `not_dispatched`. Artifacts come from the manifest table (`source:
+  manifest`, with renditions as `rendition_of`) and, for artifacts with no
+  manifest, the `artifact_registered` and `research_artifacts` events. Everything comes from SQLite, so lineage survives a
   restart; a task accepted before this version has no `execution`, `parent`
   or `children`, but still lists its model attempts, tools and artifacts.
   The `/stream` events are unchanged apart from `accepted`.

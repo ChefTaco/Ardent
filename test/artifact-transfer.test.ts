@@ -436,6 +436,8 @@ describe('artifact content, ranges and renditions', () => {
   it('keeps 1.0 manifests stored as they were and shows them as 1.0 on old routes and 1.1 on v2 routes', async () => {
     const { runtime, call } = await local();
     const task = runtime.accept('Write notes', 'management', 'mission');
+    // A task accepted before execution ancestry was recorded: its artifacts are still stored as 1.0.
+    runtime.store.db.prepare('DELETE FROM task_execution WHERE task_id=?').run(task.id);
     const old = await runtime.artifactManifests.register({ taskId: task.id, name: 'notes.md', mime: 'text/markdown', bytes: Buffer.from('# Notes\n'), source: 'fixture' });
     const stored = z.object({ manifest_json: z.string() }).parse(runtime.store.db.prepare('SELECT manifest_json FROM artifact_manifests WHERE artifact_id=?').get(old.manifest.artifact_id));
     expect(JSON.parse(stored.manifest_json)).toEqual(old.manifest);

@@ -29,6 +29,7 @@
 - Tools get the task's context as `ctx.execution`, and plugins as `execution` on `ArdentTaskPluginContext` and tool calls. `TaskStore.executionFor(taskId)` and `ArdentRuntime.executionFor(taskId)` return it.
 - API (additive): task responses include an optional `execution`, the `accepted` event detail includes `execution`, and `GET /api/v1/tasks/{id}/lineage` returns the task's execution, parent, local children and continuations, model attempts with request ids, tool calls and artifacts.
 - `tool_attempt` events record the tool's `effect`.
+- Artifact provenance: manifests a task registers (`register`, `registerStream`, imports) record manifest 1.1 `provenance.execution` `{root, task, step?}` from the task's context; `ArtifactManifests.executionProvenance(taskId)` returns it. 1.0 views are unchanged, and tasks without a context still store 1.0. An artifact import task takes the producer task as its parent.
 
 ### Changed
 
