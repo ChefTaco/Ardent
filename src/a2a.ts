@@ -8,6 +8,7 @@ import { TEAM_TASK_METADATA_KEY, TEAM_CLARIFICATION_METADATA_KEY, TeamResult as 
 import { TeamControlService } from './team-control.js';
 import { TeamChildService, type TeamChildReference } from './team-child.js';
 import { TeamArtifacts } from './team-artifacts.js';
+import { ARTIFACT_TRANSFER_V2_MEDIA_TYPE, ARTIFACT_TRANSFER_V2_URN } from '@hivemagnus/hive-common/artifact';
 import { CodexHarnessBackend } from './codex.js';
 import { LlamaCppBackend } from './llamacpp.js';
 import { ToolRegistry } from './tools.js';
@@ -221,11 +222,21 @@ export class ArdentA2AExecutor implements AgentExecutor {
         bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: packet, append: false, lastChunk: true, metadata: undefined }));
       }
       if (envelope) for (const exported of await this.#artifacts.registerResearch(taskId)) {
-        const transfer: Artifact = { artifactId: randomUUID(), name: 'Team artifact export',
+        // The v1 descriptor (at most 2 MiB) is unchanged; above that a v1 consumer
+        // gets an explicit TRANSFER_REQUIRES_V2 result instead.
+        const transfer: Artifact = exported.v1 ? { artifactId: randomUUID(), name: 'Team artifact export',
           description: 'Task-bound peer export; fetch and recipient delivery require separate receipts',
-          parts: [textPart(JSON.stringify(exported))], metadata: undefined, extensions: [] };
+          parts: [textPart(JSON.stringify(exported.v1))], metadata: undefined, extensions: [] }
+          : { artifactId: randomUUID(), name: 'Team artifact export requires v2',
+            description: `Task-bound peer export larger than the v1 limit; fetch it with ${ARTIFACT_TRANSFER_V2_URN}`,
+            parts: [textPart(JSON.stringify(exported.requires_v2))], metadata: undefined, extensions: [] };
         bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: transfer, append: false,
           lastChunk: true, metadata: undefined }));
+        const v2: Artifact = { artifactId: randomUUID(), name: 'Team artifact export v2',
+          description: 'Task-bound peer export for resumable transfer with renditions; fetch and recipient delivery require separate receipts',
+          parts: [{ content: { $case: 'data', value: exported.v2 }, metadata: undefined, filename: exported.v2.manifest_1_1.name,
+            mediaType: ARTIFACT_TRANSFER_V2_MEDIA_TYPE }], metadata: undefined, extensions: [ARTIFACT_TRANSFER_V2_URN] };
+        bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: v2, append: false, lastChunk: true, metadata: undefined }));
       }
       bus.publish(AgentEvent.statusUpdate(status(taskId, contextId, teamResult?.outcome === 'input_required' ? TaskState.TASK_STATE_INPUT_REQUIRED : TaskState.TASK_STATE_COMPLETED)));
     } catch (error: unknown) {

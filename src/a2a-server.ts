@@ -18,7 +18,15 @@ import { IdempotentA2AHandler } from './a2a-idempotency.js';
 import { hermesAlias } from './a2a-hermes-alias.js';
 import { ARDENT_VERSION } from './version.js';
 import { clientKey, GatedA2AExecutor, jsonRpcTaskCap, limitRequests, PeerTaskGate, restTaskCap, TokenBucketLimiter } from './a2a-rate-limit.js';
-import { TeamArtifacts } from './team-artifacts.js';
+import { TeamArtifacts, type ResolvedTeamArtifact } from './team-artifacts.js';
+import { pipeline } from 'node:stream/promises';
+import { ARTIFACT_TRANSFER_V2_URN, formatReprDigest, parseByteRange } from '@hivemagnus/hive-common/artifact';
+
+/** The transfer-v2 capability this runtime advertises on its Agent Card. */
+export function artifactTransferExtension(maxBytes: number) {
+  return { uri: ARTIFACT_TRANSFER_V2_URN, description: 'Resumable artifact transfer over HTTP Range with SHA-256 verification and renditions',
+    required: false, params: { max_bytes: maxBytes, range: true, renditions: true } };
+}
 
 export type A2ASurface = { app: Express; grpcServer: GrpcServer; card: AgentCard; grpcAddress: string; grpcListenPort: number; pushSender: SafeA2APushSender; pushInbox: A2APushInbox; handler: IdempotentA2AHandler; taskGate: PeerTaskGate };
 
@@ -68,7 +76,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     supportedInterfaces: interfaces,
     provider: { organization: 'Magnus', url: 'https://github.com/ChefTaco/magnus' },
     version: ARDENT_VERSION,
-    capabilities: { streaming: true, pushNotifications: true, extendedAgentCard: true, extensions: [] },
+    capabilities: { streaming: true, pushNotifications: true, extendedAgentCard: true, extensions: [artifactTransferExtension(config.artifacts.max_bytes)] },
     securitySchemes: { Bearer: { scheme: { $case: 'httpAuthSecurityScheme', value: { description: 'Peer bearer token', scheme: 'bearer', bearerFormat: '' } } } },
     securityRequirements: bearerRequirement,
     defaultInputModes: ['text/plain', 'text/markdown', 'application/json'],
@@ -107,22 +115,53 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   };
   // First in the chain: every route below, authenticated or not, is limited by client address.
   if (limits.enabled) app.use(limitRequests(new TokenBucketLimiter({ perMinute: limits.ip_requests_per_minute, burst: limits.ip_burst }), req => clientKey(req.ip)));
-  app.get('/team/artifacts/:id', requirePeer('Authenticated A2A peer required'), peerLimit, async (req, res) => {
-    const peer = peerOf(res);
+  const unavailable = (status: number) => ({ error: status === 410 ? 'Artifact export revoked or expired' : 'Artifact unavailable' });
+  /** Resolve the export for the authenticated peer, or answer the refusal. */
+  const exportFor = async (req: express.Request, res: express.Response): Promise<ResolvedTeamArtifact | undefined> => {
     try {
-      const result = await artifactTransfers.serve(peer, String(req.params.id ?? ''), String(req.query.context ?? ''));
-      if (result.status !== 200 || !result.bytes || !result.descriptor) {
-        res.status(result.status).json({ error: result.status === 410 ? 'Artifact export revoked or expired' : 'Artifact unavailable' });
-        return;
-      }
-      const descriptor = result.descriptor;
-      res.status(200).set({ 'Content-Type': descriptor.mime, 'Content-Length': String(result.bytes.byteLength),
-        'X-Artifact-Name': encodeURIComponent(descriptor.name), 'X-Hermes-Task-Id': descriptor.producer_task_id,
-        'X-Hermes-Artifact-Manifest': Buffer.from(JSON.stringify(descriptor.artifact_manifest)).toString('base64url'),
-        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' }).end(Buffer.from(result.bytes));
+      const result = await artifactTransfers.resolve(peerOf(res), String(req.params.id ?? ''), String(req.query.context ?? ''));
+      if (result.status === 200) return result;
+      res.status(result.status).json(unavailable(result.status));
     } catch {
       res.status(503).json({ error: 'Artifact export state is unavailable' });
     }
+    return undefined;
+  };
+  // Content of one export. Without Range (or with a stale If-Range) this is the
+  // v1 full response, verified as it streams; Range answers 206 or 416.
+  app.get('/team/artifacts/:id', requirePeer('Authenticated A2A peer required'), peerLimit, async (req, res) => {
+    const resolved = await exportFor(req, res);
+    if (!resolved) return;
+    const manifest = resolved.manifest;
+    const etag = `"${manifest.sha256}"`;
+    const ifRange = req.header('If-Range');
+    const range = parseByteRange(ifRange === undefined || ifRange === etag ? req.header('Range') : undefined, manifest.size);
+    const common = { 'Accept-Ranges': 'bytes', ETag: etag, 'Repr-Digest': formatReprDigest(manifest.sha256), 'X-Content-SHA256': manifest.sha256,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' };
+    if (range === null) {
+      res.status(416).set({ ...common, 'Content-Range': `bytes */${manifest.size}` }).json({ error: 'Requested range is not satisfiable' });
+      return;
+    }
+    let read;
+    try { read = await runtime.artifacts.openRead(manifest.sha256, range ?? {}, { verify: !range }); }
+    catch { res.status(409).json(unavailable(409)); return; }
+    res.status(range ? 206 : 200).set({ ...common, 'Content-Type': manifest.mime, 'Content-Length': String(read.end - read.start + 1),
+      ...(range ? { 'Content-Range': `bytes ${read.start}-${read.end}/${manifest.size}` } : {}),
+      'Content-Disposition': `attachment; filename="${manifest.name}"`,
+      'X-Artifact-Name': encodeURIComponent(manifest.name), 'X-Hermes-Task-Id': manifest.provenance.producer_task_id,
+      ...(resolved.manifest_1_0 ? { 'X-Hermes-Artifact-Manifest': Buffer.from(JSON.stringify(resolved.manifest_1_0)).toString('base64url') } : {}) });
+    // A digest failure mid-stream ends the connection before the final chunk.
+    await pipeline(read.stream, res).catch(() => { if (!res.destroyed) res.destroy(); });
+  });
+  app.get('/team/artifacts/:id/manifest', requirePeer('Authenticated A2A peer required'), peerLimit, async (req, res) => {
+    const resolved = await exportFor(req, res);
+    if (resolved) res.set('Cache-Control', 'private, no-store').json({ manifest: resolved.manifest });
+  });
+  app.get('/team/artifacts/:id/renditions', requirePeer('Authenticated A2A peer required'), peerLimit, async (req, res) => {
+    const resolved = await exportFor(req, res);
+    if (!resolved) return;
+    try { res.set('Cache-Control', 'private, no-store').json({ renditions: await artifactTransfers.renditions(resolved) }); }
+    catch { res.status(503).json({ error: 'Artifact export state is unavailable' }); }
   });
   const pushToken: RequestHandler = (req, res, next) => {
     const peerId = String(req.params.peerId ?? '');

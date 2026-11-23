@@ -152,7 +152,7 @@ only the *names* of the environment variables that hold them.
 | `a2a` | disabled | See [A2A](#a2a). |
 | `channels.telegram`, `channels.mattermost` | disabled | See [Chat channels](#chat-channels). |
 | `integrations.magnus_control` | disabled | See [Magnus Control tools](#magnus-control-tools). |
-| `artifacts.max_bytes` | `2097152` (2 MiB) | Largest artifact a task may store, up to 64 MiB. See [Team missions](#team-missions). |
+| `artifacts.max_bytes` | `2097152` (2 MiB) | Largest artifact a task may store, export to a peer or import, up to 64 MiB. See [Artifact transfer v2](#artifact-transfer-v2-and-renditions). |
 | `plugins` | `[]` | See [Plugins](#plugins). |
 | `api` | `127.0.0.1:9910`, `ARDENT_API_TOKEN` | Management listener and the env var holding its bearer token. A non-loopback host is refused; put a TLS proxy in front instead. |
 
@@ -384,6 +384,7 @@ built on the shared `@hivemagnus/hive-common/retry` helpers:
 | A2A push delivery | 3 | `Retry-After` clamped to 1–5 s | 408/425/429/5xx (the callback did not accept the event) |
 | Telegram Bot API | 4 | Telegram's `retry_after`, capped at 60 s | 429 with `retry_after` |
 | Mattermost/ChatterMost REST | 3 | `Retry-After` up to 60 s (1 s without one) | 429 only (the request was not processed) |
+| Artifact transfer pull (import) | 5 | 500 ms → 8 s, equal jitter; `Retry-After` up to 30 s | transport error, a dropped response or 408/425/429/5xx; each attempt resumes from the retained bytes with `Range` and `If-Range` |
 | Codex turns, tools with a possible effect | 1 | — | never |
 
 Nothing is repeated once its effect is uncertain, after any response byte was
@@ -495,6 +496,74 @@ revision, provenance and the artifact it supersedes). `revises_sha256` makes
 a new artifact a revision of an earlier one. `GET /api/v1/tasks/{id}/artifacts`
 lists a task's manifests and `GET /api/v1/artifacts/{sha256}/manifest` returns
 the newest manifest for a digest; the bytes stay at `GET /api/v1/artifacts/{id}`.
+
+### Artifact transfer v2 and renditions
+
+Artifacts up to `artifacts.max_bytes` (at most 64 MiB) move between agents
+without inline task payloads, with bounded memory: every path streams. A
+profile advertises `urn:hive:artifact-transfer:2` on its Agent Card
+(`capabilities.extensions`, params `{max_bytes, range: true, renditions: true}`)
+and `capabilities.artifact_transfer: 2` in `GET /api/v1/status`.
+
+Manifest 1.1 is a strict superset of 1.0. It may add `rendition` (`role`
+`original | preview | model_input`, `of_sha256`, `purpose`, `transform {name,
+version, params}`) and `provenance.execution` (`root`, `task`, `step`, attribution
+only). It is as immutable as 1.0 and is shown only to v2 consumers: the existing
+manifest routes and the v1 descriptor still return 1.0, and stored 1.0 records
+are never rewritten.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/v1/artifacts/{sha256}/content` | The bytes with `Accept-Ranges: bytes`, `ETag: "<sha256>"`, `Repr-Digest: sha-256=:<base64>:`, `X-Content-SHA256`, the manifest media type and `Content-Disposition: attachment; filename="<name>"`. One `Range` returns `206`, an unsatisfiable one `416`; an `If-Range` other than the ETag returns the whole artifact. |
+| `GET /api/v1/artifacts/{sha256}/renditions` | `{renditions: [{sha256, role, mime, size, purpose, width?, height?, has_alpha?}]}`, the original first, the same for the original or any rendition. Pick one with HiveCommon `selectRendition`; `download` always means the original. |
+| `GET /api/v1/artifacts/{sha256}/manifest/v2` | The newest manifest as 1.1. |
+| `POST /api/v1/artifacts/imports {peer_id, a2a_task_id, artifact_id, task_id?}` | `202 {import_id}`: pull an artifact a configured peer exported from one of its completed tasks. |
+| `GET /api/v1/artifacts/imports[/{id}]` | `{state: queued \| transferring \| verifying \| completed \| failed, received_bytes, size, attempts, error?}` |
+
+An import resolves the peer's descriptor, negotiates `min(peer max_bytes, local
+max_bytes)`, and appends to `<profile>/artifacts/.partial/<import id>`, committing
+`received_bytes` after an fsync every 4 MiB. After an interruption or restart it
+re-hashes the retained bytes as a stream and asks for the rest with `Range` and
+`If-Range`; the gateway resumes unfinished imports when it starts. Transport
+failures are retried under the `artifact_transfer` policy (see [Retries](#retries))
+within the import's deadline; `attempts` counts runs and retries. The final
+SHA-256 and size are verified: on `DIGEST_MISMATCH` the partial file is deleted,
+nothing is registered and nothing is retried until an operator reissues the
+import (`POST` again). The verified file is renamed into the content store (an
+existing digest is kept) and registered with a manifest 1.1 whose lineage adds
+the peer hop. Without `task_id`, the import records its own completed task.
+`ardent artifact import --peer <id> --task <a2a task> --artifact <id>` runs one
+from the command line and `ardent artifact imports` lists them.
+
+A team export to a peer is limited by `artifacts.max_bytes`. Each export emits a
+`Team artifact export v2` A2A artifact with one data part of media type
+`application/vnd.hive.artifact-transfer.v2+json` carrying `{manifest_1_1,
+content_path, renditions_path, size, sha256}`. Up to 2 MiB, the unchanged v1 text
+descriptor (`Team artifact export`) is still emitted; above it, a v1 consumer gets
+an explicit `TRANSFER_REQUIRES_V2` result that names the capability, and an
+importer facing a peer without the URN fails the same way. On the A2A listener,
+`/team/artifacts/{id}` serves the v1 full response without `Range` (verified as
+it streams) and gains `Range` and the headers above; `/team/artifacts/{id}/manifest`
+returns the 1.1 manifest and `/team/artifacts/{id}/renditions` the exported forms
+with their export IDs. Renditions of an exported original are exported with it.
+
+Plugins reach the same primitives through `ctx.runtime` (and types from
+`@hivemagnus/ardent/plugin-sdk`):
+
+- `ctx.runtime.artifacts.putStream(readable, {name, mediaType, expectedSha256?,
+  expectedSize?, maxBytes?, inspect?, signal?})` stores a stream (temporary file,
+  incremental SHA-256, size bound, fsync, rename) and returns the `Artifact`;
+  `openRead(sha256, {start?, end?}, {verify?})` returns `{stream, size, sha256,
+  start, end}`; `stat(sha256)` returns `{size}` or undefined.
+- `ctx.runtime.artifactManifests.registerStream({taskId, name, mime, stream,
+  source, expectedSha256?, expectedSize?, revisesSha256?, ttlSeconds?, execution?})`
+  stores and registers an original with a manifest 1.1, checking its content as it
+  streams.
+- `ctx.runtime.artifactManifests.registerRendition({originalSha256, role: preview |
+  model_input, purpose, transform, mime, bytes | stream, name?, width?, height?,
+  has_alpha?, producer?})` registers a separate rendition artifact linked to its
+  original; the original is never changed. `renditions(sha256)` lists the forms
+  and `manifestV2(sha256)` returns the 1.1 record.
 
 `development_note` stores an append-only development record: the agent's own
 note about how it works (`epistemic: agent_reported`).

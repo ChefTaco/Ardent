@@ -1,43 +1,53 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { TaskState, type Task } from '@a2a-js/sdk';
+import { ARTIFACT_TRANSFER_ERRORS, ARTIFACT_TRANSFER_V1_MAX_BYTES, ARTIFACT_TRANSFER_V2_URN } from '@hivemagnus/hive-common/artifact';
 import type { ArdentRuntime } from './runtime.js';
 import type { ArdentConfig } from './config.js';
-import { ArdentA2AClient } from './a2a-client.js';
 import { collectPluginTeamEvidence } from './plugin-evidence.js';
+import { ARTIFACT_MAX_BYTES_LIMIT } from './artifacts.js';
+import { ArtifactManifest11Schema, ArtifactManifestSchema, ArtifactRenditionSchema, manifestV11, TeamArtifactManifestSchema,
+  type ArtifactManifest11, type ArtifactRendition, type TeamArtifactManifest } from './artifact-manifests.js';
+
+export { TeamArtifactManifestSchema, type TeamArtifactManifest } from './artifact-manifests.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = z.string().regex(/^[a-f0-9]{32}$/);
 const safeName = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/);
-const Manifest = z.object({
-  schema_version: z.literal('1.0'), revision: z.number().int().min(1), source_revision: z.string().min(1),
-  visibility: z.enum(['private', 'gm', 'player']), license: z.string().min(1),
-  preview: z.object({ mode: z.enum(['inline', 'thumbnail', 'download_only', 'none']), mime: z.string().min(1) }).strict(),
-  supersedes_sha256: digest.nullable(), acceptance_status: z.enum(['unreviewed', 'approved', 'partial', 'rejected']),
-  name: safeName, mime: z.string().min(1), sha256: digest, size: z.number().int().min(0).max(2 * 1024 * 1024),
-  created_at: z.number().finite(), expires_at: z.number().finite(),
-  provenance: z.object({ producer: z.string().min(1), source_id: z.string(), producer_task_id: z.string().min(1),
-    lineage: z.array(z.object({ producer: z.string().min(1), source_id: z.string() }).strict()).min(1).max(4) }).strict(),
-  recovery: z.object({ on_expiry: z.literal('request_verified_reexport') }).strict(), artifact_id: identifier
-}).strict();
-export type TeamArtifactManifest = z.infer<typeof Manifest>;
-/** Artifact manifest schema shared by peer exports and the local artifact registry. */
-export const TeamArtifactManifestSchema = Manifest;
+const Manifest = TeamArtifactManifestSchema;
+/** An export manifest as stored: 1.0 for a v1-sized export, 1.1 above 2 MiB or for a rendition. */
+const StoredManifest = z.discriminatedUnion('schema_version', [ArtifactManifestSchema, ArtifactManifest11Schema]);
+/** The v1 transfer descriptor: one A2A text part, at most 2 MiB. Unchanged by transfer v2. */
 export const TeamArtifactDescriptorSchema = z.object({ artifact_id: identifier, name: safeName, mime: z.string().min(1), sha256: digest,
-  size: z.number().int().min(0).max(2 * 1024 * 1024), producer_task_id: z.string().min(1), artifact_manifest: Manifest }).strict();
+  size: z.number().int().min(0).max(ARTIFACT_TRANSFER_V1_MAX_BYTES), producer_task_id: z.string().min(1), artifact_manifest: Manifest }).strict();
 export type TeamArtifactDescriptor = z.infer<typeof TeamArtifactDescriptorSchema>;
+const teamPath = (suffix: string) => z.string().max(600).regex(new RegExp(`^/team/artifacts/[a-f0-9]{32}${suffix}\\?context=[A-Za-z0-9%._~-]{1,400}$`));
+/**
+ * The transfer-v2 descriptor: an A2A data part with media type
+ * `ARTIFACT_TRANSFER_V2_MEDIA_TYPE`. Paths resolve against the exporting
+ * peer's pinned A2A origin.
+ */
+export const TeamArtifactDescriptorV2Schema = z.object({ manifest_1_1: ArtifactManifest11Schema, content_path: teamPath(''),
+  renditions_path: teamPath('/renditions'), size: z.number().int().min(0).max(ARTIFACT_MAX_BYTES_LIMIT), sha256: digest }).strict()
+  .refine(value => value.size === value.manifest_1_1.size && value.sha256 === value.manifest_1_1.sha256, 'Descriptor differs from its manifest');
+export type TeamArtifactDescriptorV2 = z.infer<typeof TeamArtifactDescriptorV2Schema>;
+/** The explicit result a v1 consumer receives for an export larger than the v1 limit. */
+export const TeamArtifactRequiresV2Schema = z.object({ error: z.literal(ARTIFACT_TRANSFER_ERRORS.requiresV2), capability: z.literal(ARTIFACT_TRANSFER_V2_URN),
+  message: z.string(), artifact_id: identifier, name: safeName, mime: z.string().min(1), sha256: digest,
+  size: z.number().int().min(0).max(ARTIFACT_MAX_BYTES_LIMIT), producer_task_id: z.string().min(1) }).strict();
+export type TeamArtifactRequiresV2 = z.infer<typeof TeamArtifactRequiresV2Schema>;
+/** One export: the v2 descriptor always, and either the v1 descriptor (at most 2 MiB) or the explicit v2 requirement. */
+export type TeamArtifactExport = { v2: TeamArtifactDescriptorV2 } & ({ v1: TeamArtifactDescriptor; requires_v2?: never } | { v1?: never; requires_v2: TeamArtifactRequiresV2 });
+/** An export a peer may fetch: its stored manifest in both views. `manifest_1_0` is absent above 2 MiB or for a rendition. */
+export type ResolvedTeamArtifact = { status: 200; id: string; peer: string; context_id: string; a2a_task_id: string; manifest: ArtifactManifest11; manifest_1_0?: TeamArtifactManifest };
 const LocalRow = z.object({ id: identifier, peer: z.string(), context_id: z.string(), a2a_task_id: z.string(),
   digest, name: safeName, mime: z.string(), size: z.number(), manifest_json: z.string(), status: z.string(), expires: z.number() });
 const TransferRow = z.object({ id: digest, owner: z.string(), local_task_id: z.string(), peer: z.string(),
   remote_task_id: z.string(), remote_context_id: z.string(), remote_artifact_id: identifier,
   digest, manifest_json: z.string(), status: z.string() });
-const MAX_BYTES = 2 * 1024 * 1024;
 const TTL_SECONDS = 7 * 24 * 3600;
 
-function sha(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex'); }
-function textParts(task: Task): string[] {
-  return task.artifacts.flatMap(artifact => artifact.parts.flatMap(part =>
-    part.content?.$case === 'text' && typeof part.content.value === 'string' ? [part.content.value] : []));
+function contentPath(id: string, contextId: string, suffix = ''): string {
+  return `/team/artifacts/${id}${suffix}?context=${encodeURIComponent(contextId)}`;
 }
 
 /** Peer artifact receipts. A transfer is retained evidence, never a delivery claim. */
@@ -54,7 +64,7 @@ export class TeamArtifacts {
       digest TEXT NOT NULL, manifest_json TEXT NOT NULL, status TEXT NOT NULL);`);
   }
 
-  async registerResearch(a2aTaskId: string): Promise<TeamArtifactDescriptor[]> {
+  async registerResearch(a2aTaskId: string): Promise<TeamArtifactExport[]> {
     const db = this.runtime.store.db;
     const row = db.prepare(`SELECT t.caller,t.context_id,o.tenant,o.operation_id,m.envelope_json FROM a2a_tasks t
       JOIN a2a_operation_map o ON o.a2a_task_id=t.id JOIN a2a_team_missions m ON m.a2a_task_id=t.id
@@ -75,139 +85,121 @@ export class TeamArtifacts {
       { name: 'research-brief.md', mime: 'text/markdown', digest: actual.data.markdown.id, producer: 'ardent-research', sourceId: '' }
     ] : [];
     entries.push(...extensions.artifacts.map(item => ({ name: item.name, mime: item.mime, digest: item.sha256, producer: item.producer, sourceId: item.source })));
-    const result: TeamArtifactDescriptor[] = [];
+    const result: TeamArtifactExport[] = [];
     for (const entry of entries) {
-      const bytes = await this.runtime.artifacts.get(entry.digest);
-      const size = bytes.byteLength;
-      if (size > MAX_BYTES) throw new Error('Team artifact exceeds the byte limit');
-      const previous = db.prepare(`SELECT * FROM a2a_team_artifacts WHERE a2a_task_id=? AND digest=? AND name=? AND status='available' AND expires>?`)
-        .get(a2aTaskId, entry.digest, entry.name, Date.now() / 1000);
-      if (previous) {
-        const old = LocalRow.parse(previous);
-        result.push({ artifact_id: old.id, name: old.name, mime: old.mime, sha256: old.digest, size: old.size,
-          producer_task_id: a2aTaskId, artifact_manifest: Manifest.parse(JSON.parse(old.manifest_json) as unknown) });
-        continue;
+      const row = await this.#export(bound.caller, bound.context_id, a2aTaskId, entry);
+      const exported = this.#exported(row);
+      if (!exported) throw new Error('Team artifact export is inconsistent');
+      result.push(exported);
+      // Renditions are exported with their original so a v2 peer can choose one; they are listed, not announced.
+      for (const rendition of (await this.runtime.artifactManifests.renditions(entry.digest)) ?? []) {
+        if (rendition.role === 'original' || rendition.sha256 === entry.digest) continue;
+        const record = this.runtime.artifactManifests.manifestV2(rendition.sha256);
+        if (!record?.manifest.rendition) continue;
+        await this.#export(bound.caller, bound.context_id, a2aTaskId, { name: record.manifest.name, mime: record.manifest.mime,
+          digest: rendition.sha256, producer: record.manifest.provenance.producer, sourceId: record.manifest.provenance.source_id,
+          rendition: record.manifest.rendition });
       }
-      const id = randomBytes(16).toString('hex');
-      const created = Date.now() / 1000;
-      const manifest: TeamArtifactManifest = {
-        schema_version: '1.0', revision: 1, source_revision: entry.digest,
-        visibility: 'private', license: 'NOASSERTION', preview: { mode: 'download_only', mime: entry.mime },
-        supersedes_sha256: null, acceptance_status: 'unreviewed', name: entry.name, mime: entry.mime,
-        sha256: entry.digest, size, created_at: created, expires_at: created + TTL_SECONDS,
-        provenance: { producer: entry.producer, source_id: entry.sourceId, producer_task_id: a2aTaskId,
-          lineage: [{ producer: entry.producer, source_id: entry.sourceId }] },
-        recovery: { on_expiry: 'request_verified_reexport' }, artifact_id: id
-      };
-      db.prepare(`INSERT INTO a2a_team_artifacts(id,peer,context_id,a2a_task_id,digest,name,mime,size,manifest_json,status,expires)
-        VALUES (?,?,?,?,?,?,?,?,?,'available',?)`).run(id, bound.caller, bound.context_id, a2aTaskId,
-        entry.digest, entry.name, entry.mime, size, JSON.stringify(manifest), manifest.expires_at);
-      result.push({ artifact_id: id, name: entry.name, mime: entry.mime, sha256: entry.digest, size,
-        producer_task_id: a2aTaskId, artifact_manifest: manifest });
     }
     return result;
   }
 
-  async serve(peer: string, id: string, contextId: string): Promise<{ status: number; bytes?: Uint8Array; descriptor?: TeamArtifactDescriptor }> {
+  /** Record one export row, or return the current one for the same task, digest and name. */
+  async #export(peer: string, contextId: string, a2aTaskId: string, entry: { name: string; mime: string; digest: string; producer: string;
+    sourceId: string; rendition?: ArtifactManifest11['rendition'] }): Promise<z.infer<typeof LocalRow>> {
+    const db = this.runtime.store.db;
+    // Hash the stored bytes as a stream: the export never holds the artifact in memory.
+    const size = await this.runtime.artifacts.verify(entry.digest);
+    if (size > this.runtime.artifacts.maxBytes) throw new Error('Team artifact exceeds the byte limit');
+    const previous = db.prepare(`SELECT * FROM a2a_team_artifacts WHERE a2a_task_id=? AND digest=? AND name=? AND status='available' AND expires>?`)
+      .get(a2aTaskId, entry.digest, entry.name, Date.now() / 1000);
+    if (previous) return LocalRow.parse(previous);
+    const id = randomBytes(16).toString('hex');
+    const created = Date.now() / 1000;
+    const base = {
+      revision: 1, source_revision: entry.digest,
+      visibility: 'private', license: 'NOASSERTION', preview: { mode: 'download_only', mime: entry.mime },
+      supersedes_sha256: null, acceptance_status: 'unreviewed', name: entry.name, mime: entry.mime,
+      sha256: entry.digest, size, created_at: created, expires_at: created + TTL_SECONDS,
+      provenance: { producer: entry.producer, source_id: entry.sourceId, producer_task_id: a2aTaskId,
+        lineage: [{ producer: entry.producer, source_id: entry.sourceId }] },
+      recovery: { on_expiry: 'request_verified_reexport' }, artifact_id: id
+    } as const;
+    // A v1-sized original keeps the exact 1.0 manifest v1 consumers verify.
+    const manifest = size <= ARTIFACT_TRANSFER_V1_MAX_BYTES && !entry.rendition
+      ? Manifest.parse({ schema_version: '1.0', ...base })
+      : ArtifactManifest11Schema.parse({ schema_version: '1.1', ...base, ...(entry.rendition ? { rendition: entry.rendition } : {}) });
+    db.prepare(`INSERT INTO a2a_team_artifacts(id,peer,context_id,a2a_task_id,digest,name,mime,size,manifest_json,status,expires)
+      VALUES (?,?,?,?,?,?,?,?,?,'available',?)`).run(id, peer, contextId, a2aTaskId,
+      entry.digest, entry.name, entry.mime, size, JSON.stringify(manifest), manifest.expires_at);
+    return LocalRow.parse(db.prepare('SELECT * FROM a2a_team_artifacts WHERE id=?').get(id));
+  }
+
+  #exported(row: z.infer<typeof LocalRow>): TeamArtifactExport | undefined {
+    const stored = StoredManifest.safeParse(JSON.parse(row.manifest_json) as unknown);
+    if (!stored.success) return undefined;
+    const manifest = manifestV11(stored.data);
+    const v2: TeamArtifactDescriptorV2 = { manifest_1_1: manifest, content_path: contentPath(row.id, row.context_id),
+      renditions_path: contentPath(row.id, row.context_id, '/renditions'), size: row.size, sha256: row.digest };
+    if (stored.data.schema_version === '1.0') {
+      const v1 = Manifest.safeParse(stored.data);
+      if (!v1.success) return undefined;
+      return { v2, v1: { artifact_id: row.id, name: row.name, mime: row.mime, sha256: row.digest, size: row.size,
+        producer_task_id: row.a2a_task_id, artifact_manifest: v1.data } };
+    }
+    return { v2, requires_v2: { error: ARTIFACT_TRANSFER_ERRORS.requiresV2, capability: ARTIFACT_TRANSFER_V2_URN,
+      message: `This artifact is larger than ${ARTIFACT_TRANSFER_V1_MAX_BYTES} bytes; fetch it with ${ARTIFACT_TRANSFER_V2_URN}`,
+      artifact_id: row.id, name: row.name, mime: row.mime, sha256: row.digest, size: row.size, producer_task_id: row.a2a_task_id } };
+  }
+
+  /**
+   * The export a peer may fetch in a context, checked against its stored
+   * manifest and the size of the stored bytes. Bytes are read by the caller.
+   */
+  async resolve(peer: string, id: string, contextId: string): Promise<ResolvedTeamArtifact | { status: 404 | 409 | 410 }> {
     if (!identifier.safeParse(id).success || !contextId || contextId.length > 128) return { status: 404 };
     const raw = this.runtime.store.db.prepare('SELECT * FROM a2a_team_artifacts WHERE id=? AND peer=? AND context_id=?').get(id, peer, contextId);
     if (!raw) return { status: 404 };
     const row = LocalRow.parse(raw);
     if (row.status !== 'available' || row.expires <= Date.now() / 1000) return { status: 410 };
+    const stored = StoredManifest.safeParse(JSON.parse(row.manifest_json) as unknown);
+    if (!stored.success) return { status: 410 };
+    const manifest = stored.data;
+    if (manifest.artifact_id !== id || manifest.sha256 !== row.digest || manifest.expires_at !== row.expires ||
+      manifest.name !== row.name || manifest.mime !== row.mime || manifest.size !== row.size ||
+      manifest.provenance.producer_task_id !== row.a2a_task_id)
+      return { status: 410 };
     try {
-      const bytes = await this.runtime.artifacts.get(row.digest);
-      if (bytes.byteLength !== row.size) return { status: 409 };
-      const manifest = Manifest.parse(JSON.parse(row.manifest_json) as unknown);
-      if (manifest.artifact_id !== id || manifest.sha256 !== row.digest || manifest.expires_at !== row.expires ||
-        manifest.name !== row.name || manifest.mime !== row.mime || manifest.size !== row.size ||
-        manifest.provenance.producer_task_id !== row.a2a_task_id)
-        return { status: 410 };
-      return { status: 200, bytes, descriptor: { artifact_id: id, name: row.name, mime: row.mime,
-        sha256: row.digest, size: row.size, producer_task_id: row.a2a_task_id, artifact_manifest: manifest } };
+      const file = await this.runtime.artifacts.stat(row.digest);
+      if (!file || file.size !== row.size) return { status: 409 };
     } catch { return { status: 409 }; }
+    const v10 = manifest.schema_version === '1.0' ? Manifest.safeParse(manifest) : undefined;
+    return { status: 200, id, peer, context_id: row.context_id, a2a_task_id: row.a2a_task_id, manifest: manifestV11(manifest),
+      ...(v10?.success ? { manifest_1_0: v10.data } : {}) };
+  }
+
+  /**
+   * The exported forms of an export's artifact in the same task and context,
+   * the original first, each with the export ID and path that serves it.
+   */
+  async renditions(resolved: ResolvedTeamArtifact): Promise<Array<ArtifactRendition & { artifact_id: string; content_path: string }>> {
+    const local = await this.runtime.artifactManifests.renditions(resolved.manifest.sha256) ?? [];
+    const exported = z.array(LocalRow).parse(this.runtime.store.db.prepare(`SELECT * FROM a2a_team_artifacts
+      WHERE a2a_task_id=? AND peer=? AND context_id=? AND status='available' AND expires>?`)
+      .all(resolved.a2a_task_id, resolved.peer, resolved.context_id, Date.now() / 1000));
+    const forms: ArtifactRendition[] = local.length ? local : [ArtifactRenditionSchema.parse({ sha256: resolved.manifest.sha256,
+      role: resolved.manifest.rendition?.role ?? 'original', mime: resolved.manifest.mime, size: resolved.manifest.size,
+      purpose: resolved.manifest.rendition?.purpose ?? 'download' })];
+    return forms.flatMap(form => {
+      const row = exported.find(item => item.digest === form.sha256);
+      return row ? [{ ...form, artifact_id: row.id, content_path: contentPath(row.id, row.context_id) }] : [];
+    });
   }
 
   revokeLocal(peer: string, a2aTaskId: string, id: string): void {
     const changed = this.runtime.store.db.prepare(`UPDATE a2a_team_artifacts SET status='revoked'
       WHERE id=? AND peer=? AND a2a_task_id=? AND status='available'`).run(id, peer, a2aTaskId).changes;
     if (changed !== 1) throw new Error('Owned artifact export is unavailable');
-  }
-
-  async fetchHermes(input: { owner: string; localTaskId: string; peer: string; remoteTaskId: string;
-    remoteContextId: string; artifactId: string; sha256: string }): Promise<TeamArtifactDescriptor & { local_artifact_id: string }> {
-    const owned = this.runtime.store.get(input.localTaskId);
-    if (!owned || owned.caller !== input.owner || !['direct', 'peer'].includes(owned.context)) throw new Error('Local recipient task is not owned');
-    const id = identifier.parse(input.artifactId);
-    const expected = digest.parse(input.sha256);
-    if (!input.remoteTaskId || !input.remoteContextId) throw new Error('Remote task receipt is incomplete');
-    const transferId = sha(Buffer.from(JSON.stringify([input.owner, input.localTaskId, input.peer,
-      input.remoteTaskId, input.remoteContextId, id, expected])));
-    const priorRaw = this.runtime.store.db.prepare('SELECT * FROM a2a_team_artifact_transfers WHERE id=?').get(transferId);
-    if (priorRaw) {
-      const prior = TransferRow.parse(priorRaw);
-      if (prior.status !== 'complete') throw new Error('Artifact transfer requires reconciliation');
-      await this.runtime.artifacts.get(prior.digest);
-      const manifest = Manifest.parse(JSON.parse(prior.manifest_json) as unknown);
-      return { artifact_id: id, name: manifest.name, mime: manifest.mime, sha256: expected, size: manifest.size,
-        producer_task_id: input.remoteTaskId, artifact_manifest: manifest, local_artifact_id: prior.digest };
-    }
-    const { card, client, authorization } = await new ArdentA2AClient(this.runtime.profileDir, this.config, this.env).open(input.peer);
-    const remote = await client.getTask({ tenant: '', id: input.remoteTaskId },
-      { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } });
-    if (remote.id !== input.remoteTaskId || remote.contextId !== input.remoteContextId ||
-      remote.status?.state !== TaskState.TASK_STATE_COMPLETED) throw new Error('Remote task receipt is not complete or bound');
-    const descriptors = textParts(remote).flatMap(value => {
-      try { return [TeamArtifactDescriptorSchema.parse(JSON.parse(value) as unknown)]; } catch { return []; }
-    });
-    const declared = descriptors.find(item => item.artifact_id === id && item.sha256 === expected &&
-      item.producer_task_id === input.remoteTaskId);
-    if (!declared) throw new Error('Remote task did not declare this exact artifact');
-    const interfaceUrl = card.supportedInterfaces.find(item => item.protocolBinding.toUpperCase() === 'JSONRPC' &&
-      item.protocolVersion === '1.0')?.url;
-    if (!interfaceUrl) throw new Error('Remote peer has no pinned JSON-RPC origin');
-    const url = new URL(`/team/artifacts/${id}`, interfaceUrl);
-    url.searchParams.set('context', input.remoteContextId);
-    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000),
-      headers: { Authorization: authorization } });
-    if (!response.ok) throw new Error(`Artifact fetch HTTP ${response.status}`);
-    const lengthHeader = response.headers.get('content-length');
-    const length = lengthHeader === null ? NaN : Number(lengthHeader);
-    if (!Number.isInteger(length) || length < 0 || length > MAX_BYTES || length !== declared.size)
-      throw new Error('Artifact size differs from task receipt');
-    if (response.headers.get('x-hermes-task-id') !== input.remoteTaskId ||
-      decodeURIComponent(response.headers.get('x-artifact-name') ?? '') !== declared.name ||
-      response.headers.get('content-type')?.split(';')[0] !== declared.mime)
-      throw new Error('Artifact response differs from task receipt');
-    const encoded = response.headers.get('x-hermes-artifact-manifest');
-    if (!encoded || encoded.length > 8192) throw new Error('Artifact manifest is missing or oversized');
-    const manifest = Manifest.parse(JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown);
-    if (JSON.stringify(manifest) !== JSON.stringify(declared.artifact_manifest) ||
-      manifest.expires_at <= Date.now() / 1000 || manifest.provenance.producer_task_id !== input.remoteTaskId)
-      throw new Error('Artifact manifest differs from task receipt');
-    if (!response.body) throw new Error('Artifact response has no body');
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > MAX_BYTES || total > length) throw new Error('Artifact response exceeds declared size');
-        chunks.push(value);
-      }
-    } catch (error) {
-      await reader.cancel().catch(() => {});
-      throw error;
-    } finally { reader.releaseLock(); }
-    const bytes = Buffer.concat(chunks, total);
-    if (bytes.byteLength !== length || sha(bytes) !== expected) throw new Error('Artifact bytes differ from task receipt');
-    const local = await this.runtime.artifacts.put(manifest.name, manifest.mime, bytes);
-    this.runtime.store.db.prepare(`INSERT INTO a2a_team_artifact_transfers(id,owner,local_task_id,peer,remote_task_id,
-      remote_context_id,remote_artifact_id,digest,manifest_json,status) VALUES (?,?,?,?,?,?,?,?,?,'complete')`)
-      .run(transferId, input.owner, input.localTaskId, input.peer, input.remoteTaskId,
-        input.remoteContextId, id, local.id, JSON.stringify(manifest));
-    return { ...declared, local_artifact_id: local.id };
   }
 
   project(owner: string, localTaskId: string): Array<{ local_artifact_id: string; peer: string;

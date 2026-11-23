@@ -29,6 +29,11 @@ export const RETRY_POLICIES = {
   telegram: { maxAttempts: 4, baseMs: 1000, maxMs: 1000, jitter: 'none', maxRetryAfterMs: 60_000 },
   /** Mattermost/ChatterMost REST: only 429 (the request was not processed), `Retry-After` up to 60 s. */
   mattermost: { maxAttempts: 3, baseMs: 1000, maxMs: 1000, jitter: 'none', maxRetryAfterMs: 60_000 },
+  /**
+   * Artifact transfer pulls. Each attempt resumes from the bytes already retained (Range and
+   * If-Range against the declared digest), so a stream that failed mid-way is continued, not replayed.
+   */
+  artifact_transfer: { maxAttempts: 5, baseMs: 500, maxMs: 8000, jitter: 'equal', maxRetryAfterMs: 30_000 },
   /** Codex turns, tools with a possible effect, partially consumed streams. */
   never: { maxAttempts: 1, baseMs: 0, maxMs: 0, jitter: 'none' },
 } as const satisfies Record<string, RetryPolicy>;

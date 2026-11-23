@@ -3089,6 +3089,7 @@
     "/api/v1/artifacts/{id}": {
       "get": {
         "operationId": "getArtifact",
+        "description": "Artifact bytes as application/octet-stream, streamed and verified against the digest as they are sent (a mismatch ends the response before its last chunk). Use /content for the media type, ranges and digest headers.",
         "security": [
           {
             "bearerAuth": []
@@ -3114,6 +3115,932 @@
         }
       }
     },
+    "/api/v1/artifacts/{sha256}/content": {
+      "get": {
+        "operationId": "getArtifactContent",
+        "description": "Artifact transfer v2 content. Without Range (or with an If-Range that is not the ETag) the whole artifact is returned with 200 and verified as it streams; a single Range returns 206 with Content-Range, an unsatisfiable one 416. Every response carries Accept-Ranges: bytes, ETag \"<sha256>\", Repr-Digest (RFC 9530 sha-256), X-Content-SHA256, the manifest media type and Content-Disposition: attachment with the manifest name. A rendition has its own digest and is fetched the same way.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "bytes=0-1048575"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whole artifact",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-SHA256": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "One byte range",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-SHA256": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact absent"
+          },
+          "416": {
+            "description": "Range not satisfiable; Content-Range: bytes */<size>"
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{sha256}/renditions": {
+      "get": {
+        "operationId": "listArtifactRenditions",
+        "description": "Every current form of an artifact, the original first (role original, purpose download). Given an original or any of its renditions, the list is the same. Select with HiveCommon selectRendition; download always means the original.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original and renditions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "renditions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "original",
+                              "preview",
+                              "model_input"
+                            ]
+                          },
+                          "mime": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "purpose": {
+                            "type": "string"
+                          },
+                          "width": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
+                            "maximum": 9007199254740991
+                          },
+                          "height": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
+                            "maximum": 9007199254740991
+                          },
+                          "has_alpha": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "sha256",
+                          "role",
+                          "mime",
+                          "size",
+                          "purpose"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "renditions"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No current manifest"
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{sha256}/manifest/v2": {
+      "get": {
+        "operationId": "getArtifactManifestV2",
+        "description": "Newest current manifest for the digest as manifest 1.1 (a strict superset of 1.0 with optional rendition and provenance.execution).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest 1.1 record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task_id": {
+                      "type": "string"
+                    },
+                    "superseded_by_sha256": {
+                      "nullable": true,
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "manifest": {
+                      "type": "object",
+                      "properties": {
+                        "schema_version": {
+                          "type": "string",
+                          "enum": [
+                            "1.1"
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "source_revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "visibility": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "gm",
+                            "player"
+                          ]
+                        },
+                        "license": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "preview": {
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "enum": [
+                                "inline",
+                                "thumbnail",
+                                "download_only",
+                                "none"
+                              ]
+                            },
+                            "mime": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "mode",
+                            "mime"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "supersedes_sha256": {
+                          "nullable": true,
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "acceptance_status": {
+                          "type": "string",
+                          "enum": [
+                            "unreviewed",
+                            "approved",
+                            "partial",
+                            "rejected"
+                          ]
+                        },
+                        "name": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+                        },
+                        "mime": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "size": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 67108864
+                        },
+                        "created_at": {
+                          "type": "number"
+                        },
+                        "expires_at": {
+                          "type": "number"
+                        },
+                        "provenance": {
+                          "type": "object",
+                          "properties": {
+                            "producer": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "producer_task_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "lineage": {
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "producer": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "source_id": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "producer",
+                                  "source_id"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "execution": {
+                              "type": "object",
+                              "properties": {
+                                "root": {
+                                  "type": "string",
+                                  "maxLength": 256
+                                },
+                                "task": {
+                                  "type": "string",
+                                  "maxLength": 256
+                                },
+                                "step": {
+                                  "type": "string",
+                                  "maxLength": 256
+                                }
+                              },
+                              "required": [
+                                "root"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "producer",
+                            "source_id",
+                            "producer_task_id",
+                            "lineage"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "recovery": {
+                          "type": "object",
+                          "properties": {
+                            "on_expiry": {
+                              "type": "string",
+                              "enum": [
+                                "request_verified_reexport"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "on_expiry"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "artifact_id": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{32}$"
+                        },
+                        "rendition": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string",
+                              "enum": [
+                                "original",
+                                "preview",
+                                "model_input"
+                              ]
+                            },
+                            "of_sha256": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "purpose": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "transform": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64
+                                },
+                                "params": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 256
+                                      },
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "boolean"
+                                      },
+                                      {
+                                        "type": "string",
+                                        "nullable": true,
+                                        "enum": [
+                                          null
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "version",
+                                "params"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "role",
+                            "of_sha256",
+                            "purpose",
+                            "transform"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "revision",
+                        "source_revision",
+                        "visibility",
+                        "license",
+                        "preview",
+                        "supersedes_sha256",
+                        "acceptance_status",
+                        "name",
+                        "mime",
+                        "sha256",
+                        "size",
+                        "created_at",
+                        "expires_at",
+                        "provenance",
+                        "recovery",
+                        "artifact_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "task_id",
+                    "superseded_by_sha256",
+                    "manifest"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No current manifest"
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/imports": {
+      "post": {
+        "operationId": "importArtifact",
+        "description": "Pull one artifact a configured A2A peer exported from one of its completed tasks, with transfer v2 (Range resume, SHA-256 verification) or, for an older peer, the v1 path up to 2 MiB. Idempotent per peer, task and artifact: a repeat returns the same import, and a failed import is queued again from its retained bytes. The import runs in the background and resumes after a restart.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "peer_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                  },
+                  "a2a_task_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{32}$"
+                  },
+                  "task_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+                  }
+                },
+                "required": [
+                  "peer_id",
+                  "a2a_task_id",
+                  "artifact_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "import_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "import_id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Local task absent"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listArtifactImports",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent imports, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "imports": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "import_id": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{32}$"
+                          },
+                          "peer_id": {
+                            "type": "string"
+                          },
+                          "a2a_task_id": {
+                            "type": "string"
+                          },
+                          "artifact_id": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{32}$"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "transferring",
+                              "verifying",
+                              "completed",
+                              "failed"
+                            ]
+                          },
+                          "received_bytes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "size": {
+                            "nullable": true,
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "sha256": {
+                            "nullable": true,
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "mime": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "name": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "protocol": {
+                            "nullable": true,
+                            "type": "string",
+                            "enum": [
+                              "v1",
+                              "v2"
+                            ]
+                          },
+                          "attempts": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "local_task_id": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "code",
+                              "message"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "created_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "updated_ms": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "import_id",
+                          "peer_id",
+                          "a2a_task_id",
+                          "artifact_id",
+                          "state",
+                          "received_bytes",
+                          "size",
+                          "sha256",
+                          "mime",
+                          "name",
+                          "protocol",
+                          "attempts",
+                          "local_task_id",
+                          "created_ms",
+                          "updated_ms"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "imports"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/imports/{id}": {
+      "get": {
+        "operationId": "getArtifactImport",
+        "description": "Import progress. error.code is TRANSFER_REQUIRES_V2 (peer lacks urn:hive:artifact-transfer:2 and the artifact is over 2 MiB), DIGEST_MISMATCH (bytes discarded; reissue to retry), TRANSFER_TOO_LARGE, TRANSFER_SOURCE_GONE, TRANSFER_INTERRUPTED (retries exhausted; reissue resumes) or another stable code.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Import state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "import_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    },
+                    "peer_id": {
+                      "type": "string"
+                    },
+                    "a2a_task_id": {
+                      "type": "string"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "transferring",
+                        "verifying",
+                        "completed",
+                        "failed"
+                      ]
+                    },
+                    "received_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "size": {
+                      "nullable": true,
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "sha256": {
+                      "nullable": true,
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mime": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "name": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "nullable": true,
+                      "type": "string",
+                      "enum": [
+                        "v1",
+                        "v2"
+                      ]
+                    },
+                    "attempts": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "local_task_id": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "created_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "updated_ms": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "import_id",
+                    "peer_id",
+                    "a2a_task_id",
+                    "artifact_id",
+                    "state",
+                    "received_bytes",
+                    "size",
+                    "sha256",
+                    "mime",
+                    "name",
+                    "protocol",
+                    "attempts",
+                    "local_task_id",
+                    "created_ms",
+                    "updated_ms"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Import absent"
+          }
+        }
+      }
+    },
     "/api/v1/status": {
       "get": {
         "operationId": "getOperationalStatus",
@@ -3124,7 +4051,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Active profile summary",
+            "description": "Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served",
             "content": {
               "application/json": {
                 "schema": {
@@ -3271,6 +4198,20 @@
                       "required": [
                         "mattermost"
                       ]
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "properties": {
+                        "artifact_transfer": {
+                          "type": "number",
+                          "enum": [
+                            2
+                          ]
+                        }
+                      },
+                      "required": [
+                        "artifact_transfer"
+                      ]
                     }
                   },
                   "required": [
@@ -3278,7 +4219,8 @@
                     "profile",
                     "backend",
                     "tasks",
-                    "channels"
+                    "channels",
+                    "capabilities"
                   ]
                 }
               }

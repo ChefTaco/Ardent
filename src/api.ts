@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
@@ -23,7 +23,10 @@ import { mountPluginHttp } from './plugin-http.js';
 import { pluginContext } from './plugins.js';
 import type { LiveTextUpdate } from './live-text.js';
 import { MissionSubmit } from './missions.js';
-import { ArtifactRecordSchema } from './artifact-manifests.js';
+import { ArtifactRecordSchema, ArtifactRecordV2Schema, ArtifactRenditionSchema } from './artifact-manifests.js';
+import { ArtifactImportRequestSchema, ArtifactImportSchema, ArtifactTransfers } from './artifact-transfer.js';
+import { Readable } from 'node:stream';
+import { formatReprDigest, parseByteRange } from '@hivemagnus/hive-common/artifact';
 import { PreviewSubmit } from './preview.js';
 import { developmentPage, DevelopmentKind, DevelopmentNoteInput, DevelopmentRecordSchema, recordSkillChange } from './development.js';
 import { readProfileEnv } from './profile-env.js';
@@ -70,8 +73,27 @@ const a2aConfigId = { in: 'path', name: 'configId', required: true, schema: { ty
 const a2aBody = { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: true }, example: { message: { messageId: 'request-1', role: 'user', parts: [{ kind: 'text', text: 'Research the current update' }] } } } } };
 const a2aResult = { '200': { description: 'A2A v1 task or message; see the pinned A2A protocol contract', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } }, '400': { description: 'Invalid A2A request' }, '401': { description: 'Peer authentication failed' }, '404': { description: 'Task or configuration absent' } };
 const taskExample = { id: '11111111-1111-4111-8111-111111111111', caller: 'management', context: 'direct', session_id: null, prompt: 'Research the current update', content_hash: '0'.repeat(64), idempotency_key: 'research-1', backend: 'llamacpp', state: 'queued', result: null, error: null, deadline_ms: 1790438400000, created_ms: 1790431200000, updated_ms: 1790431200000 };
+const artifactDigest = { in: 'path', name: 'sha256', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } };
+const artifactBytes = (description: string) => ({ description, headers: Object.fromEntries(['Accept-Ranges', 'ETag', 'Repr-Digest', 'X-Content-SHA256', 'Content-Disposition', 'Content-Range']
+  .map(name => [name, { schema: { type: 'string' } }])), content: { '*/*': { schema: { type: 'string', format: 'binary' } } } });
 const eventExample = { sequence: 1, task_id: taskExample.id, kind: 'task_accepted', detail: { backend: 'llamacpp' }, created_ms: 1790431200000 };
 const sseExample = `event: task.event\nid: 1\ndata: ${JSON.stringify(eventExample)}\n\nevent: task.text\ndata: ${JSON.stringify({ step: 0, text: 'The bridge' })}\n\nevent: task.delta\ndata: ${JSON.stringify({ step: 0, text: ' holds.' })}\n\n`;
+
+/** Send a file stream with backpressure; a HEAD request closes it unread. */
+function streamed(c: Context, stream: Readable, status: 200 | 206, headers: Record<string, string>): Response {
+  if (c.req.method === 'HEAD') { stream.destroy(); return new Response(null, { status, headers }); }
+  const chunks = stream[Symbol.asyncIterator]();
+  // Pull-based: the next file chunk is read only when the client has taken the last one.
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const next = await chunks.next();
+      if (next.done) controller.close();
+      else controller.enqueue(z.instanceof(Uint8Array).parse(next.value));
+    },
+    cancel() { stream.destroy(); }
+  });
+  return new Response(body, { status, headers });
+}
 
 export function ardentOpenApi(): object {
   return {
@@ -111,8 +133,16 @@ export function ardentOpenApi(): object {
       '/api/v1/tasks/{id}/resume': { post: { operationId: 'resumeTask', description: 'Resume a paused task. Idempotent; resuming a task that is not paused changes nothing.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task admission', Admission), '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/artifacts': { get: { operationId: 'listTaskArtifacts', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Current manifests of artifacts the task registered, oldest first', z.object({ artifacts: z.array(ArtifactRecordSchema) })), '404': { description: 'Task absent' } } } },
       '/api/v1/artifacts/{sha256}/manifest': { get: { operationId: 'getArtifactManifest', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'sha256', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': jsonResponse('Newest current manifest registered for the digest', ArtifactRecordSchema), '404': { description: 'No current manifest' } } } },
-      '/api/v1/artifacts/{id}': { get: { operationId: 'getArtifact', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Artifact bytes' }, '404': { description: 'Artifact absent' } } } },
-      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int(), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }) })) } } },
+      '/api/v1/artifacts/{id}': { get: { operationId: 'getArtifact', description: 'Artifact bytes as application/octet-stream, streamed and verified against the digest as they are sent (a mismatch ends the response before its last chunk). Use /content for the media type, ranges and digest headers.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Artifact bytes' }, '404': { description: 'Artifact absent' } } } },
+      '/api/v1/artifacts/{sha256}/content': { get: { operationId: 'getArtifactContent', description: 'Artifact transfer v2 content. Without Range (or with an If-Range that is not the ETag) the whole artifact is returned with 200 and verified as it streams; a single Range returns 206 with Content-Range, an unsatisfiable one 416. Every response carries Accept-Ranges: bytes, ETag "<sha256>", Repr-Digest (RFC 9530 sha-256), X-Content-SHA256, the manifest media type and Content-Disposition: attachment with the manifest name. A rendition has its own digest and is fetched the same way.', security: [{ bearerAuth: [] }], parameters: [artifactDigest, { in: 'header', name: 'Range', required: false, schema: { type: 'string', example: 'bytes=0-1048575' } }, { in: 'header', name: 'If-Range', required: false, schema: { type: 'string' } }], responses: { '200': artifactBytes('Whole artifact'), '206': artifactBytes('One byte range'), '404': { description: 'Artifact absent' }, '416': { description: 'Range not satisfiable; Content-Range: bytes */<size>' } } } },
+      '/api/v1/artifacts/{sha256}/renditions': { get: { operationId: 'listArtifactRenditions', description: 'Every current form of an artifact, the original first (role original, purpose download). Given an original or any of its renditions, the list is the same. Select with HiveCommon selectRendition; download always means the original.', security: [{ bearerAuth: [] }], parameters: [artifactDigest], responses: { '200': jsonResponse('Original and renditions', z.object({ renditions: z.array(ArtifactRenditionSchema) })), '404': { description: 'No current manifest' } } } },
+      '/api/v1/artifacts/{sha256}/manifest/v2': { get: { operationId: 'getArtifactManifestV2', description: 'Newest current manifest for the digest as manifest 1.1 (a strict superset of 1.0 with optional rendition and provenance.execution).', security: [{ bearerAuth: [] }], parameters: [artifactDigest], responses: { '200': jsonResponse('Manifest 1.1 record', ArtifactRecordV2Schema), '404': { description: 'No current manifest' } } } },
+      '/api/v1/artifacts/imports': {
+        post: { operationId: 'importArtifact', description: 'Pull one artifact a configured A2A peer exported from one of its completed tasks, with transfer v2 (Range resume, SHA-256 verification) or, for an older peer, the v1 path up to 2 MiB. Idempotent per peer, task and artifact: a repeat returns the same import, and a failed import is queued again from its retained bytes. The import runs in the background and resumes after a restart.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(ArtifactImportRequestSchema) } } }, responses: { '202': jsonResponse('Accepted import', z.object({ import_id: z.string() })), '400': { description: 'Invalid request' }, '404': { description: 'Local task absent' } } },
+        get: { operationId: 'listArtifactImports', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': jsonResponse('Recent imports, newest first', z.object({ imports: z.array(ArtifactImportSchema) })) } }
+      },
+      '/api/v1/artifacts/imports/{id}': { get: { operationId: 'getArtifactImport', description: 'Import progress. error.code is TRANSFER_REQUIRES_V2 (peer lacks urn:hive:artifact-transfer:2 and the artifact is over 2 MiB), DIGEST_MISMATCH (bytes discarded; reissue to retry), TRANSFER_TOO_LARGE, TRANSFER_SOURCE_GONE, TRANSFER_INTERRUPTED (retries exhausted; reissue resumes) or another stable code.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{32}$' } }], responses: { '200': jsonResponse('Import state', ArtifactImportSchema), '404': { description: 'Import absent' } } } },
+      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int(), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }), capabilities: z.object({ artifact_transfer: z.literal(2) }) })) } } },
       '/api/v1/jobs/definitions/status': { get: { operationId: 'getJobDefinitionsStatus', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Active profile job definition revision, digest, and redacted window status' }, '503': { description: 'Job engine unavailable' } } } },
       '/api/v1/profile': { get: { operationId: 'getProfile', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Profile identity and path', z.object({ profile: z.string(), name: z.string(), product: z.string(), timezone: z.string(), path: z.string() })) } } },
       '/api/v1/config': { get: { operationId: 'getConfig', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Raw YAML and revision; secrets remain references', z.object({ revision: z.string(), text: z.string() })) } }, put: { operationId: 'saveConfig', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(ConfigEdit) } } }, responses: { '200': jsonResponse('Saved; activation required', z.object({ revision: z.string(), activation_required: z.boolean() })), '409': { description: 'Revision conflict' } } } },
@@ -145,8 +175,9 @@ export function ardentOpenApi(): object {
  * environment file the gateway started from, if any (default `<profile>/.env`).
  */
 export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, env: NodeJS.ProcessEnv = process.env,
-  jobEngine?: JobEngine, options: { envFile?: string } = {}): Hono {
+  jobEngine?: JobEngine, options: { envFile?: string; artifactTransfers?: ArtifactTransfers } = {}): Hono {
   const app = new Hono();
+  const transfers = options.artifactTransfers ?? new ArtifactTransfers(runtime, env);
   let current = loaded;
   // A saved configuration requires activation; it must not rotate the live
   // management credential before the gateway restarts with it.
@@ -208,7 +239,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     return next();
   });
   app.get('/api/v1/status', c => c.json({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend, tasks: runtime.store.list(10).length,
-    channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } } }));
+    channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } },
+    capabilities: { artifact_transfer: 2 } }));
   app.get('/api/v1/jobs/definitions/status', async c => {
     if (!jobEngine) throw new Error('Job engine is unavailable');
     const status = await jobEngine.status();
@@ -477,9 +509,48 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     if (!record) return c.json({ error: { code: 'NOT_FOUND', message: 'Artifact manifest not found' } }, 404);
     return c.json(record);
   });
+  // Imports register before /artifacts/:id so their static segment is not read as a digest.
+  app.post('/api/v1/artifacts/imports', async c => {
+    const record = transfers.start(parseInput(await c.req.json(), ArtifactImportRequestSchema), 'management');
+    return c.json({ import_id: record.import_id }, 202);
+  });
+  app.get('/api/v1/artifacts/imports', c => c.json({ imports: transfers.list(PageLimit.parse(c.req.query('limit') ?? 50)) }));
+  app.get('/api/v1/artifacts/imports/:id', c => {
+    const record = transfers.get(c.req.param('id'));
+    return record ? c.json(record) : c.json({ error: { code: 'NOT_FOUND', message: 'Artifact import not found' } }, 404);
+  });
+  const artifactAbsent = (c: Context) => c.json({ error: { code: 'NOT_FOUND', message: 'Artifact not found' } }, 404);
+  app.get('/api/v1/artifacts/:sha256/manifest/v2', c => {
+    const record = runtime.artifactManifests.manifestV2(c.req.param('sha256'));
+    return record ? c.json(record) : c.json({ error: { code: 'NOT_FOUND', message: 'Artifact manifest not found' } }, 404);
+  });
+  app.get('/api/v1/artifacts/:sha256/renditions', async c => {
+    const renditions = await runtime.artifactManifests.renditions(c.req.param('sha256'));
+    return renditions ? c.json({ renditions }) : c.json({ error: { code: 'NOT_FOUND', message: 'Artifact manifest not found' } }, 404);
+  });
+  app.get('/api/v1/artifacts/:sha256/content', async c => {
+    const sha = c.req.param('sha256');
+    if (!/^[a-f0-9]{64}$/.test(sha)) return artifactAbsent(c);
+    const stat = await runtime.artifacts.stat(sha).catch(() => undefined);
+    if (!stat) return artifactAbsent(c);
+    const manifest = runtime.artifactManifests.manifestV2(sha)?.manifest;
+    const etag = `"${sha}"`;
+    const ifRange = c.req.header('If-Range');
+    const range = parseByteRange(ifRange === undefined || ifRange === etag ? c.req.header('Range') : undefined, stat.size);
+    const headers: Record<string, string> = { 'Accept-Ranges': 'bytes', ETag: etag, 'Repr-Digest': formatReprDigest(sha), 'X-Content-SHA256': sha,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' };
+    if (range === null) return c.json({ error: { code: 'RANGE_NOT_SATISFIABLE', message: 'Requested range is not satisfiable' } }, 416,
+      { ...headers, 'Content-Range': `bytes */${stat.size}` });
+    const read = await runtime.artifacts.openRead(sha, range ?? {}, { verify: !range }).catch(() => undefined);
+    if (!read) return artifactAbsent(c);
+    Object.assign(headers, { 'Content-Type': manifest?.mime ?? 'application/octet-stream', 'Content-Length': String(read.end - read.start + 1),
+      'Content-Disposition': `attachment; filename="${manifest?.name ?? sha}"`, ...(range ? { 'Content-Range': `bytes ${read.start}-${read.end}/${stat.size}` } : {}) });
+    return streamed(c, read.stream, range ? 206 : 200, headers);
+  });
   app.get('/api/v1/artifacts/:id', async c => {
-    try { return c.body(new Uint8Array(await runtime.artifacts.get(c.req.param('id'))), 200, { 'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); }
-    catch { return c.json({ error: { code: 'NOT_FOUND', message: 'Artifact not found' } }, 404); }
+    const read = await runtime.artifacts.openRead(c.req.param('id'), {}, { verify: true }).catch(() => undefined);
+    if (!read) return artifactAbsent(c);
+    return streamed(c, read.stream, 200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(read.size), 'X-Content-Type-Options': 'nosniff' });
   });
   // Plugin routes mount after the bearer-token middleware above.
   const ctx = pluginContext(runtime, env);

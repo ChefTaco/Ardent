@@ -36,12 +36,13 @@ import { readProfileEnv } from './profile-env.js';
 import { PlainTextFilter } from './live-text.js';
 import { developmentQuery, missionSubmitInput, previewInput } from './cli-commands.js';
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
+import { ArtifactTransfers } from './artifact-transfer.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
 function args(argv: string[], extraValues: readonly string[] = []): Parsed {
   const words: string[] = [];
   const options = new Map<string, string | true>();
-  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model']);
+  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model', 'peer', 'task', 'artifact', 'local-task']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg) continue;
@@ -107,6 +108,9 @@ Commands:
   preview --prompt TEXT [--soul-file F]    Try unsaved soul, identity, --skills or --model changes
   development list [--after C] [--kind K]  Show the agent's development history
   sessions list | new | reset | show       Manage local CLI sessions
+  artifact import --peer <id> --task <a2a task> --artifact <id> [--local-task <id>]
+                                           Pull a peer artifact (resumable, verified)
+  artifact imports [--limit N]             List artifact imports and their progress
   tasks list | show | cancel              Inspect local tasks
   tasks pause | resume <id>                Hold a queued task, or release and run it
   gateway run                              Serve the management API, A2A, channels and jobs`;
@@ -366,7 +370,7 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (!['run', 'report', 'chat', 'tasks', 'sessions', 'gateway', 'mission', 'preview', 'development'].includes(command ?? '')) throw new Error(`Unknown command.\n${USAGE}`);
+  if (!['run', 'report', 'chat', 'tasks', 'sessions', 'gateway', 'mission', 'preview', 'development', 'artifact'].includes(command ?? '')) throw new Error(`Unknown command.\n${USAGE}`);
   if (command === 'gateway' && subcommand === 'run') {
       if (!['127.0.0.1', '::1', 'localhost'].includes(loaded.config.api.host)) throw new Error('Non-local API listener requires verified TLS proxy configuration');
       {
@@ -406,9 +410,12 @@ async function main(): Promise<void> {
         if (jobEngine) await jobEngine.recoverAfterRestart();
         // The API reloads rotated credentials from the same file the gateway started from.
         const envFile = value(parsed.options, 'env-file');
-        const api = createArdentApi(runtime, loaded, env, jobEngine, envFile ? { envFile: resolvePath(envFile) } : {});
+        const artifactTransfers = new ArtifactTransfers(runtime, env);
+        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers });
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+        // Imports a previous process left unfinished resume from their retained bytes.
+        artifactTransfers.resumePending();
         let a2aHttp: HttpServer | undefined;
         let a2aGrpc: Awaited<ReturnType<typeof createA2ASurface>>['grpcServer'] | undefined;
         let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
@@ -548,6 +555,18 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('Unknown tasks command');
+    }
+    if (command === 'artifact') {
+      const transfers = new ArtifactTransfers(runtime, env);
+      if (subcommand === 'imports') { print({ imports: transfers.list(Number(value(parsed.options, 'limit') ?? 50)) }); return; }
+      if (subcommand === 'import') {
+        const localTask = value(parsed.options, 'local-task');
+        const record = transfers.request({ peer_id: value(parsed.options, 'peer') ?? '', a2a_task_id: value(parsed.options, 'task') ?? '',
+          artifact_id: value(parsed.options, 'artifact') ?? '', ...(localTask ? { task_id: localTask } : {}) }, 'local');
+        print(await transfers.run(record.import_id));
+        return;
+      }
+      throw new Error('Use artifact import --peer <id> --task <a2a task id> --artifact <id>, or artifact imports');
     }
     if (command === 'mission') {
       if (subcommand !== 'submit') throw new Error('Use mission submit --mission-file FILE');
