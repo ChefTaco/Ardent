@@ -84,7 +84,10 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS context_attempts_session ON context_compaction_attempts(session_id,created_ms);
       CREATE TABLE IF NOT EXISTS task_admission (
         task_id TEXT PRIMARY KEY REFERENCES tasks(id), admission TEXT NOT NULL CHECK(admission IN ('open','paused')),
-        updated_ms INTEGER NOT NULL);`);
+        updated_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS plugin_hook_failures (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, plugin TEXT NOT NULL, hook TEXT NOT NULL,
+        platform TEXT NOT NULL, account TEXT NOT NULL, update_id TEXT NOT NULL, created_ms INTEGER NOT NULL);`);
     const columns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(tasks)'));
     if (!columns.some(column => column.name === 'session_id')) this.db.exec('ALTER TABLE tasks ADD COLUMN session_id TEXT');
     // Additive lookup indexes for caller listing, session history and recovery.
@@ -330,6 +333,20 @@ export class TaskStore {
       this.db.prepare('UPDATE tasks SET state=?,updated_ms=? WHERE id=?').run('running', Date.now(), id);
       this.append(id, 'state', { from: 'queued', to: 'running', error: null });
     })();
+  }
+  /**
+   * Record a failed plugin lifecycle hook: a `plugin_hook_failed` task event,
+   * or, for a channel message that has no task, a row keyed by the message.
+   */
+  recordPluginHookFailure(plugin: string, hook: string, target: { taskId: string } | { platform: string; account: string; updateId: string }): void {
+    if ('taskId' in target) { this.append(target.taskId, 'plugin_hook_failed', { plugin, hook }); return; }
+    this.db.prepare('INSERT INTO plugin_hook_failures(plugin,hook,platform,account,update_id,created_ms) VALUES (?,?,?,?,?,?)')
+      .run(plugin, hook, target.platform, target.account, target.updateId, Date.now());
+  }
+  /** Hook failures recorded for a channel message that had no task. */
+  pluginHookFailures(platform: string, account: string, updateId: string): { plugin: string; hook: string }[] {
+    return this.db.prepare('SELECT plugin,hook FROM plugin_hook_failures WHERE platform=? AND account=? AND update_id=? ORDER BY sequence')
+      .all(platform, account, updateId).map(row => z.object({ plugin: z.string(), hook: z.string() }).parse(row));
   }
   append(id: string, kind: string, detail: unknown): void {
     this.db.prepare('INSERT INTO events(task_id,kind,detail_json,created_ms) VALUES (?,?,?,?)').run(id, kind, JSON.stringify(detail), Date.now());

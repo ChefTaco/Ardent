@@ -9,7 +9,7 @@ import { CodexOutputBudget, CODEX_PRODUCTION_OUTPUT_MAX_BYTES, type CodexOutputL
 import type { BackendEventSink } from './backend-events.js';
 import type { ArdentConfig } from './config.js';
 import { resolveReference } from './config.js';
-import type { ToolContext, ToolRegistry, ToolResult } from './tools.js';
+import { ToolCallLimitError, type ToolContext, type ToolRegistry, type ToolResult } from './tools.js';
 
 const RpcResponse = z.object({ id: z.union([z.number(), z.string()]), result: z.unknown().optional(), error: z.object({ code: z.number(), message: z.string() }).optional() }).passthrough();
 const RpcMessage = z.object({ method: z.string(), params: z.unknown().optional(), id: z.union([z.number(), z.string()]).optional() }).passthrough();
@@ -37,8 +37,16 @@ export type CodexExecutionProof = { outputSchema?: unknown; verifyRoute?: boolea
   outputBounds?: { maxAgentBytes: number; requestedOutputTokens?: number };
   onOutputLimit?: (witness: CodexOutputLimitWitness) => void;
   onIdentifiers?: (identifiers: { threadId: string; turnId: string | null }) => Promise<void>;
-  /** Durably records a dynamic-tool attempt before dispatch; a throw prevents the call. */
-  onToolAttempt?: (attempt: { callId: string; tool: string; arguments: unknown }) => void };
+  /** Durably records a dynamic-tool attempt before dispatch; a throw prevents the call. Unused with `dispatchTool`. */
+  onToolAttempt?: (attempt: { callId: string; tool: string; arguments: unknown }) => void;
+  /**
+   * Dispatch every dynamic-tool call through a shared scheduler (such as
+   * `ToolScheduler.dispatch`), called synchronously in arrival order. The
+   * dispatcher then owns pausing, the tool-call limit (a `ToolCallLimitError`),
+   * attempt and result journaling, and admission; `onToolAttempt`,
+   * `beforeStep` (for calls) and the arrival-time limit are not used for calls.
+   */
+  dispatchTool?: (call: { callId: string; tool: string; arguments: unknown }) => Promise<ToolResult> };
 
 export class CodexAppServer {
   readonly child: ChildProcessWithoutNullStreams;
@@ -161,7 +169,7 @@ export class CodexAppServer {
 
 export class CodexHarnessBackend {
   constructor(readonly config: ArdentConfig['providers']['codex'], readonly profileDir: string, readonly env: NodeJS.ProcessEnv = process.env) {}
-  async run(prompt: string, system: string, tools: ToolRegistry, context: ToolContext, signal: AbortSignal, maxToolCalls: number, onTool?: (name: string, result: ToolResult) => void, beforeStep?: () => Promise<void>, onEvent?: BackendEventSink, reasoningEffort?: string, imagePaths: readonly string[] = [], execution?: CodexExecutionProof): Promise<CodexResult> {
+  async run(prompt: string, system: string, tools: ToolRegistry, context: ToolContext, signal: AbortSignal, maxToolCalls: number, onTool?: (name: string, result: ToolResult, callId: string) => void, beforeStep?: () => Promise<void>, onEvent?: BackendEventSink, reasoningEffort?: string, imagePaths: readonly string[] = [], execution?: CodexExecutionProof): Promise<CodexResult> {
     if (signal.aborted) throw new Error('Codex task was cancelled before execution');
     if (imagePaths.length > 16) throw new Error('CODEX_IMAGE_LIMIT');
     if (imagePaths.length) {
@@ -250,6 +258,32 @@ export class CodexHarnessBackend {
           const params = ToolRequest.safeParse(message.params);
           if (!params.success || params.data.threadId !== threadId || message.id === undefined) return;
           toolCalls++;
+          const respondResult = (result: ToolResult) => {
+            // A result that arrives after run() settled must not be appended to a
+            // task whose terminal state has already been recorded.
+            if (settled) return;
+            onTool?.(params.data.tool, result, params.data.callId);
+            onEvent?.({ kind: 'tool_result', backend: 'codex', id: params.data.callId, name: params.data.tool, result });
+            const turnOutputs = outputs.get(params.data.turnId) ?? [];
+            turnOutputs.push({ callId: params.data.callId, tool: params.data.tool, result });
+            outputs.set(params.data.turnId, turnOutputs);
+            server.respond(message.id ?? -1, { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.ok });
+          };
+          if (execution?.dispatchTool) {
+            // Dispatch synchronously so the scheduler admits calls in arrival order.
+            // Outputs follow completion order; each RPC id binds its own result.
+            let dispatched: Promise<ToolResult>;
+            try { dispatched = execution.dispatchTool({ callId: params.data.callId, tool: params.data.tool, arguments: params.data.arguments }); }
+            catch (error: unknown) { dispatched = Promise.reject(error instanceof Error ? error : new Error('Tool dispatch failed')); }
+            void dispatched.then(respondResult).catch(error => {
+              if (settled) return;
+              if (error instanceof ToolCallLimitError) {
+                try { server.respond(message.id ?? -1, { contentItems: [{ type: 'inputText', text: 'Ardent tool-call limit reached' }], success: false }); } catch { /* closed */ }
+                rejectWaiters(new Error('Codex tool-call limit reached'));
+              } else rejectWaiters(error instanceof Error ? error : new Error('Tool dispatch failed'));
+            });
+            return;
+          }
           if (toolCalls > maxToolCalls) {
             server.respond(message.id, { contentItems: [{ type: 'inputText', text: 'Ardent tool-call limit reached' }], success: false });
             rejectWaiters(new Error('Codex tool-call limit reached'));
@@ -262,17 +296,7 @@ export class CodexHarnessBackend {
             await beforeStep?.();
             if (terminalError || signal.aborted) throw terminalError ?? new Error('Codex task cancelled or deadline elapsed');
             return tools.call(params.data.tool, params.data.arguments, context, signal);
-          }).then(result => {
-            // A result that arrives after run() settled must not be appended to a
-            // task whose terminal state has already been recorded.
-            if (settled) return;
-            onTool?.(params.data.tool, result);
-            onEvent?.({ kind: 'tool_result', backend: 'codex', name: params.data.tool, result });
-            const turnOutputs = outputs.get(params.data.turnId) ?? [];
-            turnOutputs.push({ callId: params.data.callId, tool: params.data.tool, result });
-            outputs.set(params.data.turnId, turnOutputs);
-            server.respond(message.id ?? -1, { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.ok });
-          }).catch(error => { if (!settled) rejectWaiters(error instanceof Error ? error : new Error('Tool dispatch failed')); });
+          }).then(respondResult).catch(error => { if (!settled) rejectWaiters(error instanceof Error ? error : new Error('Tool dispatch failed')); });
         } else if (message.method === 'item/completed') {
           const item = Item.safeParse(message.params);
           if (!item.success || item.data.threadId !== threadId || !matchesProductionTurn(item.data.turnId)) return;

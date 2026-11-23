@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { ArdentRuntime } from './runtime.js';
 import type { Task } from './store.js';
 import type { JobEngine } from './job-engine.js';
+import { frozenCopy, pluginContext, pluginTransformOutbound, runPluginObservers, type ArdentChannelDelivery, type ArdentChannelMessage,
+  type ArdentPluginContext, type PluginHookFailureSink } from './plugins.js';
 
 const Attachment = z.object({ name: z.string().max(128), media_type: z.string().max(100), bytes: z.instanceof(Uint8Array).refine(value => value.byteLength <= 2 * 1024 * 1024).optional(), external_id: z.string().max(256).optional() }).strict();
 export const ChannelEvent = z.object({
@@ -54,17 +56,42 @@ export class ChannelCore {
     return { text: task.result ?? '', taskId: task.id, artifactIds: recorded.success ? [recorded.data.report.id, recorded.data.markdown.id] : [] };
   }
 
+  #pluginContext(): ArdentPluginContext { return pluginContext(this.runtime, this.env); }
+
+  #hookFailure(event: ChannelEvent, taskId: string | null): PluginHookFailureSink {
+    return (plugin, hook) => this.runtime.store.recordPluginHookFailure(plugin, hook,
+      taskId ? { taskId } : { platform: event.platform, account: event.account, updateId: event.update_id });
+  }
+
   async #send(event: ChannelEvent, reply: ChannelReply, deliver: ChannelDelivery, duplicate: boolean): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {
+    const plugins = this.runtime.plugins;
     const deliveryId = this.runtime.store.queueDelivery(event.platform, event.account, event.update_id, reply.taskId);
+    const failure = this.#hookFailure(event, reply.taskId);
+    let view: ArdentChannelDelivery = { delivery_id: deliveryId, task_id: reply.taskId, platform: event.platform, account: event.account,
+      update_id: event.update_id, text: reply.text, attempt: 1 };
+    if (plugins.some(plugin => plugin.transformOutbound)) {
+      // Transformations chain in registration order and fail closed to the original text.
+      const transformed = await pluginTransformOutbound(plugins, this.#pluginContext(), view, failure);
+      if (transformed.plugins.length) {
+        if (reply.taskId) this.runtime.store.append(reply.taskId, 'outbound_transformed', { delivery_id: deliveryId, plugins: transformed.plugins, text: transformed.text });
+        reply = { ...reply, text: transformed.text };
+        view = { ...view, text: transformed.text };
+      }
+    }
+    let outcome: { state: 'sent' | 'failed' | 'unknown'; external_id: string | null };
     try {
       const externalId = await deliver(reply);
       this.runtime.store.setDelivery(deliveryId, 'sent', externalId);
-      return { duplicate, taskId: reply.taskId, delivery: 'sent' };
+      outcome = { state: 'sent', external_id: externalId };
     } catch (error: unknown) {
       const state = error instanceof DeliveryRejectedError ? 'failed' : 'unknown';
       this.runtime.store.setDelivery(deliveryId, state, null, error instanceof Error ? error.message : 'Delivery uncertain');
-      return { duplicate, taskId: reply.taskId, delivery: state };
+      outcome = { state, external_id: null };
     }
+    const delivered = frozenCopy(view);
+    const context = this.#pluginContext();
+    await runPluginObservers(plugins, 'messageDelivered', plugin => plugin.messageDelivered?.(context, delivered, frozenCopy(outcome)), failure);
+    return { duplicate, taskId: reply.taskId, delivery: outcome.state };
   }
 
   handle(raw: unknown, deliver: ChannelDelivery): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {
@@ -85,6 +112,13 @@ export class ChannelCore {
   async #handleAuthenticated(event: ChannelEvent, deliver: ChannelDelivery,
     claimed: { claimed: boolean; taskId: string | null }): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {
     const scope = eventScope(event);
+    const plugins = this.runtime.plugins;
+    const message: ArdentChannelMessage = frozenCopy({ platform: event.platform, account: event.account, update_id: event.update_id,
+      channel_type: event.channel_type ?? 'unknown', caller: scope.caller, session_key: scope.key, received_ms: Date.now() });
+    if (claimed.claimed) {
+      const context = this.#pluginContext();
+      await runPluginObservers(plugins, 'messageReceived', plugin => plugin.messageReceived?.(context, message), this.#hookFailure(event, null));
+    }
     if (!claimed.claimed) {
       const existingDelivery = this.runtime.store.delivery(event.platform, event.account, event.update_id);
       if (existingDelivery || !claimed.taskId) return { duplicate: true, taskId: claimed.taskId, delivery: existingDelivery?.state ?? null };
@@ -147,6 +181,9 @@ export class ChannelCore {
       else {
         const task = this.runtime.accept(prompt.slice(0, 16000), scope.caller, 'direct', `${event.platform}:${event.account}:${event.update_id}`.slice(0, 128), session.id, undefined, this.runtime.store.channelBackend(scope.caller, scope.key));
         this.runtime.store.bindInboundTask(event.platform, event.account, event.update_id, task.id);
+        const context = this.#pluginContext();
+        const persisted = frozenCopy(task);
+        await runPluginObservers(plugins, 'messagePersisted', plugin => plugin.messagePersisted?.(context, message, persisted), this.#hookFailure(event, task.id));
         try {
           await this.runtime.run(task.id, this.env);
           reply = this.#replyFromTask(this.runtime.store.get(task.id) ?? task);

@@ -14,7 +14,8 @@ execution:
   backend: llamacpp            # llamacpp | codex
   max_model_steps: 40
   max_tool_calls: 80
-  max_parallel_tools: 3
+  max_parallel_tasks: 3        # tasks running at once (the runtime runs at most 4)
+  max_parallel_tool_calls: 4   # independent read calls overlapping in one model turn
   deadline_seconds: 3600
   max_delegation_depth: 2
 providers:

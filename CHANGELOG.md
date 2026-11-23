@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Tool scheduling: llama.cpp and Codex dispatch tool calls through one scheduler. Independent `read` calls from one model turn overlap up to `execution.max_parallel_tool_calls` (default 4); any other call is a barrier, unless its tool declares `concurrency: 'parallel'`. llama.cpp receives results in the order it emitted the calls. Calls that are not dispatched when a task is cancelled settle with effect `none` and are journaled as `tool_not_dispatched`; calls already started keep their uncertainty.
+- `execution.max_parallel_tasks` sets task concurrency (the runtime still runs at most 4).
+- Tool contract (additive): `idempotent`, `concurrency`, a `reconcile` hook (declared for execution recovery, not called yet) and a third `invoke` argument `{ idempotencyKey, execution? }`, where `idempotencyKey` is `sha256("<task id>:<call id>")`. `defineTool` handlers receive it as their third argument. `ToolRegistry` gains `get`, `prepare` and `invokePrepared`; `call` accepts the context as an optional fifth argument.
+- Plugin lifecycle hooks: `messageReceived`, `messagePersisted`, `transformOutbound`, `messageDelivered`, `beforeToolCall` (deny only), `afterToolCall` and `toolCallCancelled`. `ArdentTaskPluginContext` gains an optional `execution`. See "Lifecycle hooks" in the README.
+- Journal events: `tool_not_dispatched`, `tool_denied_by_plugin`, `plugin_hook_failed` and `outbound_transformed`.
+
 ### Changed
 
 - One retry policy model (`src/retry.ts`, on `@hivemagnus/hive-common/retry`) covers llama.cpp, the A2A client, A2A push delivery, Telegram and scheduled jobs. See README "Retries".
@@ -11,6 +19,15 @@
 - Telegram: `channel_deliveries.attempts` records the Bot API requests a delivery made.
 - Jobs: retry backoff has equal jitter, and a retry is not scheduled past the job's next window (`RETRY_DEADLINE`).
 - `LlamaCppBackend.complete` and `countInputTokens` take an optional trailing options object: `requestHeaders`, `deadlineMs` and `onRetry`.
+- `tool_result` journal events from Codex tasks now carry the call `id`, as llama.cpp events already did, and Codex `backend_event` tool results carry it too.
+- Codex tasks now wait for an operator pause before journaling a tool attempt, as llama.cpp tasks do. A paused Codex call that is cancelled is no longer counted as attempted.
+- The tool-call limit is checked when a call is dispatched, for both backends. A Codex call over the limit is refused by the shared scheduler instead of on arrival.
+- A plugin `observeToolResult` that throws is recorded as `plugin_hook_failed` and no longer fails the task (llama.cpp) or rejects the run (Codex).
+- The bundled profile template uses `max_parallel_tasks` and `max_parallel_tool_calls`.
+
+### Deprecated
+
+- `execution.max_parallel_tools`. It limited tasks, not tools. It is still used when `max_parallel_tasks` is absent, and `runtimeProblems()` (`ardent config validate`, `ardent doctor`) then lists a `notice:` entry. `/health/ready` ignores notices.
 
 ## 3.1.4 - 2026-11-17
 

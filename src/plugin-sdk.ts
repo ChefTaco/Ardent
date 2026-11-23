@@ -4,6 +4,7 @@ export * from './plugins.js';
 export * from './config.js';
 export * from './store.js';
 export * from './tools.js';
+export { toolIdempotencyKey } from './tool-scheduler.js';
 export * from './artifacts.js';
 export * from './a2a-peers.js';
 export * from './codex.js';

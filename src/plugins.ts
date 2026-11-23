@@ -9,7 +9,7 @@ import type { ArdentRuntime, TaskEvidence } from './runtime.js';
 import type { ResearchBrief } from './research.js';
 import type { SkillInfo } from './skills.js';
 import type { Task, TaskEvent } from './store.js';
-import { defineTool, ToolRegistry, type Tool, type ToolResult } from './tools.js';
+import { defineTool, ToolRegistry, type ExecutionContext, type Tool, type ToolEffect, type ToolResult } from './tools.js';
 import { TeamEnvelope, TeamMissionShape } from './team-contract.js';
 import type { HermesTeamCard } from './hermes-compat.js';
 
@@ -62,7 +62,50 @@ export type ArdentTaskPluginContext = ArdentPluginContext & {
   task: Task;
   envelope?: TeamEnvelope;
   baseTools: readonly Tool[];
+  /** Attribution for the causal tree this task belongs to, when one was supplied. Never grants access. */
+  execution?: ExecutionContext;
 };
+
+/** An authenticated, claimed channel message (a frozen copy). The text is not included. */
+export type ArdentChannelMessage = {
+  platform: 'telegram' | 'mattermost';
+  account: string;
+  update_id: string;
+  channel_type: string;
+  /** `<platform>:<account>:<user>`, the task caller for this message. */
+  caller: string;
+  /** `<platform>:<account>:<conversation>:<thread>`. */
+  session_key: string;
+  received_ms: number;
+  execution?: ExecutionContext;
+};
+/** A channel reply recorded for delivery (a frozen copy). */
+export type ArdentChannelDelivery = {
+  delivery_id: string;
+  task_id: string | null;
+  platform: 'telegram' | 'mattermost';
+  account: string;
+  update_id: string;
+  text: string;
+  /** 1: Ardent records a delivery once and never resends it automatically. */
+  attempt: number;
+};
+export type ArdentDeliveryOutcome = { state: 'sent' | 'failed' | 'unknown'; external_id: string | null };
+/** One model tool call after context scoping and argument validation (a frozen copy). */
+export type ArdentToolCall = {
+  task_id: string;
+  call_id: string;
+  name: string;
+  /** Validated arguments. */
+  arguments: unknown;
+  effect: ToolEffect;
+  /** `sha256("<task_id>:<call_id>")`, the key the tool receives. */
+  idempotency_key: string;
+  execution?: ExecutionContext;
+};
+/** The only result `beforeToolCall` may return. Anything else is ignored. */
+export type ArdentToolDenial = { deny: { code: string; message: string } };
+export type ArdentToolCancellation = { dispatched: boolean; effect: 'none' | 'unknown' };
 
 export type ArdentPromptInput = {
   prompt: string;
@@ -137,8 +180,22 @@ export interface ArdentPlugin {
   systemPrompt?(ctx: ArdentTaskPluginContext, input: ArdentPromptInput): Promise<string> | string;
   /** Restrict an already admitted memory read; this cannot grant another scope. */
   allowMemory?(ctx: ArdentTaskPluginContext, scope: 'private' | 'shared', projectId?: string): boolean;
-  /** Observe an actual tool result, retaining evidence within this task only. */
+  /** Observe an actual tool result, retaining evidence within this task only. A throw is journaled and ignored. */
   observeToolResult?(ctx: ArdentTaskPluginContext, name: string, result: ToolResult, evidence: TaskEvidence): void;
+  /** Observe a claimed channel message before any command or task handling. */
+  messageReceived?(ctx: ArdentPluginContext, message: ArdentChannelMessage): void | Promise<void>;
+  /** Observe a channel message once its task is accepted and bound to it. */
+  messagePersisted?(ctx: ArdentPluginContext, message: ArdentChannelMessage, task: Task): void | Promise<void>;
+  /** Rewrite a reply's text before it is recorded and sent (1 byte to 64 KiB). Any failure sends the original text. */
+  transformOutbound?(ctx: ArdentPluginContext, delivery: ArdentChannelDelivery): { text: string } | void | Promise<{ text: string } | void>;
+  /** Observe the recorded outcome of a channel delivery. */
+  messageDelivered?(ctx: ArdentPluginContext, delivery: ArdentChannelDelivery, outcome: ArdentDeliveryOutcome): void | Promise<void>;
+  /** Deny a validated tool call before it is invoked. A throw or a 5 s timeout denies it. */
+  beforeToolCall?(ctx: ArdentTaskPluginContext, call: ArdentToolCall): void | ArdentToolDenial | Promise<void | ArdentToolDenial>;
+  /** Observe a journaled tool result, successful or not. */
+  afterToolCall?(ctx: ArdentTaskPluginContext, call: ArdentToolCall, result: ToolResult): void | Promise<void>;
+  /** Clean up after a call stopped by cancellation, queued (`dispatched: false`) or in flight. */
+  toolCallCancelled?(ctx: ArdentTaskPluginContext, call: ArdentToolCall, outcome: ArdentToolCancellation): void | Promise<void>;
   /** Additional validation before terminal success; throwing prevents completion. */
   beforeFinish?(ctx: ArdentTaskPluginContext, input: ArdentCompletionInput): Promise<void> | void;
   /** Release per-task resources after execution, including failed/cancelled tasks. */
@@ -178,7 +235,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function assertPlugin(plugin: unknown, source: string): asserts plugin is ArdentPlugin {
   if (!isRecord(plugin) || typeof plugin.name !== 'string' || !pluginName.test(plugin.name))
     throw new Error(`Plugin ${source} must export an object with a lowercase name`);
-  for (const hook of ['registerTools', 'routes', 'jobHandlers', 'jobOwnership', 'peerTool', 'taskTools', 'filterTool', 'teamEnvelope', 'admitTeamEnvelope', 'channelAdapter', 'httpRoutes', 'systemPrompt', 'allowMemory', 'observeToolResult', 'beforeFinish', 'taskSettled', 'taskExecutor', 'inputImages', 'teamEvidence', 'teamCard', 'prepareGateway', 'start', 'drain', 'close'])
+  for (const hook of ['registerTools', 'routes', 'jobHandlers', 'jobOwnership', 'peerTool', 'taskTools', 'filterTool', 'teamEnvelope', 'admitTeamEnvelope', 'channelAdapter', 'httpRoutes', 'systemPrompt', 'allowMemory', 'observeToolResult', 'messageReceived', 'messagePersisted', 'transformOutbound', 'messageDelivered', 'beforeToolCall', 'afterToolCall', 'toolCallCancelled', 'beforeFinish', 'taskSettled', 'taskExecutor', 'inputImages', 'teamEvidence', 'teamCard', 'prepareGateway', 'start', 'drain', 'close'])
     if (plugin[hook] !== undefined && typeof plugin[hook] !== 'function')
       throw new Error(`Plugin ${plugin.name} hook ${hook} must be a function`);
   if (plugin.cliCommands !== undefined) {
@@ -344,4 +401,108 @@ export function pluginTaskTools(plugins: readonly ArdentPlugin[], ctx: ArdentTas
   const registry = new ToolRegistry();
   for (const tool of tools.values()) if (plugins.every(plugin => plugin.filterTool?.(ctx, tool) !== false)) registry.register(tool);
   return registry;
+}
+
+/** The longest a lifecycle hook may run before it counts as failed. */
+export const PLUGIN_HOOK_TIMEOUT_MS = 5_000;
+/** The largest text `transformOutbound` may return. */
+export const MAX_OUTBOUND_TEXT_BYTES = 64 * 1024;
+export type PluginHookName = 'observeToolResult' | 'messageReceived' | 'messagePersisted' | 'transformOutbound' | 'messageDelivered' | 'beforeToolCall' | 'afterToolCall' | 'toolCallCancelled';
+/** Records a failed hook (`plugin_hook_failed`); it must not throw. */
+export type PluginHookFailureSink = (plugin: string, hook: PluginHookName) => void;
+
+/** A deep-frozen copy, so a hook cannot change what the runtime keeps using. */
+export function frozenCopy<T>(value: T): T {
+  const copy = structuredClone(value);
+  const freeze = (item: unknown): void => {
+    if (!item || typeof item !== 'object' || Object.isFrozen(item)) return;
+    if (ArrayBuffer.isView(item)) return; // Typed arrays cannot be frozen; they are already copies.
+    Object.freeze(item);
+    for (const key of Reflect.ownKeys(item)) freeze(Reflect.get(item, key));
+  };
+  freeze(copy);
+  return copy;
+}
+
+async function bounded<T>(run: () => T | Promise<T>, timeoutMs = PLUGIN_HOOK_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(run),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Plugin hook timed out')), timeoutMs); })
+    ]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+/**
+ * Run one observer hook on every plugin, in registration order (reverse for
+ * cleanup). A throw, rejection or timeout is reported and never propagates.
+ */
+export async function runPluginObservers(plugins: readonly ArdentPlugin[], hook: PluginHookName,
+  invoke: (plugin: ArdentPlugin) => unknown, onFailure: PluginHookFailureSink, options: { reverse?: boolean } = {}): Promise<void> {
+  for (const plugin of options.reverse ? [...plugins].reverse() : plugins) {
+    if (typeof plugin[hook] !== 'function') continue;
+    try { await bounded(() => invoke(plugin)); }
+    catch { try { onFailure(plugin.name, hook); } catch { /* A failure record must not fail the caller. */ } }
+  }
+}
+
+/** Synchronous `observeToolResult`: a throw is reported and ignored. */
+export function observePluginToolResult(plugins: readonly ArdentPlugin[], ctx: ArdentTaskPluginContext, name: string,
+  result: ToolResult, evidence: TaskEvidence, onFailure: PluginHookFailureSink): void {
+  for (const plugin of plugins) {
+    if (!plugin.observeToolResult) continue;
+    try { plugin.observeToolResult(ctx, name, result, evidence); }
+    catch { try { onFailure(plugin.name, 'observeToolResult'); } catch { /* ignored */ } }
+  }
+}
+
+const denialCode = /^[A-Z][A-Z0-9_]{1,63}$/;
+/**
+ * Ask every plugin, in registration order, whether a validated call may run.
+ * The first denial wins. A throw, timeout or malformed denial denies the call.
+ */
+export async function pluginBeforeToolCall(plugins: readonly ArdentPlugin[], ctx: ArdentTaskPluginContext, call: ArdentToolCall,
+  onFailure: PluginHookFailureSink): Promise<{ plugin: string; code: string; message: string } | undefined> {
+  for (const plugin of plugins) {
+    const hook = plugin.beforeToolCall;
+    if (!hook) continue;
+    let verdict: unknown;
+    try { verdict = await bounded(() => hook.call(plugin, ctx, frozenCopy(call))); }
+    catch {
+      try { onFailure(plugin.name, 'beforeToolCall'); } catch { /* ignored */ }
+      return { plugin: plugin.name, code: 'TOOL_DENIED_BY_PLUGIN', message: `Plugin ${plugin.name} could not approve this call` };
+    }
+    if (!verdict || typeof verdict !== 'object' || !('deny' in verdict)) continue;
+    const parsed = z.object({ deny: z.object({ code: z.string().regex(denialCode), message: z.string().min(1).max(1000) }) }).safeParse(verdict);
+    return parsed.success ? { plugin: plugin.name, ...parsed.data.deny }
+      : { plugin: plugin.name, code: 'TOOL_DENIED_BY_PLUGIN', message: `Plugin ${plugin.name} denied this call` };
+  }
+  return undefined;
+}
+
+/**
+ * Chain `transformOutbound` in registration order. Any throw, timeout or
+ * invalid text (empty or over 64 KiB) fails closed to the original text.
+ */
+export async function pluginTransformOutbound(plugins: readonly ArdentPlugin[], ctx: ArdentPluginContext, delivery: ArdentChannelDelivery,
+  onFailure: PluginHookFailureSink): Promise<{ text: string; plugins: string[] }> {
+  let text = delivery.text;
+  const applied: string[] = [];
+  for (const plugin of plugins) {
+    const hook = plugin.transformOutbound;
+    if (!hook) continue;
+    let output: unknown;
+    try { output = await bounded(() => hook.call(plugin, ctx, frozenCopy({ ...delivery, text }))); }
+    catch { output = null; }
+    if (output === undefined) continue;
+    const parsed = z.object({ text: z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value) <= MAX_OUTBOUND_TEXT_BYTES) }).safeParse(output);
+    if (!parsed.success) {
+      try { onFailure(plugin.name, 'transformOutbound'); } catch { /* ignored */ }
+      return { text: delivery.text, plugins: [] };
+    }
+    if (parsed.data.text !== text) applied.push(plugin.name);
+    text = parsed.data.text;
+  }
+  return { text, plugins: applied };
 }
