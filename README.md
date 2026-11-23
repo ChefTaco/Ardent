@@ -286,6 +286,35 @@ before you install it; `ardent jobs definitions status` and
 windows. The built-in handler is `news.collect` (requires `research`); plugins
 add more.
 
+A window that asks to retry with `effect_status: "none"` waits
+`retry_backoff_seconds · 2^(attempt-1)` with equal jitter (a random delay
+between half and all of it), and only while the next attempt would start
+before the job's next window is due; otherwise it ends `failed` with
+`RETRY_DEADLINE`.
+
+### Retries
+
+Every retry site in Ardent names a policy in [`src/retry.ts`](src/retry.ts),
+built on the shared `@hivemagnus/hive-common/retry` helpers:
+
+| Site | Attempts | Backoff | Repeated when |
+|---|---|---|---|
+| llama.cpp completion and token count | 3 | 250 ms → 4 s, equal jitter; `Retry-After` (seconds or HTTP date) up to 10 s | transport error or 408/425/429/5xx before any response byte is read |
+| A2A Agent Card, Hermes team card, `getTask`, `listTasks`, extended card | 3 | 500 ms → 5 s, equal jitter | transport error or 408/425/429/5xx over HTTP |
+| A2A `SendMessage` | 3 | 500 ms → 5 s, equal jitter | as above, always with the same `messageId` |
+| A2A push delivery | 3 | `Retry-After` clamped to 1–5 s | 408/425/429/5xx (the callback did not accept the event) |
+| Telegram Bot API | 4 | Telegram's `retry_after`, capped at 60 s | 429 with `retry_after` |
+| Codex turns, tools with a possible effect | 1 | — | never |
+
+Nothing is repeated once its effect is uncertain, after any response byte was
+consumed (a stream that fails mid-way is not restarted), past the deadline
+(`RETRY_DEADLINE`; for model calls the task deadline and the request timeout),
+or when the response carries `x-hive-retry: exhausted` (the gateway already
+retried). Cancelling during a backoff wait ends the call at once. Model
+retries are journaled as `model_retry` task events
+(`{ step, operation, attempt, reason, delay_ms }`); A2A outbound calls,
+push deliveries and Telegram deliveries record `attempts` on their rows.
+
 ### Model policy
 
 An optional, owner-only `$ARDENT_HOME/model-policy/active.json` selects the

@@ -172,6 +172,44 @@ describe('profile-local job engine', () => {
     expect(f.calls()).toBe(2);
   });
 
+  it('jitters retry backoff and never schedules a retry past the window deadline', async () => {
+    let calls = 0;
+    const registry: JobRegistry = { 'test.v1': { input: z.object({ label: z.string() }), effect: 'none', run: async () => {
+      calls++;
+      return { state: 'retry', receipt: { effect_status: 'none', evidence: 'temporary source absence' } };
+    } } };
+    // Every 15 minutes with backoff 6 · 2^(n-1) minutes and four attempts allowed.
+    const definitions = { ...intervalBase, jobs: [{ ...intervalBase.jobs[0]!, policy: { max_attempts: 4, retry_backoff_seconds: 360 } }] };
+    const f = await fixture(definitions, registry);
+    const engine = new JobEngine(f.store.db, f.dir, 'assistant', registry, async () => {}, frozen, () => 0);
+    const due = new Date('2026-09-27T18:34:39.268Z');
+    expect((await engine.tick(due)).retry).toBe(1);
+    // Equal jitter at its bottom (random 0) halves the formula's delay: 3 minutes, not 6.
+    expect(f.store.db.prepare('SELECT state,next_attempt_ms FROM job_windows').get()).toEqual({ state: 'retry', next_attempt_ms: due.getTime() + 180_000 });
+    expect((await engine.tick(new Date(due.getTime() + 180_000))).retry).toBe(1);
+    expect(f.store.db.prepare('SELECT state,next_attempt_ms FROM job_windows').get()).toEqual({ state: 'retry', next_attempt_ms: due.getTime() + 540_000 });
+    // The third retry (at least 12 minutes after minute 9) would start after the next window is due at minute 15.
+    expect((await engine.tick(new Date(due.getTime() + 540_000))).retry).toBe(0);
+    const row = f.store.db.prepare('SELECT state,attempts,error FROM job_windows').get();
+    expect(row).toEqual({ state: 'failed', attempts: 3, error: 'RETRY_DEADLINE: the next attempt would start after the window deadline' });
+    expect(calls).toBe(3);
+    expect(f.store.db.prepare('SELECT count(*) AS count FROM job_attempts').get()).toEqual({ count: 3 });
+  });
+
+  it('stops cron window retries before the next matching window', async () => {
+    const registry: JobRegistry = { 'test.v1': { input: z.object({ label: z.string() }), effect: 'none', run: async () =>
+      ({ state: 'retry', receipt: { effect_status: 'none', evidence: 'temporary source absence' } }) } };
+    const definitions = { ...base, jobs: [{ ...base.jobs[0]!, schedule: { ...base.jobs[0]!.schedule, cron: '*/5 * * * *' },
+      policy: { max_attempts: 3, retry_backoff_seconds: 360 } }] };
+    const f = await fixture(definitions, registry);
+    const engine = new JobEngine(f.store.db, f.dir, 'assistant', registry, async () => {}, frozen, () => 0);
+    // At least 3 minutes after 09:05 still fits before 09:10; the next retry (6 minutes) does not.
+    expect((await engine.tick(new Date('2026-09-27T09:05:00Z'))).retry).toBe(1);
+    expect((await engine.tick(new Date('2026-09-27T09:08:00Z'))).retry).toBe(0);
+    expect(f.store.db.prepare("SELECT state,error FROM job_windows WHERE local_key LIKE '%T05:05'").get())
+      .toEqual({ state: 'failed', error: 'RETRY_DEADLINE: the next attempt would start after the window deadline' });
+  });
+
   it('recovers missed windows within the bounded horizon and persists retry receipts', async () => {
     let calls = 0;
     const registry: JobRegistry = { 'test.v1': { input: z.object({ label: z.string() }), effect: 'none', run: async () => {
@@ -286,7 +324,8 @@ describe('job engine clock and shutdown', () => {
     } } };
     const second = { ...base.jobs[0]!, id: '32eb4b7a04c2' };
     const f = await fixture({ ...base, jobs: [base.jobs[0]!, second] }, registry);
-    const engine = new JobEngine(f.store.db, f.dir, 'assistant', registry, async (_job, at) => { owned.push(at.getTime()); }, () => elapsed);
+    // Equal jitter at its top (random 1) keeps the backoff at the formula's full value.
+    const engine = new JobEngine(f.store.db, f.dir, 'assistant', registry, async (_job, at) => { owned.push(at.getTime()); }, () => elapsed, () => 1);
     const tickAt = new Date('2026-09-27T09:05:00Z');
     expect((await engine.tick(tickAt)).retry).toBe(2);
     const minutes = (count: number) => tickAt.getTime() + count * 60_000;

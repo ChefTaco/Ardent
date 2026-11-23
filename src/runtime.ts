@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { magnusControlEnabled, resolveReference, type ArdentConfig } from './config.js';
 import { ArtifactStore } from './artifacts.js';
 import { CodexHarnessBackend, compactWithCodex } from './codex.js';
-import { LlamaCppBackend, type ChatMessage } from './llamacpp.js';
+import { LlamaCppBackend, type ChatMessage, type LlamaRequestOptions } from './llamacpp.js';
 import { HiveMemClient } from './memory.js';
 import { registerMemoryTools } from './memory-tools.js';
 import { registerNewsTools } from './news.js';
@@ -378,6 +378,9 @@ export class ArdentRuntime {
         : this.config.providers.llamacpp;
       const llamaConfig = preview?.model ? { ...policyLlama, model: preview.model } : policyLlama;
       const llamaBackend = task.backend === 'llamacpp' ? new LlamaCppBackend(llamaConfig, env) : null;
+      // Model requests stop retrying at the task deadline, and each retry is journaled.
+      const llamaRequest = (step: number | null): LlamaRequestOptions => ({ deadlineMs: task.deadline_ms,
+        onRetry: retry => this.store.append(task.id, 'model_retry', { step, ...retry }) });
       const llamaCapabilities = llamaBackend ? await llamaBackend.discover() : null;
       if (llamaCapabilities?.modelListed === false) throw new Error('Configured llama.cpp model is absent from the discovered model list');
       const llamaInputBudget = llamaBackend ? Math.min(
@@ -398,7 +401,7 @@ export class ArdentRuntime {
         const prepared = await context.prepare(task, system, taskTools.schemas(task.context), modelPolicy, abort.signal,
           { apply: true, ...(maxInputTokens ? { maxInputTokens } : {}),
             ...(llamaBackend ? { countTokens: (messages: ChatMessage[]) =>
-              llamaBackend.countInputTokens(messages, taskTools.schemas(task.context), abort.signal) } : {}) });
+              llamaBackend.countInputTokens(messages, taskTools.schemas(task.context), abort.signal, llamaRequest(null)) } : {}) });
         system = String(prepared.messages[0]?.content ?? '');
         history = prepared.messages.slice(1);
         if (prepared.compacted) this.store.append(task.id, 'context_checkpoint_selected', prepared.status);
@@ -448,7 +451,7 @@ export class ArdentRuntime {
         await this.#awaitTeamAdmission(task.id, abort.signal);
         if (abort.signal.aborted) throw new Error('Task cancelled or deadline elapsed');
         const fitted = await fitModelMessages(messages, schemas, evidence.sourceIds, evidence.artifactIds,
-          llamaInputBudget!, contextLimitChars, (candidate, tools) => backend.countInputTokens(candidate, tools, abort.signal));
+          llamaInputBudget!, contextLimitChars, (candidate, tools) => backend.countInputTokens(candidate, tools, abort.signal, llamaRequest(step)));
         if (fitted.changed) {
           messages.splice(0, messages.length, ...fitted.messages);
           this.store.append(task.id, 'context_compacted', { omitted_transactions: fitted.omittedTransactions,
@@ -457,7 +460,7 @@ export class ArdentRuntime {
         this.store.append(task.id, 'model_input_budget', { step, input_tokens: fitted.inputTokens,
           max_input_tokens: fitted.maxInputTokens, tokenizer: fitted.tokenizer });
         this.store.append(task.id, 'model_started', { backend: task.backend, step });
-        const reply = await backend.complete(messages, schemas, abort.signal, true, chunk => onText?.(chunk, step), onBackendEvent);
+        const reply = await backend.complete(messages, schemas, abort.signal, true, chunk => onText?.(chunk, step), onBackendEvent, llamaRequest(step));
         this.store.append(task.id, 'model_result', { step, tool_calls: reply.toolCalls.map(call => call.function.name), usage: reply.usage ?? null, content_chars: reply.content.length, reasoning_chars: reply.reasoning?.length ?? 0 });
         if (reply.toolCalls.length === 0) {
           let answer = reply.content;
@@ -469,11 +472,11 @@ export class ArdentRuntime {
               const instruction = `Convert your preceding answer into one valid JSON object with keys: question, scope, as_of, findings, claims, contrary_evidence, coverage_gaps, artifact_ids, answer_markdown, and optionally source_assessments and team_result when a validated team mission was supplied. Return only JSON, no code fence or commentary. Use only these observed source IDs: ${JSON.stringify([...evidence.sourceIds])}. Use only these observed artifact IDs: ${JSON.stringify([...evidence.artifactIds])}. Claims and source assessments require observed source IDs. Classify source reporting as original, secondary, or unknown only with an explicit basis; do not infer independence from distinct URLs. If no sources were retrieved, use empty findings and claims and state the retrieval gap. Preserve uncertainty and do not invent evidence.`;
               const repairInput = await fitModelMessages([...messages, { role: 'assistant', content: answer },
                 { role: 'user', content: instruction }], [], evidence.sourceIds, evidence.artifactIds,
-                llamaInputBudget!, contextLimitChars, (candidate, tools) => backend.countInputTokens(candidate, tools, abort.signal));
+                llamaInputBudget!, contextLimitChars, (candidate, tools) => backend.countInputTokens(candidate, tools, abort.signal, llamaRequest(step)));
               this.store.append(task.id, 'model_input_budget', { step, repair: true,
                 input_tokens: repairInput.inputTokens, max_input_tokens: repairInput.maxInputTokens,
                 tokenizer: repairInput.tokenizer });
-              const repaired = await backend.complete(repairInput.messages, [], abort.signal, false);
+              const repaired = await backend.complete(repairInput.messages, [], abort.signal, false, undefined, undefined, llamaRequest(step));
               this.store.append(task.id, 'model_repair_result', { usage: repaired.usage ?? null, tool_calls: repaired.toolCalls.length, content_chars: repaired.content.length });
               if (repaired.toolCalls.length) throw new Error('Research repair attempted an unexpected tool call');
               answer = repaired.content;

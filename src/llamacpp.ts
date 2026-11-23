@@ -1,13 +1,48 @@
 import { z } from 'zod';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { ArdentConfig } from './config.js';
 import { resolveReference } from './config.js';
 import type { BackendEventSink } from './backend-events.js';
+import { AttemptError, isTransportError, responseFailure, retryWithPolicy, type RetryAttemptRecord } from './retry.js';
 
 export type ChatMessage = import('@hivemagnus/emberfold').ChatMessage;
 export type ModelToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
 export type ModelReply = { content: string; reasoning?: string; toolCalls: ModelToolCall[]; usage?: { promptTokens?: number; completionTokens?: number } };
 export type LlamaCapabilities = { modelListed: boolean | null; contextTokens: number | null; supportsTools: boolean | null; supportsReasoningEffort: boolean | null; sampling: { temperature: number | null; topP: number | null }; reasoningFormat: string | null; chatFormat: string | null };
+
+/** One repeated model request, for the task journal (`model_retry`). */
+export type ModelRetryEvent = { operation: 'complete' | 'count_tokens'; attempt: number; reason: string; delay_ms: number };
+/** Optional per-request settings for `complete` and `countInputTokens`. */
+export type LlamaRequestOptions = {
+  /**
+   * Extra outbound request headers (for example execution context). They never replace
+   * `Authorization`, `Content-Type` or `Accept`, and invalid names or values are dropped.
+   */
+  requestHeaders?: Record<string, string> | undefined;
+  /** Absolute epoch-ms deadline (the task deadline). No retry starts at or after it. */
+  deadlineMs?: number | undefined;
+  /** Called before each retry wait. */
+  onRetry?: ((event: ModelRetryEvent) => void) | undefined;
+  /** Test seams for backoff jitter and the clock. */
+  random?: (() => number) | undefined;
+  now?: (() => number) | undefined;
+};
+
+const PROTECTED_HEADERS = new Set(['authorization', 'content-type', 'accept']);
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
+/** Caller headers first, so the backend's own `Content-Type`, `Accept` and `Authorization` win. */
+export function mergeRequestHeaders(own: Record<string, string>, extra: Record<string, string> | undefined): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const [name, value] of Object.entries(extra ?? {})) {
+    if (typeof value !== 'string' || !HEADER_NAME.test(name) || PROTECTED_HEADERS.has(name.toLowerCase())) continue;
+    if (value.length > 8192 || /[\r\n\0]/.test(value)) continue;
+    merged[name] = value;
+  }
+  return { ...merged, ...own };
+}
+
+function retryObserver(operation: ModelRetryEvent['operation'], options: LlamaRequestOptions | undefined): (record: RetryAttemptRecord) => void {
+  return record => { if (record.delayMs !== null) options?.onRetry?.({ operation, attempt: record.attempt, reason: record.reason, delay_ms: record.delayMs }); };
+}
 
 export function llamaEndpoint(base: string, operation: 'chat/completions' | 'chat/completions/input_tokens' | 'models'): URL {
   const url = new URL(base);
@@ -60,20 +95,31 @@ export class NativeLlmBackend {
     this.#discovery ??= this.#discover();
     return this.#discovery;
   }
-  async countInputTokens(messages: ChatMessage[], tools: object[], signal: AbortSignal): Promise<number | null> {
+  async countInputTokens(messages: ChatMessage[], tools: object[], signal: AbortSignal, options?: LlamaRequestOptions): Promise<number | null> {
     const base = resolveReference(this.config.base_url, this.env);
     const model = resolveReference(this.config.model, this.env);
     if (!base || !model) throw new Error('llama.cpp endpoint/model is unconfigured');
     const token = this.env[this.config.api_key_env];
+    const endpoint = llamaEndpoint(base, 'chat/completions/input_tokens');
+    const headers = mergeRequestHeaders({ 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, options?.requestHeaders);
+    const body = JSON.stringify({ model, messages, tools });
     try {
-      const response = await fetch(llamaEndpoint(base, 'chat/completions/input_tokens'), {
-        method: 'POST', redirect: 'manual', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ model, messages, tools })
-      });
-      if (response.status === 404 || response.status === 405) return null;
-      if (!response.ok) throw new Error(`llama.cpp token count HTTP ${response.status}`);
-      return z.object({ input_tokens: z.number().int().nonnegative() }).parse(await response.json()).input_tokens;
+      // Counting has no effect, so a transient failure is repeated before the estimator takes over.
+      return await retryWithPolicy('llamacpp', async () => {
+        let response: Response;
+        try {
+          response = await fetch(endpoint, { method: 'POST', redirect: 'manual', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]), headers, body });
+        } catch (error: unknown) {
+          if (isTransportError(error)) throw new AttemptError('llama.cpp token count transport failed', { network: true }, { cause: error });
+          throw error;
+        }
+        if (response.status === 404 || response.status === 405) { await response.body?.cancel().catch(() => {}); return null; }
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          throw new AttemptError(`llama.cpp token count HTTP ${response.status}`, responseFailure(response, options?.now));
+        }
+        return z.object({ input_tokens: z.number().int().nonnegative() }).parse(await response.json()).input_tokens;
+      }, { signal, deadlineMs: options?.deadlineMs, effect: 'none', onAttempt: retryObserver('count_tokens', options), random: options?.random, now: options?.now });
     } catch (error: unknown) {
       if (signal.aborted) throw error;
       return null; // Older servers lack token counting; the bounded local estimator remains active.
@@ -107,11 +153,18 @@ export class NativeLlmBackend {
       sampling: { temperature: settings?.params?.temperature ?? null, topP: settings?.params?.top_p ?? null },
       reasoningFormat: settings?.params?.reasoning_format ?? null, chatFormat: settings?.params?.chat_format ?? null };
   }
-  async complete(messages: ChatMessage[], tools: object[], signal: AbortSignal, stream = true, onText?: (chunk: string) => void, onEvent?: BackendEventSink): Promise<ModelReply> {
+  /**
+   * One model call. A transport failure or a 408/425/429/5xx response is repeated under the
+   * `llamacpp` policy only before any response byte is consumed, never after the gateway says
+   * `x-hive-retry: exhausted`, and never past `options.deadlineMs` or the request timeout. A
+   * stream that fails after its first chunk is never repeated.
+   */
+  async complete(messages: ChatMessage[], tools: object[], signal: AbortSignal, stream = true, onText?: (chunk: string) => void, onEvent?: BackendEventSink, options?: LlamaRequestOptions): Promise<ModelReply> {
     const base = resolveReference(this.config.base_url, this.env);
     const model = resolveReference(this.config.model, this.env);
     if (!base || !model) throw new Error('llama.cpp endpoint/model is unconfigured');
     const endpoint = llamaEndpoint(base, 'chat/completions');
+    const startedMs = (options?.now ?? Date.now)();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.request_timeout_seconds * 1000);
     const abort = () => controller.abort();
@@ -123,26 +176,24 @@ export class NativeLlmBackend {
       if (this.config.reasoning_effort && capabilities?.supportsReasoningEffort !== true) throw new Error('llama.cpp reasoning effort is not advertised by the current chat template');
       if (tools.length && capabilities?.supportsTools === false) throw new Error('llama.cpp chat template does not support tools');
       onEvent?.({ kind: 'started', backend: 'llamacpp' });
-      let response: Response | undefined;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      const headers = mergeRequestHeaders({ 'Content-Type': 'application/json', Accept: stream ? 'text/event-stream' : 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, options?.requestHeaders);
+      const body = JSON.stringify({ model, messages, tools, stream, max_tokens: this.config.max_output_tokens ?? 4096, ...(this.config.reasoning_effort ? { reasoning_effort: this.config.reasoning_effort } : {}), ...(stream ? { stream_options: { include_usage: true } } : {}) });
+      // The request timeout bounds every attempt and wait together, so it is a deadline too.
+      const deadlineMs = Math.min(startedMs + this.config.request_timeout_seconds * 1000, options?.deadlineMs ?? Number.POSITIVE_INFINITY);
+      // A stop on a retryable failure keeps the message (`llama.cpp HTTP 429`) and adds why it stopped.
+      const response = await retryWithPolicy('llamacpp', async () => {
+        let attempt: Response;
         try {
-          response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: stream ? 'text/event-stream' : 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ model, messages, tools, stream, max_tokens: this.config.max_output_tokens ?? 4096, ...(this.config.reasoning_effort ? { reasoning_effort: this.config.reasoning_effort } : {}), ...(stream ? { stream_options: { include_usage: true } } : {}) }), redirect: 'manual', signal: controller.signal });
+          attempt = await fetch(endpoint, { method: 'POST', headers, body, redirect: 'manual', signal: controller.signal });
         } catch (error: unknown) {
-          if (attempt || controller.signal.aborted || signal.aborted) throw error;
-          await delay(200, undefined, { signal: controller.signal });
-          continue;
+          if (!controller.signal.aborted && isTransportError(error)) throw new AttemptError('llama.cpp transport failed before response', { network: true }, { cause: error });
+          throw error;
         }
-        if (attempt === 0 && (response.status === 429 || response.status === 503)) {
-          await response.body?.cancel();
-          const retryAfter = Number(response.headers.get('retry-after'));
-          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(2000, retryAfter * 1000) : 200;
-          await delay(waitMs, undefined, { signal: controller.signal });
-          continue;
-        }
-        break;
-      }
-      if (!response) throw new Error('llama.cpp transport failed before response');
-      if (!response.ok) throw new Error(`llama.cpp HTTP ${response.status}`);
+        if (attempt.ok) return attempt;
+        // The error body is discarded unread, so nothing of this response reaches the caller.
+        await attempt.body?.cancel().catch(() => {});
+        throw new AttemptError(`llama.cpp HTTP ${attempt.status}`, responseFailure(attempt, options?.now));
+      }, { signal: controller.signal, deadlineMs, effect: 'none', onAttempt: retryObserver('complete', options), random: options?.random, now: options?.now });
       if (!stream) {
         const raw: unknown = await response.json();
         const parsed = FullResponse.parse(raw);

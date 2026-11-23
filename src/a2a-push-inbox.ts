@@ -18,6 +18,8 @@ export class A2APushInbox {
       id TEXT PRIMARY KEY, outbound_id TEXT NOT NULL, task_id TEXT NOT NULL,
       event_json TEXT NOT NULL, received_ms INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS a2a_inbound_push_outbound ON a2a_inbound_push(outbound_id,received_ms);`);
+    const columns = z.array(z.object({ name: z.string() })).parse(db.pragma('table_info(a2a_outbound_calls)'));
+    if (!columns.some(column => column.name === 'attempts')) db.exec('ALTER TABLE a2a_outbound_calls ADD COLUMN attempts INTEGER');
   }
   register(peerId: string, messageId: string): { id: string; token: string; url: string } {
     if (!this.peers.some(peer => peer.enabled && peer.id === peerId)) throw new Error('A2A push peer is not configured');
@@ -37,6 +39,10 @@ export class A2APushInbox {
     const call = Outbound.parse(row);
     if (!taskId || taskId.length > 256 || (call.task_id && call.task_id !== taskId)) throw new Error('A2A callback task mismatch');
     this.db.prepare("UPDATE a2a_outbound_calls SET task_id=?,state='bound',updated_ms=? WHERE id=?").run(taskId, Date.now(), id);
+  }
+  /** How many SendMessage attempts the call took (all with the same messageId). */
+  recordAttempts(id: string, attempts: number): void {
+    this.db.prepare('UPDATE a2a_outbound_calls SET attempts=?,updated_ms=? WHERE id=?').run(attempts, Date.now(), id);
   }
   markFailed(id: string): void { this.db.prepare("UPDATE a2a_outbound_calls SET state='failed',updated_ms=? WHERE id=?").run(Date.now(), id); }
   /** Checks the callback token alone, so an unauthorized sender cannot make the server parse its body. */

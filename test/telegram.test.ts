@@ -251,6 +251,8 @@ describe('Telegram Bot API adapter', () => {
       expect(sent.length).toBe(3);
       expect(sent.every(part => part.length <= 3900)).toBe(true);
       expect(runtime.store.delivery('telegram', '999', '1')?.state).toBe('sent');
+      // Three parts plus the one rate-limited request.
+      expect(runtime.store.db.prepare("SELECT attempts FROM channel_deliveries WHERE platform='telegram'").get()).toEqual({ attempts: 4 });
     } finally { runtime.close(); }
   }, 5000);
   it('runs a real gateway against a Bot API fixture with research and document delivery', async () => {

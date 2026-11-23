@@ -4,6 +4,7 @@ import { open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type Database from './sqlite.js';
 import { z } from 'zod';
+import { backoffDelay, type RetryPolicy } from '@hivemagnus/hive-common/retry';
 
 const identifier = z.string().regex(/^[a-z][a-z0-9._-]{0,79}$/);
 const jobId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/);
@@ -56,6 +57,12 @@ const rowSchema = z.object({ window_key: z.string(), job_id: z.string(), local_k
   receipt_sha256: z.string().nullable(), error: z.string().nullable(), updated_ms: z.number().int() });
 export type JobWindow = z.infer<typeof rowSchema>;
 export type JobWindowStatus = Omit<JobWindow, 'receipt_json' | 'error'> & { error: string | null };
+
+/** A job's retry policy: `retry_backoff_seconds · 2^(n-1)`, uncapped as before, with equal jitter. */
+function jobRetryPolicy(job: JobDefinition): RetryPolicy {
+  const baseMs = job.policy.retry_backoff_seconds * 1000;
+  return { maxAttempts: job.policy.max_attempts, baseMs, maxMs: baseMs * 2 ** Math.max(0, job.policy.max_attempts - 1), jitter: 'equal' };
+}
 
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function encode(value: unknown): string {
@@ -141,7 +148,8 @@ export class JobEngine {
   #busy = false;
   /** `clock` measures elapsed time within a tick; the injected tick time stays the timeline origin. */
   constructor(readonly db: Database, readonly profileDir: string, readonly profile: string,
-    readonly registry: JobRegistry, readonly ownershipCheck: OwnershipCheck, readonly clock: () => number = () => Date.now()) {
+    readonly registry: JobRegistry, readonly ownershipCheck: OwnershipCheck, readonly clock: () => number = () => Date.now(),
+    readonly random: () => number = Math.random) {
     identifier.parse(profile);
     mkdirSync(join(profileDir, 'state', 'job-definition-releases'), { recursive: true, mode: 0o700 });
     db.exec(`CREATE TABLE IF NOT EXISTS job_windows (
@@ -367,15 +375,20 @@ export class JobEngine {
           const settledMs = result.state === 'completed' ? claimedAt.getTime() : finishedMs;
           const receiptJson = encode(result.receipt);
           const receiptSha = sha256(receiptJson);
-          const canRetry = result.state === 'retry' && result.receipt.effect_status === 'none' && attempt < job.policy.max_attempts;
+          // The existing formula (retry_backoff_seconds · 2^(n-1)) with equal jitter, and never past
+          // the window deadline: the next attempt must start before the job's next window is due.
+          const delay = result.state === 'retry' && result.receipt.effect_status === 'none'
+            ? backoffDelay(attempt, jobRetryPolicy(job), { deadlineMs: this.#windowDeadline(job, window, finishedMs), now: () => finishedMs, random: this.random }) : null;
+          const canRetry = delay !== null;
+          const pastDeadline = !canRetry && result.state === 'retry' && result.receipt.effect_status === 'none' && attempt < job.policy.max_attempts;
           const state = result.state === 'retry' ? canRetry ? 'retry' : result.receipt.effect_status === 'none' ? 'failed' : 'unknown' : result.state;
-          const delay = job.policy.retry_backoff_seconds * 1000 * Math.pow(2, attempt - 1);
           this.db.transaction(() => {
             this.db.prepare('INSERT INTO job_attempts(window_key,attempt,state,receipt_json,receipt_sha256,recorded_ms) VALUES (?,?,?,?,?,?)')
               .run(window.window_key, attempt, state, receiptJson, receiptSha, finishedMs);
             this.db.prepare('UPDATE job_windows SET state=?,next_attempt_ms=?,receipt_json=?,receipt_sha256=?,error=?,updated_ms=? WHERE window_key=? AND state=\'running\'')
               .run(state, canRetry ? finishedMs + delay : settledMs, receiptJson, receiptSha,
-                state === 'failed' ? 'handler failed or retry budget exhausted' : state === 'unknown' ? 'effect outcome unknown' : null,
+                state === 'failed' ? pastDeadline ? 'RETRY_DEADLINE: the next attempt would start after the window deadline' : 'handler failed or retry budget exhausted'
+                  : state === 'unknown' ? 'effect outcome unknown' : null,
                 settledMs, window.window_key);
           })();
           if (state === 'completed') completed++; else if (state === 'retry') retry++; else if (state === 'unknown') unknown++;
@@ -392,6 +405,20 @@ export class JobEngine {
         }
       } finally { this.#busy = false; }
     }
+  }
+  /**
+   * When a window's retries must stop: the job's next window. For an interval that is one period
+   * after the window; for cron, the next matching minute, searched only up to `horizonMs` plus the
+   * longest backoff (undefined when none falls inside, so no deadline applies).
+   */
+  #windowDeadline(job: JobDefinition, window: JobWindow, fromMs: number): number | undefined {
+    if ('kind' in job.schedule) return window.scheduled_ms + job.schedule.every_minutes * 60_000;
+    const cron = parseCron(job.schedule.cron);
+    const policy = jobRetryPolicy(job);
+    const limit = Math.max(fromMs, window.scheduled_ms) + policy.maxMs;
+    for (let minuteMs = Math.floor(window.scheduled_ms / 60_000) * 60_000 + 60_000; minuteMs <= limit; minuteMs += 60_000)
+      if (matches(cron, localParts(new Date(minuteMs), job.schedule.timezone))) return minuteMs;
+    return undefined;
   }
   #admissionFenced(): boolean {
     try { return Boolean(this.db.prepare('SELECT 1 FROM admission_fence WHERE singleton=1').get()); }
