@@ -7,13 +7,44 @@ import type { ArdentConfig } from './config.js';
 import { loadPeers, outboundTokenEnv } from './a2a-peers.js';
 import type { A2APushInbox } from './a2a-push-inbox.js';
 import { z } from 'zod';
+import { isTransportError, lastAttemptError, responseFailure, retryWithPolicy, type AttemptFailure, type RetryWithPolicyOptions } from './retry.js';
+
+/**
+ * What the last HTTP exchange of one A2A call looked like. The SDK reports failures as plain
+ * errors, so the fetch wrapper records the status, `Retry-After` and `x-hive-retry` it saw.
+ */
+export class WireObservation {
+  failure: AttemptFailure | undefined;
+  reset(): void { this.failure = undefined; }
+  classify = (): AttemptFailure | undefined => this.failure;
+}
+
+/**
+ * Repeat one A2A call under `policy`, keeping the SDK's own error when retrying stops.
+ * Only HTTP exchanges are observed; a gRPC failure is never repeated.
+ */
+async function retryA2A<T>(policy: 'a2a_read' | 'a2a_send', observation: WireObservation, operation: () => Promise<T>,
+  options: Pick<RetryWithPolicyOptions, 'signal' | 'onAttempt'> = {}): Promise<T> {
+  try {
+    return await retryWithPolicy(policy, async () => { observation.reset(); return operation(); },
+      { ...options, effect: policy === 'a2a_read' ? 'none' : 'idempotent', classify: observation.classify });
+  } catch (error: unknown) { throw lastAttemptError(error); }
+}
 
 export async function fetchHermesTeamCard(card: AgentCard, authorization: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const interfaceUrl = card.supportedInterfaces.find(item => item.protocolBinding.toUpperCase() === 'JSONRPC' && item.protocolVersion === '1.0')?.url;
   if (!interfaceUrl) throw new Error('Hermes peer has no JSON-RPC 1.0 interface');
   const url = new URL('/.well-known/hermes-team-card.json', interfaceUrl);
-  const response = await fetch(url, { redirect: 'manual', headers: { Authorization: authorization, Accept: 'application/json' }, signal: signal ?? AbortSignal.timeout(10_000) });
-  if (!response.ok) throw new Error(`Hermes team card HTTP ${response.status}`);
+  const observation = new WireObservation();
+  const response = await retryA2A('a2a_read', observation, async () => {
+    let attempt: Response;
+    try { attempt = await fetch(url, { redirect: 'manual', headers: { Authorization: authorization, Accept: 'application/json' }, signal: signal ?? AbortSignal.timeout(10_000) }); }
+    catch (error: unknown) { if (isTransportError(error)) observation.failure = { network: true }; throw error; }
+    if (attempt.ok) return attempt;
+    await attempt.body?.cancel().catch(() => {});
+    observation.failure = responseFailure(attempt);
+    throw new Error(`Hermes team card HTTP ${attempt.status}`);
+  }, signal ? { signal } : {});
   const encoded = await response.text();
   if (Buffer.byteLength(encoded) > 256_000) throw new Error('Hermes team card exceeds bound');
   const raw: unknown = JSON.parse(encoded);
@@ -22,7 +53,8 @@ export async function fetchHermesTeamCard(card: AgentCard, authorization: string
 
 export class ArdentA2AClient {
   constructor(readonly profileDir: string, readonly config: ArdentConfig, readonly env: NodeJS.ProcessEnv = process.env, readonly pushInbox?: A2APushInbox, readonly preferredTransports: string[] = ['JSONRPC', 'HTTP+JSON', 'GRPC']) {}
-  async open(peerId: string): Promise<{ card: AgentCard; client: Client; authorization: string }> {
+  /** Resolve the peer's card (retried as a read) and build a client whose HTTP exchanges are observed. */
+  async open(peerId: string, signal?: AbortSignal): Promise<{ card: AgentCard; client: Client; authorization: string; observation: WireObservation }> {
     const { peers } = await loadPeers(this.profileDir, this.config, this.env);
     const peer = peers.find(item => item.id === peerId && item.enabled);
     if (!peer) throw new Error(`A2A peer is not configured: ${peerId}`);
@@ -37,13 +69,21 @@ export class ArdentA2AClient {
       return parsed.hostname === base.hostname && !parsed.username && !parsed.password && !parsed.hash && allowedPorts.has(port) &&
         (grpc ? Boolean(parsed.port) : (base.protocol !== 'https:' || parsed.protocol === 'https:'));
     };
-    const safeFetch: typeof fetch = (input, init) => {
+    const observation = new WireObservation();
+    const safeFetch: typeof fetch = async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       if (!sameHost(url.href, false)) throw new Error('A2A peer card redirected to an unconfigured host or port');
-      return fetch(input, { ...init, redirect: 'manual', signal: init?.signal ?? AbortSignal.timeout(30000) });
+      try {
+        const response = await fetch(input, { ...init, redirect: 'manual', signal: init?.signal ?? AbortSignal.timeout(30000) });
+        observation.failure = response.ok ? undefined : responseFailure(response);
+        return response;
+      } catch (error: unknown) {
+        if (isTransportError(error)) observation.failure = { network: true };
+        throw error;
+      }
     };
     const resolver = new DefaultAgentCardResolver({ fetchImpl: safeFetch, legacyCompat: { enabled: true } });
-    const card = await resolver.resolve(peer.url);
+    const card = await retryA2A('a2a_read', observation, () => resolver.resolve(peer.url), signal ? { signal } : {});
     if (!card.supportedInterfaces.length) throw new Error('A2A peer card has no interfaces');
     for (const iface of card.supportedInterfaces) if (!sameHost(iface.url, iface.protocolBinding.toUpperCase() === 'GRPC')) throw new Error('A2A peer card advertises an unconfigured host');
     const factory = new ClientFactory(ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
@@ -51,7 +91,7 @@ export class ArdentA2AClient {
       transports: [new JsonRpcTransportFactory({ fetchImpl: safeFetch, legacyCompat: { enabled: true } }), new RestTransportFactory({ fetchImpl: safeFetch, legacyCompat: { enabled: true } }), new GrpcTransportFactory({ legacyCompat: { enabled: true }, grpcChannelCredentials: base.protocol === 'https:' ? credentials.createSsl() : credentials.createInsecure() })],
       preferredTransports: this.preferredTransports
     }));
-    return { card, client: await factory.createFromAgentCard(card), authorization: `Bearer ${token}` };
+    return { card, client: await factory.createFromAgentCard(card), authorization: `Bearer ${token}`, observation };
   }
   async teamControl(peerId: string, control: { version: '1.0'; action: string; key: string; payload: object }): Promise<Record<string, unknown>> {
     const { card, authorization } = await this.open(peerId);
@@ -91,22 +131,22 @@ export class ArdentA2AClient {
     return (await this.sendWithReceipt(peerId, prompt, signal, contextId, taskId)).result;
   }
   async getTask(peerId: string, id: string, historyLength?: number): Promise<Task> {
-    const { client, authorization } = await this.open(peerId);
-    return client.getTask({ tenant: '', id, ...(historyLength === undefined ? {} : { historyLength }) }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } });
+    const { client, authorization, observation } = await this.open(peerId);
+    return retryA2A('a2a_read', observation, () => client.getTask({ tenant: '', id, ...(historyLength === undefined ? {} : { historyLength }) }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } }));
   }
   async listTasks(peerId: string, pageSize = 50, pageToken = '', contextId = ''): Promise<ListTasksResponse> {
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('A2A page size must be 1 to 100');
-    const { client, authorization } = await this.open(peerId);
-    return client.listTasks({ tenant: '', contextId, status: TaskState.TASK_STATE_UNSPECIFIED, pageSize, pageToken, statusTimestampAfter: undefined }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } });
+    const { client, authorization, observation } = await this.open(peerId);
+    return retryA2A('a2a_read', observation, () => client.listTasks({ tenant: '', contextId, status: TaskState.TASK_STATE_UNSPECIFIED, pageSize, pageToken, statusTimestampAfter: undefined }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } }));
   }
   async cancelTask(peerId: string, id: string): Promise<Task> {
     const { client, authorization } = await this.open(peerId);
     return client.cancelTask({ tenant: '', id, metadata: undefined }, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } });
   }
   async extendedCard(peerId: string): Promise<AgentCard> {
-    const { card, client, authorization } = await this.open(peerId);
+    const { card, client, authorization, observation } = await this.open(peerId);
     if (!card.capabilities?.extendedAgentCard) throw new Error('A2A peer does not advertise an extended Agent Card');
-    return client.getAgentCard({ serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } });
+    return retryA2A('a2a_read', observation, () => client.getAgentCard({ serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' } }));
   }
   async *subscribe(peerId: string, id: string, signal?: AbortSignal): AsyncGenerator<StreamResponse> {
     const { client, authorization } = await this.open(peerId);
@@ -120,22 +160,28 @@ export class ArdentA2AClient {
   }
   async sendWithReceipt(peerId: string, prompt: string, signal?: AbortSignal, contextId?: string, taskId?: string): Promise<{ result: SendMessageResult; outboundId?: string }> {
     if (!prompt.trim() || prompt.length > 16000) throw new Error('A2A prompt must be 1 to 16000 characters');
-    const { card, client, authorization } = await this.open(peerId);
+    const { card, client, authorization, observation } = await this.open(peerId, signal);
     const message: Message = { messageId: randomUUID(), contextId: contextId ?? '', taskId: taskId ?? '', role: Role.ROLE_USER, parts: [{ content: { $case: 'text', value: prompt }, metadata: undefined, filename: '', mediaType: 'text/plain' }], metadata: {}, extensions: [], referenceTaskIds: [] };
     const registered = this.pushInbox && card.capabilities?.pushNotifications ? this.pushInbox.register(peerId, message.messageId) : undefined;
     const request: SendMessageRequest = { tenant: '', message, configuration: registered ? {
       acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: false,
       taskPushNotificationConfig: { tenant: '', id: '', taskId: '', url: registered.url, token: registered.token, authentication: undefined }
     } : undefined, metadata: undefined };
+    let attempts = 0;
     try {
-      const result = await client.sendMessage(request, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' }, ...(signal ? { signal } : {}) });
+      // Every attempt sends the same request, so the same messageId: the peer deduplicates on it.
+      const result = await retryA2A('a2a_send', observation, () => {
+        attempts++;
+        return client.sendMessage(request, { serviceParameters: { Authorization: authorization, 'A2A-Version': '1.0' }, ...(signal ? { signal } : {}) });
+      }, signal ? { signal } : {});
+      if (registered) this.pushInbox?.recordAttempts(registered.id, attempts);
       if (registered) {
         if ('id' in result && typeof result.id === 'string') this.pushInbox?.bind(registered.id, result.id);
         else this.pushInbox?.markFailed(registered.id);
       }
       return { result, ...(registered ? { outboundId: registered.id } : {}) };
     } catch (error: unknown) {
-      if (registered) this.pushInbox?.markFailed(registered.id);
+      if (registered) { this.pushInbox?.recordAttempts(registered.id, attempts); this.pushInbox?.markFailed(registered.id); }
       throw error;
     }
   }

@@ -72,8 +72,8 @@ describe('A2A push notifications', () => {
       expect(calls).toBe(2);
       await sender.send(event, caller);
       expect(calls).toBe(2);
-      const state = tasks.db.prepare('SELECT state,http_status FROM a2a_push_deliveries').get() as { state: string; http_status: number };
-      expect(state).toEqual({ state: 'sent', http_status: 200 });
+      const state = tasks.db.prepare('SELECT state,http_status,attempts FROM a2a_push_deliveries').get() as { state: string; http_status: number };
+      expect(state).toEqual({ state: 'sent', http_status: 200, attempts: 2 });
       await store.delete('task-1', caller, config.id);
       expect(await store.load('task-1', caller)).toHaveLength(0);
     } finally { tasks.close(); }
@@ -164,6 +164,38 @@ describe('A2A push notifications', () => {
       surface.pushInbox.bind(inbound.id, 'remote-task-1');
     } finally { savedConfigs.mockRestore(); await surface?.pushSender.drain(); runtime.close(); }
   });
+  it('repeats a callback that answered 5xx and records it as unknown once the attempts are spent', async () => {
+    let calls = 0;
+    let failUntil = 1;
+    const server = createServer((_request, response) => {
+      calls++;
+      response.writeHead(calls <= failUntil ? 503 : 200).end();
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No callback port');
+    const base = `http://127.0.0.1:${address.port}`;
+    const dir = await mkdtemp(join(tmpdir(), 'ardent-push-5xx-'));
+    dirs.push(dir);
+    const tasks = new TaskStore(join(dir, 'state', 'ardent.sqlite'));
+    try {
+      const peer: PeerConfig = { id: 'coordinator', url: base, token_env: 'COORDINATOR_TOKEN', enabled: true, transport_ports: [], callback_ports: [], allow_private_callbacks: true };
+      const store = new SqliteA2APushStore(tasks.db, [peer]);
+      const caller = new ServerCallContext({ tenant: 'team', user: { isAuthenticated: true, userName: 'coordinator' }, requestedVersion: '1.0' });
+      await store.save('task-1', caller, { tenant: 'team', id: 'cb', taskId: 'task-1', url: `${base}/callback`, token: 'callback-secret', authentication: undefined });
+      const sender = new SafeA2APushSender(store);
+      const event = (state: TaskState): StreamResponse => ({ payload: { $case: 'statusUpdate', value: { taskId: 'task-1', contextId: 'context-1', status: { state, timestamp: new Date().toISOString(), message: undefined }, metadata: undefined } } });
+      await sender.send(event(TaskState.TASK_STATE_WORKING), caller);
+      expect(calls).toBe(2);
+      calls = 0;
+      failUntil = 3;
+      await sender.send(event(TaskState.TASK_STATE_COMPLETED), caller);
+      expect(calls).toBe(3);
+      expect(tasks.db.prepare('SELECT state,http_status,attempts FROM a2a_push_deliveries ORDER BY created_ms,rowid').all()).toEqual([
+        { state: 'sent', http_status: 200, attempts: 2 }, { state: 'unknown', http_status: 503, attempts: 3 }]);
+    } finally { tasks.close(); }
+  }, 15_000);
   it('receives authenticated callbacks for an outbound client call and binds them to the returned task', async () => {
     const model = createServer((request, response) => {
       if (request.url !== '/v1/chat/completions') { response.writeHead(404).end(); return; }

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- One retry policy model (`src/retry.ts`, on `@hivemagnus/hive-common/retry`) covers llama.cpp, the A2A client, A2A push delivery, Telegram and scheduled jobs. See README "Retries".
+- llama.cpp: completions and token counts make up to 3 attempts (250 ms → 4 s with jitter), honour `Retry-After` as seconds or an HTTP date up to 10 s, stop at the task deadline, never repeat after `x-hive-retry: exhausted`, and journal each retry as a `model_retry` event. They used to make 2 attempts with a 200 ms wait or a numeric `Retry-After` capped at 2 s.
+- A2A client: card fetches and task reads, and `SendMessage` with the same `messageId`, are repeated on transport errors and 429/5xx. `a2a_outbound_calls.attempts` records the send attempts.
+- A2A push: a callback answering 5xx is repeated like a 429. `a2a_push_deliveries.attempts` records the attempts.
+- Telegram: `channel_deliveries.attempts` records the Bot API requests a delivery made.
+- Jobs: retry backoff has equal jitter, and a retry is not scheduled past the job's next window (`RETRY_DEADLINE`).
+- `LlamaCppBackend.complete` and `countInputTokens` take an optional trailing options object: `requestHeaders`, `deadlineMs` and `onRetry`.
+
 ## 3.1.4 - 2026-11-17
 
 ### Changed

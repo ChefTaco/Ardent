@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ArdentRuntime } from './runtime.js';
 import type { JobEngine } from './job-engine.js';
 import { ChannelCore, DeliveryRejectedError, type ChannelEvent, type ChannelReply } from './channels.js';
+import { AttemptError, lastAttemptError, retryWithPolicy } from './retry.js';
 
 const User = z.object({ id: z.number().int(), is_bot: z.boolean().default(false), username: z.string().optional() }).passthrough();
 const Document = z.object({ file_id: z.string(), file_name: z.string().default('attachment'), mime_type: z.string().default('application/octet-stream'), file_size: z.number().int().nonnegative().optional() }).passthrough();
@@ -46,34 +47,45 @@ export class TelegramAdapter {
     this.#base = baseUrl.replace(/\/$/, '');
     this.#core = new ChannelCore(runtime, env, jobs);
   }
-  async #call(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal): Promise<unknown> {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const response = await fetch(`${this.#base}/bot${this.#token}/${method}`, {
-        method: 'POST',
-        ...(body instanceof FormData ? {} : { headers: { 'Content-Type': 'application/json' } }),
-        body: body instanceof FormData ? body : JSON.stringify(body),
-        ...(signal ? { signal } : {}),
-        redirect: 'error'
-      });
-      const parsed = Envelope.parse(await response.json());
-      if (response.status === 409 || parsed.error_code === 409) {
-        this.#consumerConflict = true;
-        throw new TelegramConflictError(`Telegram consumer conflict: ${parsed.description ?? 'another poller or webhook owns the bot'}`);
-      }
-      if (response.status === 429 && parsed.parameters?.retry_after && attempt < 3) {
-        // The abortable timer removes its listener, so a long-lived signal does not accumulate them.
-        await sleep(Math.min(parsed.parameters?.retry_after ?? 1, 60) * 1000, undefined, signal ? { signal } : {})
-          .catch(() => { throw new Error('Telegram retry aborted'); });
-        continue;
-      }
-      if (!response.ok || !parsed.ok) {
-        const message = `Telegram ${method} failed: ${parsed.description ?? response.status}`;
-        if (response.status >= 400 && response.status < 500) throw new DeliveryRejectedError(message);
-        throw new Error(message);
-      }
-      return parsed.result;
+  /**
+   * One Bot API call. A 429 that carries `retry_after` was not accepted, so it is repeated under
+   * the `telegram` policy (4 attempts, the wait capped at 60 s). `onAttempt` counts requests.
+   */
+  async #call(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal, onAttempt?: () => void): Promise<unknown> {
+    let waiting = false;
+    try {
+      return await retryWithPolicy('telegram', async () => {
+        waiting = false;
+        onAttempt?.();
+        const response = await fetch(`${this.#base}/bot${this.#token}/${method}`, {
+          method: 'POST',
+          ...(body instanceof FormData ? {} : { headers: { 'Content-Type': 'application/json' } }),
+          body: body instanceof FormData ? body : JSON.stringify(body),
+          ...(signal ? { signal } : {}),
+          redirect: 'error'
+        });
+        const parsed = Envelope.parse(await response.json());
+        if (response.status === 409 || parsed.error_code === 409) {
+          this.#consumerConflict = true;
+          throw new TelegramConflictError(`Telegram consumer conflict: ${parsed.description ?? 'another poller or webhook owns the bot'}`);
+        }
+        if (!response.ok || !parsed.ok) {
+          const message = `Telegram ${method} failed: ${parsed.description ?? response.status}`;
+          const rejected = response.status >= 400 && response.status < 500 ? new DeliveryRejectedError(message) : new Error(message);
+          const retryAfter = parsed.parameters?.retry_after;
+          // Only a 429 with Telegram's own `retry_after` is a definite refusal worth repeating.
+          if (response.status === 429 && retryAfter)
+            throw new AttemptError(message, { status: 429, retryAfterMs: Math.min(retryAfter, 60) * 1000 }, { cause: rejected });
+          throw rejected;
+        }
+        return parsed.result;
+      }, { effect: 'none', ...(signal ? { signal } : {}), onAttempt: record => { waiting = record.delayMs !== null; } });
+    } catch (error: unknown) {
+      // The abortable wait removes its listener, so a long-lived signal does not accumulate them.
+      if (waiting && signal?.aborted) throw new Error('Telegram retry aborted', { cause: error });
+      const last = lastAttemptError(error);
+      throw last instanceof AttemptError && last.cause instanceof Error ? last.cause : last;
     }
-    throw new Error(`Telegram ${method} retry limit reached`);
   }
   async initialize(signal?: AbortSignal): Promise<{ botId: number; username: string | null }> {
     const me = User.parse(await this.#call('getMe', {}, signal));
@@ -212,17 +224,20 @@ export class TelegramAdapter {
     const initialTyping = showTyping();
     const typing = setInterval(() => { void showTyping(); }, 4000);
     try {
-      const operation = this.#core.handle(event, async reply => { await initialTyping; return this.#deliver(message, reply, signal); });
+      const operation = this.#core.handle(event, async reply => { await initialTyping; return this.#deliver(message, reply, signal, event); });
       ready();
       await operation;
     } finally { clearInterval(typing); }
   }
-  async #deliver(message: z.infer<typeof Message>, reply: ChannelReply, signal?: AbortSignal): Promise<string | null> {
+  async #deliver(message: z.infer<typeof Message>, reply: ChannelReply, signal: AbortSignal | undefined, event: ChannelEvent): Promise<string | null> {
     const common = { chat_id: message.chat.id, reply_parameters: { message_id: message.message_id }, ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }) };
     let last: string | null = null;
+    // Every Bot API request this delivery made, retries included, lands on its delivery row.
+    let attempts = 0;
+    const counted = () => { attempts++; };
     try {
       for (const part of splitText(reply.text)) {
-        const response = Message.parse(await this.#call('sendMessage', { ...common, text: part }, signal));
+        const response = Message.parse(await this.#call('sendMessage', { ...common, text: part }, signal, counted));
         last = String(response.message_id);
       }
       for (const [index, id] of reply.artifactIds.slice(0, 2).entries()) {
@@ -232,12 +247,14 @@ export class TelegramAdapter {
         form.set('reply_parameters', JSON.stringify({ message_id: message.message_id }));
         if (message.message_thread_id !== undefined) form.set('message_thread_id', String(message.message_thread_id));
         form.set('document', new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' }), index === 0 ? 'research-brief.json' : 'research-brief.md');
-        const response = Message.parse(await this.#call('sendDocument', form, signal));
+        const response = Message.parse(await this.#call('sendDocument', form, signal, counted));
         last = String(response.message_id);
       }
     } catch (error: unknown) {
       if (last) throw new Error(`Telegram delivery may be partial: ${error instanceof Error ? error.message : 'unknown error'}`);
       throw error;
+    } finally {
+      this.runtime.store.recordDeliveryAttempts(event.platform, event.account, event.update_id, attempts);
     }
     return last;
   }

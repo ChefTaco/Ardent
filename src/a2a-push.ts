@@ -6,6 +6,7 @@ import { RequestMalformedError } from '@a2a-js/sdk/errors';
 import type { PushNotificationSender, PushNotificationStore, ServerCallContext, StoredPushNotificationConfig } from '@a2a-js/sdk/server';
 import { z } from 'zod';
 import type { PeerConfig } from './a2a-peers.js';
+import { AttemptError, lastAttemptError, responseFailure, retryWithPolicy } from './retry.js';
 
 const Row = z.object({ config_json: z.string(), wire_version: z.string() });
 const Delivery = z.object({ state: z.enum(['queued', 'sent', 'failed', 'unknown']) });
@@ -44,6 +45,7 @@ export class SqliteA2APushStore implements PushNotificationStore {
       CREATE INDEX IF NOT EXISTS a2a_push_delivery_task ON a2a_push_deliveries(task_id,tenant,caller);`);
     const columns = z.array(z.object({ name: z.string() })).parse(db.pragma('table_info(a2a_push_deliveries)'));
     if (!columns.some(column => column.name === 'error')) db.exec('ALTER TABLE a2a_push_deliveries ADD COLUMN error TEXT');
+    if (!columns.some(column => column.name === 'attempts')) db.exec('ALTER TABLE a2a_push_deliveries ADD COLUMN attempts INTEGER');
     db.prepare("UPDATE a2a_push_deliveries SET state='unknown',updated_ms=? WHERE state='queued'").run(Date.now());
   }
   async save(taskId: string, context: ServerCallContext, config: TaskPushNotificationConfig): Promise<void> {
@@ -90,8 +92,9 @@ export class SqliteA2APushStore implements PushNotificationStore {
     const row = this.db.prepare('SELECT state FROM a2a_push_deliveries WHERE id=?').get(id);
     return row ? Delivery.parse(row).state : undefined;
   }
-  setDelivery(id: string, state: 'sent' | 'failed' | 'unknown', httpStatus?: number, error?: string): void {
-    this.db.prepare('UPDATE a2a_push_deliveries SET state=?,http_status=?,error=?,updated_ms=? WHERE id=?').run(state, httpStatus ?? null, error?.slice(0, 300) ?? null, Date.now(), id);
+  setDelivery(id: string, state: 'sent' | 'failed' | 'unknown', httpStatus?: number, error?: string, attempts?: number): void {
+    this.db.prepare('UPDATE a2a_push_deliveries SET state=?,http_status=?,error=?,attempts=COALESCE(?,attempts),updated_ms=? WHERE id=?')
+      .run(state, httpStatus ?? null, error?.slice(0, 300) ?? null, attempts ?? null, Date.now(), id);
   }
 }
 
@@ -127,20 +130,27 @@ export class SafeA2APushSender implements PushNotificationSender {
         const headers: Record<string, string> = { 'Content-Type': 'application/a2a+json', 'A2A-Version': '1.0' };
         if (config.authentication) headers['Authorization'] = `${config.authentication.scheme} ${config.authentication.credentials}`;
         else if (config.token) headers['X-A2A-Notification-Token'] = config.token;
+        // A 429 or 5xx means the callback did not accept the event, so it is repeated under the
+        // `a2a_push` policy with `Retry-After` clamped to 1–5 s. A transport failure or timeout
+        // may have been accepted and is recorded as unknown, never repeated.
+        let attempts = 0;
         try {
-          for (let attempt = 0; attempt < 3; attempt++) {
+          const response = await retryWithPolicy('a2a_push', async () => {
+            attempts++;
             this.beforeDelivery?.(taskId);
-            const response = await fetch(config.url, { method: 'POST', headers, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
-            if (response.ok) { this.store.setDelivery(id, 'sent', response.status); break; }
-            if (response.status === 429 && attempt < 2) {
-              const seconds = Number(response.headers.get('retry-after') ?? '1');
-              await new Promise<void>(resolve => setTimeout(resolve, Number.isFinite(seconds) ? Math.min(5, Math.max(1, seconds)) * 1000 : 1000));
-              continue;
-            }
-            this.store.setDelivery(id, response.status >= 500 ? 'unknown' : 'failed', response.status);
-            break;
-          }
-        } catch (error: unknown) { this.store.setDelivery(id, error instanceof DeliveryVetoError ? 'failed' : 'unknown', undefined, error instanceof Error ? error.message : 'Callback outcome unknown'); }
+            const attempt = await fetch(config.url, { method: 'POST', headers, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
+            if (attempt.ok) return attempt;
+            await attempt.body?.cancel().catch(() => {});
+            const failure = responseFailure(attempt);
+            throw new AttemptError(`A2A push callback HTTP ${attempt.status}`, { ...failure, retryAfterMs: Math.min(5000, Math.max(1000, failure.retryAfterMs ?? 1000)) });
+          }, { effect: 'idempotent' });
+          this.store.setDelivery(id, 'sent', response.status, undefined, attempts);
+        } catch (raw: unknown) {
+          const error = lastAttemptError(raw);
+          if (error instanceof AttemptError && error.failure.status !== undefined)
+            this.store.setDelivery(id, error.failure.status >= 500 ? 'unknown' : 'failed', error.failure.status, undefined, attempts);
+          else this.store.setDelivery(id, error instanceof DeliveryVetoError ? 'failed' : 'unknown', undefined, error instanceof Error ? error.message : 'Callback outcome unknown', attempts);
+        }
       }
     });
     this.#chains.set(taskId, next);

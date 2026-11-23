@@ -92,6 +92,8 @@ export class TaskStore {
     this.db.exec(`CREATE INDEX IF NOT EXISTS tasks_caller_created ON tasks(caller, created_ms);
       CREATE INDEX IF NOT EXISTS tasks_session_created ON tasks(session_id, created_ms);
       CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state);`);
+    const deliveryColumns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(channel_deliveries)'));
+    if (!deliveryColumns.some(column => column.name === 'attempts')) this.db.exec('ALTER TABLE channel_deliveries ADD COLUMN attempts INTEGER');
     const inboundColumns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(channel_inbound)'));
     if (!inboundColumns.some(column => column.name === 'channel_type')) this.db.exec(`ALTER TABLE channel_inbound ADD COLUMN
       channel_type TEXT NOT NULL DEFAULT 'unknown' CHECK(channel_type IN
@@ -270,6 +272,10 @@ export class TaskStore {
     const id = randomUUID();
     this.db.prepare('INSERT OR IGNORE INTO channel_deliveries(id,platform,account,update_id,task_id,state,external_id,error,created_ms,updated_ms) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, platform, account, updateId, taskId, 'queued', null, null, Date.now(), Date.now());
     return this.delivery(platform, account, updateId)?.id ?? id;
+  }
+  /** Provider requests a channel delivery made, retries included. */
+  recordDeliveryAttempts(platform: string, account: string, updateId: string, attempts: number): void {
+    this.db.prepare('UPDATE channel_deliveries SET attempts=? WHERE platform=? AND account=? AND update_id=?').run(attempts, platform, account, updateId);
   }
   setDelivery(id: string, state: 'sent' | 'failed' | 'unknown', externalId: string | null = null, error: string | null = null): void {
     this.db.prepare('UPDATE channel_deliveries SET state=?,external_id=?,error=?,updated_ms=? WHERE id=?').run(state, externalId, error, Date.now(), id);
