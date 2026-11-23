@@ -384,6 +384,7 @@ built on the shared `@hivemagnus/hive-common/retry` helpers:
 | A2A push delivery | 3 | `Retry-After` clamped to 1–5 s | 408/425/429/5xx (the callback did not accept the event) |
 | Telegram Bot API | 4 | Telegram's `retry_after`, capped at 60 s | 429 with `retry_after` |
 | Mattermost/ChatterMost REST | 3 | `Retry-After` up to 60 s (1 s without one) | 429 only (the request was not processed) |
+| Artifact transfer pull (import) | 5 | 500 ms → 8 s, equal jitter; `Retry-After` up to 30 s | transport error, a dropped response or 408/425/429/5xx; each attempt resumes from the retained bytes with `Range` and `If-Range` |
 | Codex turns, tools with a possible effect | 1 | — | never |
 
 Nothing is repeated once its effect is uncertain, after any response byte was
@@ -524,7 +525,8 @@ max_bytes)`, and appends to `<profile>/artifacts/.partial/<import id>`, committi
 `received_bytes` after an fsync every 4 MiB. After an interruption or restart it
 re-hashes the retained bytes as a stream and asks for the rest with `Range` and
 `If-Range`; the gateway resumes unfinished imports when it starts. Transport
-failures are retried with backoff within the import's deadline. The final
+failures are retried under the `artifact_transfer` policy (see [Retries](#retries))
+within the import's deadline; `attempts` counts runs and retries. The final
 SHA-256 and size are verified: on `DIGEST_MISMATCH` the partial file is deleted,
 nothing is registered and nothing is retried until an operator reissues the
 import (`POST` again). The verified file is renamed into the content store (an

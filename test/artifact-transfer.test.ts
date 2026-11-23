@@ -263,6 +263,42 @@ describe('artifact transfer v2 between two runtimes', () => {
     expect(await sha256File(join(sink.dir, 'artifacts', exported.manifest_1_1.sha256))).toBe(exported.manifest_1_1.sha256);
   }, 120_000);
 
+  it('retries a busy peer and a dropped response within one run, continuing from the retained bytes', async () => {
+    const size = 6 * MiB;
+    const source = await exporter({ 'item:pdf': { name: 'drop.pdf', mime: 'application/pdf', size } });
+    const { task, exportOf } = await deliver(source.origin, ['item:pdf']);
+    const exported = exportOf('drop.pdf');
+    const sink = await receiver(source.origin);
+    let calls = 0;
+    const flaky: typeof fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.includes('/team/artifacts/')) return fetch(input, init);
+      calls++;
+      if (calls === 1) return new Response('busy', { status: 503, headers: { 'Retry-After': '0' } });
+      const response = await fetch(input, init);
+      if (calls !== 2 || !response.body) return response;
+      // Cut the second response after 2 MiB, as a dropped connection would.
+      let passed = 0;
+      const cut = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ transform(part, controller) {
+        passed += part.byteLength;
+        if (passed > 2 * MiB) controller.error(new TypeError('terminated'));
+        else controller.enqueue(part);
+      } }));
+      return new Response(cut, { status: response.status, headers: response.headers });
+    };
+    const transfers = new ArtifactTransfers(sink.runtime, env, { retryPolicy: fast, fetch: flaky, commitBytes: 512 * 1024 });
+    const pending = transfers.request({ peer_id: 'exporter', a2a_task_id: task.id, artifact_id: exported.manifest_1_1.artifact_id });
+    source.requests.splice(0);
+    const result = await transfers.run(pending.import_id);
+    expect(result).toMatchObject({ state: 'completed', received_bytes: size, attempts: 3 });
+    expect(source.requests).toHaveLength(2);
+    expect(source.requests[0]?.headers.range).toBe('bytes=0-');
+    const resumedAt = Number(/^bytes=(\d+)-$/.exec(String(source.requests[1]?.headers.range))?.[1]);
+    expect(resumedAt).toBeGreaterThan(0);
+    expect(resumedAt).toBeLessThanOrEqual(2 * MiB);
+    expect(await sha256File(join(sink.dir, 'artifacts', exported.manifest_1_1.sha256))).toBe(exported.manifest_1_1.sha256);
+  }, 60_000);
+
   it('rejects a byte flipped on the server mid-transfer and registers nothing', async () => {
     const size = 8 * MiB;
     const source = await exporter({ 'item:pdf': { name: 'flip.pdf', mime: 'application/pdf', size } });

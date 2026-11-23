@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { TaskState, type AgentCard, type Task } from '@a2a-js/sdk';
 import { ARTIFACT_TRANSFER_ERRORS, ARTIFACT_TRANSFER_V1_MAX_BYTES, ARTIFACT_TRANSFER_V2_MEDIA_TYPE, ARTIFACT_TRANSFER_V2_URN,
   parseReprDigest } from '@hivemagnus/hive-common/artifact';
-import { retry, RetryExhaustedError, type RetryPolicy } from '@hivemagnus/hive-common/retry';
+import type { RetryPolicy } from '@hivemagnus/hive-common/retry';
+import { responseFailure, RetryStoppedError, retryWithPolicy, type AttemptFailure } from './retry.js';
 import { ArdentA2AClient } from './a2a-client.js';
 import { ARTIFACT_MIME_TYPES, ArtifactManifest11Schema, ArtifactMimeSchema, artifactContentInspector, manifestV11, TeamArtifactManifestSchema,
   type ArtifactManifest11 } from './artifact-manifests.js';
@@ -38,7 +39,14 @@ export type ArtifactImport = z.infer<typeof ArtifactImportSchema>;
 
 /** A transfer outcome. `retryable` failures are transport problems a resumed attempt may get past. */
 export class ArtifactTransferError extends Error {
-  constructor(message: string, readonly code: string, readonly retryable = false) { super(message); this.name = 'ArtifactTransferError'; }
+  /** What a retryable failure tells the retry policy (a transport error unless a response said otherwise). */
+  readonly failure: AttemptFailure | undefined;
+  constructor(message: string, readonly code: string, retryable: boolean | AttemptFailure = false) {
+    super(message);
+    this.name = 'ArtifactTransferError';
+    this.failure = retryable === true ? { network: true } : retryable === false ? undefined : retryable;
+  }
+  get retryable(): boolean { return this.failure !== undefined; }
 }
 
 export type ArtifactTransferOptions = {
@@ -49,6 +57,7 @@ export type ArtifactTransferOptions = {
   idleTimeoutMs?: number;
   /** Total time one run may spend retrying transport failures. Default 30 min. */
   deadlineMs?: number;
+  /** Defaults to the named `artifact_transfer` policy in `src/retry.ts`. */
   retryPolicy?: RetryPolicy;
   /** Observe progress, for example to report it. Never called with more than `size`. */
   onProgress?: (progress: { import_id: string; received_bytes: number; size: number }) => void;
@@ -65,7 +74,6 @@ const Row = z.object({
 type ImportRow = z.infer<typeof Row>;
 type Resolved = ImportRow & { sha256: string; size: number; mime: string; name: string; protocol: 'v1' | 'v2'; content_path: string; manifest_json: string };
 
-const DEFAULT_POLICY: RetryPolicy = { maxAttempts: 5, baseMs: 500, maxMs: 8000, jitter: 'equal', maxRetryAfterMs: 30_000 };
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function texts(task: Task): string[] {
@@ -190,22 +198,25 @@ export class ArtifactTransfers {
     const deadlineMs = Date.now() + (this.options.deadlineMs ?? 30 * 60_000);
     this.#set(id, { state: row.state === 'verifying' ? 'verifying' : 'transferring', attempts: row.attempts + 1 });
     try {
-      const policy = this.options.retryPolicy ?? DEFAULT_POLICY;
-      const classify = (error: unknown) => error instanceof ArtifactTransferError && error.retryable
-        ? { retry: true, reason: error.code } : { retry: false };
-      const options = { policy, deadlineMs, classify, ...(signal ? { signal } : {}) };
+      const policy = this.options.retryPolicy ?? 'artifact_transfer';
+      // Every attempt is a read that resumes from the retained bytes, so a repeat is safe by contract.
+      const options = { signal, deadlineMs, effect: 'idempotent' as const,
+        classify: (error: unknown) => error instanceof ArtifactTransferError ? error.failure : undefined,
+        onAttempt: (record: { delayMs: number | null }) => {
+          if (record.delayMs !== null) this.#set(id, { attempts: this.#row(id).attempts + 1 });
+        } };
       row = this.#row(id);
-      const resolved = this.#resolvedRow(row) ?? await retry(() => this.#resolve(row), options);
+      const resolved = this.#resolvedRow(row) ?? await retryWithPolicy(policy, () => this.#resolve(row), options);
       if (resolved.state !== 'verifying') {
-        await retry(() => this.#transferOnce(resolved, signal), options);
+        await retryWithPolicy(policy, () => this.#transferOnce(resolved, signal), options);
         this.#set(id, { state: 'verifying' });
       }
       await this.#finalize(this.#resolvedRow(this.#row(id)) ?? resolved);
     } catch (error: unknown) {
       // An aborted run (shutdown, or a caller that stopped waiting) stays resumable.
       if (signal?.aborted) throw error;
-      const failure = error instanceof RetryExhaustedError
-        ? new ArtifactTransferError(`Transfer interrupted after ${error.attempts} attempts: ${error.cause instanceof Error ? error.cause.message : error.reason}`, 'TRANSFER_INTERRUPTED')
+      const failure = error instanceof RetryStoppedError
+        ? new ArtifactTransferError(`Transfer interrupted: ${error.message}`, 'TRANSFER_INTERRUPTED')
         : error instanceof ArtifactTransferError ? error
           : error instanceof ProvenNoEffectError ? new ArtifactTransferError(error.message, error.code)
             : error instanceof ArtifactStoreError ? new ArtifactTransferError(error.message, error.code)
@@ -292,7 +303,7 @@ export class ArtifactTransfers {
       try {
         let hashState = hash;
         if (response.status === 404 || response.status === 410) throw new ArtifactTransferError(`Peer no longer serves the artifact (HTTP ${response.status})`, ARTIFACT_TRANSFER_ERRORS.gone);
-        if (RETRYABLE_STATUS.has(response.status)) throw new ArtifactTransferError(`Artifact fetch HTTP ${response.status}`, 'TRANSFER_INTERRUPTED', true);
+        if (RETRYABLE_STATUS.has(response.status)) throw new ArtifactTransferError(`Artifact fetch HTTP ${response.status}`, 'TRANSFER_INTERRUPTED', responseFailure(response));
         if (response.status === 416 && received === row.size) { this.#verify(hashState, row); return; }
         if (response.status !== 200 && response.status !== 206) throw new ArtifactTransferError(`Artifact fetch HTTP ${response.status}`, 'TRANSFER_REJECTED');
         this.#checkHeaders(response, row);
