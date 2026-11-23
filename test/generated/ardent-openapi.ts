@@ -2426,6 +2426,31 @@ export interface operations {
                         /** @enum {string} */
                         backend: "llamacpp" | "codex";
                         tasks: number;
+                        channels: {
+                            mattermost: {
+                                /** @description Latest missed-post catch-up walk per Mattermost channel */
+                                catchup: {
+                                    account: string;
+                                    channel: string;
+                                    /** @enum {string} */
+                                    state: "idle" | "catching_up" | "complete" | "gap";
+                                    recovered: number;
+                                    skipped_stale: number;
+                                    already_claimed: number;
+                                    pages: number;
+                                    started_ms: number | null;
+                                    finished_ms: number | null;
+                                    gaps: number;
+                                    last_gap: {
+                                        from_ms: number;
+                                        to_ms: number;
+                                        /** @enum {string} */
+                                        reason: "walk_bound" | "retention";
+                                        detected_ms: number;
+                                    } | null;
+                                }[];
+                            };
+                        };
                     };
                 };
             };

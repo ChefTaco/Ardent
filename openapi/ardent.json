@@ -3147,13 +3147,138 @@
                       "type": "integer",
                       "minimum": -9007199254740991,
                       "maximum": 9007199254740991
+                    },
+                    "channels": {
+                      "type": "object",
+                      "properties": {
+                        "mattermost": {
+                          "type": "object",
+                          "properties": {
+                            "catchup": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "account": {
+                                    "type": "string"
+                                  },
+                                  "channel": {
+                                    "type": "string"
+                                  },
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "idle",
+                                      "catching_up",
+                                      "complete",
+                                      "gap"
+                                    ]
+                                  },
+                                  "recovered": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "skipped_stale": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "already_claimed": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "pages": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "started_ms": {
+                                    "nullable": true,
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "finished_ms": {
+                                    "nullable": true,
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "gaps": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "last_gap": {
+                                    "nullable": true,
+                                    "type": "object",
+                                    "properties": {
+                                      "from_ms": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "to_ms": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "reason": {
+                                        "type": "string",
+                                        "enum": [
+                                          "walk_bound",
+                                          "retention"
+                                        ]
+                                      },
+                                      "detected_ms": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": [
+                                      "from_ms",
+                                      "to_ms",
+                                      "reason",
+                                      "detected_ms"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "account",
+                                  "channel",
+                                  "state",
+                                  "recovered",
+                                  "skipped_stale",
+                                  "already_claimed",
+                                  "pages",
+                                  "started_ms",
+                                  "finished_ms",
+                                  "gaps",
+                                  "last_gap"
+                                ]
+                              },
+                              "description": "Latest missed-post catch-up walk per Mattermost channel"
+                            }
+                          },
+                          "required": [
+                            "catchup"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mattermost"
+                      ]
                     }
                   },
                   "required": [
                     "version",
                     "profile",
                     "backend",
-                    "tasks"
+                    "tasks",
+                    "channels"
                   ]
                 }
               }

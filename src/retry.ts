@@ -27,6 +27,8 @@ export const RETRY_POLICIES = {
   a2a_push: { maxAttempts: 3, baseMs: 1000, maxMs: 1000, jitter: 'none', maxRetryAfterMs: 5000 },
   /** Telegram Bot API: 429 with `retry_after`, which the site caps at 60 s, the existing bound. */
   telegram: { maxAttempts: 4, baseMs: 1000, maxMs: 1000, jitter: 'none', maxRetryAfterMs: 60_000 },
+  /** Mattermost/ChatterMost REST: only 429 (the request was not processed), `Retry-After` up to 60 s. */
+  mattermost: { maxAttempts: 3, baseMs: 1000, maxMs: 1000, jitter: 'none', maxRetryAfterMs: 60_000 },
   /** Codex turns, tools with a possible effect, partially consumed streams. */
   never: { maxAttempts: 1, baseMs: 0, maxMs: 0, jitter: 'none' },
 } as const satisfies Record<string, RetryPolicy>;

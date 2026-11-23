@@ -5,6 +5,7 @@ import type { ArdentRuntime } from './runtime.js';
 import type { JobEngine } from './job-engine.js';
 import { ChannelCore, DeliveryRejectedError, type ChannelEvent, type ChannelReply } from './channels.js';
 import { resolveReference } from './config.js';
+import { AttemptError, lastAttemptError, responseFailure, retryWithPolicy } from './retry.js';
 
 const User = z.object({ id: z.string().min(1), username: z.string().min(1), is_bot: z.boolean().optional() }).passthrough();
 const Post = z.object({ id: z.string().min(1), user_id: z.string().min(1), channel_id: z.string().min(1), message: z.string().default(''), root_id: z.string().nullish().transform(value => value ?? ''), file_ids: z.array(z.string()).default([]), create_at: z.number().int().nonnegative() }).passthrough();
@@ -12,6 +13,12 @@ const Frame = z.object({ event: z.string().optional(), data: z.record(z.string()
 const PostList = z.object({ order: z.array(z.string()), posts: z.record(z.string(), Post) }).passthrough();
 const FileInfo = z.object({ id: z.string(), name: z.string(), mime_type: z.string(), size: z.number().int().nonnegative() }).passthrough();
 type MattermostConfig = ArdentRuntime['config']['channels']['mattermost'];
+type MattermostPost = z.infer<typeof Post>;
+/** Durable catch-up boundary of one channel: the newest post up to which every older post was settled. */
+const Boundary = z.object({ last_ms: z.number().int().nonnegative(), last_post_id: z.string().min(1).max(256).nullable() }).strict();
+type Boundary = z.infer<typeof Boundary>;
+/** Mattermost and ChatterMost return at most 200 posts per page. */
+const CATCHUP_PAGE = 200;
 
 function splitMessage(text: string): string[] {
   if (!text) return ['(empty response)'];
@@ -54,21 +61,36 @@ export class MattermostAdapter {
     this.#token = token;
     this.#core = new ChannelCore(runtime, env, jobs);
   }
+  /**
+   * One REST call. A `429` is repeated under the `mattermost` retry policy: a
+   * rate-limited request was not processed, so sending it again cannot post a
+   * reply twice, and a catch-up burst of replies would otherwise lose every reply
+   * past the server's limit. No other failure is repeated.
+   */
   async #request(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${this.#token}`);
-    const response = await fetch(`${this.#base}/api/v4${path}`, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(10_000), redirect: 'error' });
-    if (!response.ok) {
-      const message = `Mattermost ${path} returned ${response.status}`;
-      if (response.status >= 400 && response.status < 500) throw new DeliveryRejectedError(message);
-      throw new Error(message);
+    try {
+      return await retryWithPolicy('mattermost', async () => {
+        const response = await fetch(`${this.#base}/api/v4${path}`, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(10_000), redirect: 'error' });
+        if (response.ok) return response;
+        const message = `Mattermost ${path} returned ${response.status}`;
+        await response.body?.cancel();
+        if (response.status === 429) throw new AttemptError(message, responseFailure(response));
+        if (response.status >= 400 && response.status < 500) throw new DeliveryRejectedError(message);
+        throw new Error(message);
+      }, { effect: 'idempotent', signal: init.signal ?? undefined });
+    } catch (error: unknown) {
+      const last = lastAttemptError(error);
+      // A request still rate-limited after its retries was refused, as any other 4xx.
+      throw last instanceof AttemptError ? new DeliveryRejectedError(last.message) : last;
     }
-    return response;
   }
   async initialize(): Promise<{ botId: string; username: string }> {
     const me = User.parse(await (await this.#request('/users/me')).json());
     if (me.is_bot === false) throw new Error('Mattermost token does not identify a bot');
     this.#me = me;
+    this.runtime.store.catchup.closeOpenRuns('mattermost', me.id);
     return { botId: me.id, username: me.username };
   }
   async #attachment(fileId: string, signal?: AbortSignal): Promise<ChannelEvent['attachments'][number]> {
@@ -87,10 +109,8 @@ export class MattermostAdapter {
     const post = Post.parse(raw);
     const me = this.#me;
     if (!me) throw new Error('Mattermost adapter has not initialized');
-    if (post.user_id === me.id || !this.config.allowed_user_ids.includes(post.user_id)) return;
+    if (!this.#eligible(post, channelType)) return;
     const isDm = channelType === 'D';
-    if (!isDm && !this.config.allowed_channel_ids.includes(post.channel_id)) return;
-    if (!isDm && this.config.require_mention && !mentionPattern(me.username).test(post.message)) return;
     const attachments: ChannelEvent['attachments'] = [];
     for (const fileId of post.file_ids.slice(0, 5)) {
       if (signal?.aborted) return;
@@ -99,8 +119,6 @@ export class MattermostAdapter {
     }
     if (signal?.aborted) return;
     if (freshOnly && this.runtime.store.hasInbound('mattermost', me.id, post.id)) return;
-    const cursorKey = `mattermost:${me.id}:${post.channel_id}:last_ms`;
-    const previous = Number(this.runtime.store.cursor(cursorKey) ?? '0');
     // A post may be longer than one channel event. Cut it here: a rejected event
     // would fail every later reconciliation that still lists the post.
     const text = (isDm ? post.message : post.message.replace(mentionPattern(me.username), '$1').trim()).slice(0, MAX_EVENT_TEXT);
@@ -109,9 +127,49 @@ export class MattermostAdapter {
     const operation = this.#core.handle(event, async reply => this.#deliver(post, channelType, reply)).catch(error => {
       this.runtime.store.setCursor(`mattermost:${me.id}:last_error`, error instanceof Error ? error.message.slice(0, 500) : 'unknown');
     });
-    this.runtime.store.setCursor(cursorKey, String(Math.max(previous, post.create_at)));
+    // A live post never moves an existing boundary: posts missed before it are
+    // still owed to catch-up. It only starts the boundary of a channel not yet seen.
+    if (!this.#boundary(post.channel_id)) this.#saveBoundary(post.channel_id, { last_ms: post.create_at, last_post_id: null });
     this.#pending.add(operation);
     void operation.finally(() => this.#pending.delete(operation));
+  }
+  #eligible(post: MattermostPost, channelType: string): boolean {
+    const me = this.#me;
+    if (!me || post.user_id === me.id || !this.config.allowed_user_ids.includes(post.user_id)) return false;
+    if (channelType === 'D') return true;
+    return this.config.allowed_channel_ids.includes(post.channel_id) && (!this.config.require_mention || mentionPattern(me.username).test(post.message));
+  }
+  /**
+   * The saved boundary of a channel, or undefined for a channel never seen. A
+   * cursor from Ardent 3.1 (`…:last_ms` only) reads as a boundary without a post
+   * id; a newer `…:last_ms` (written by an older runtime after a downgrade) wins.
+   */
+  #boundary(channelId: string): Boundary | undefined {
+    const me = this.#me;
+    if (!me) throw new Error('Mattermost adapter has not initialized');
+    const legacyValue = this.runtime.store.cursor(`mattermost:${me.id}:${channelId}:last_ms`);
+    const legacyMs = legacyValue === undefined ? undefined : Number(legacyValue);
+    const legacy = legacyMs === undefined ? undefined : { last_ms: Number.isSafeInteger(legacyMs) && legacyMs >= 0 ? legacyMs : 0, last_post_id: null };
+    const saved = this.runtime.store.cursor(`mattermost:${me.id}:${channelId}:last`);
+    let parsed: Boundary | undefined;
+    try { parsed = saved === undefined ? undefined : Boundary.parse(JSON.parse(saved) as unknown); } catch { parsed = undefined; }
+    if (parsed && (!legacy || legacy.last_ms <= parsed.last_ms)) return parsed;
+    if (legacy) return legacy;
+    return saved === undefined ? undefined : { last_ms: 0, last_post_id: null };
+  }
+  #saveBoundary(channelId: string, boundary: Boundary): void {
+    const me = this.#me;
+    if (!me) throw new Error('Mattermost adapter has not initialized');
+    this.runtime.store.setCursor(`mattermost:${me.id}:${channelId}:last`, JSON.stringify(Boundary.parse(boundary)));
+    // Kept for a runtime rolled back to 3.1, which reads only this key.
+    this.runtime.store.setCursor(`mattermost:${me.id}:${channelId}:last_ms`, String(boundary.last_ms));
+  }
+  async #page(channelId: string, before: string | undefined, readSignal: () => AbortSignal): Promise<MattermostPost[]> {
+    const query = `per_page=${CATCHUP_PAGE}${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+    const listing = PostList.parse(await (await this.#request(`/channels/${encodeURIComponent(channelId)}/posts?${query}`, { signal: readSignal() })).json());
+    // Newest first, as the server orders it; ties break on id so the walk is deterministic.
+    return listing.order.map(id => listing.posts[id]).filter((item): item is MattermostPost => item !== undefined)
+      .sort((a, b) => b.create_at - a.create_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   }
   async #deliver(post: z.infer<typeof Post>, channelType: string, reply: ChannelReply): Promise<string | null> {
     const ids: string[] = [];
@@ -139,6 +197,12 @@ export class MattermostAdapter {
     }
     return last;
   }
+  /**
+   * Catch up every readable channel. Runs when a connection opens (`freshOnly`
+   * false: a claimed post without a recorded reply finishes its owner path) and
+   * on the 30 s timer (`freshOnly`: claimed posts are left alone). Returns the
+   * number of posts handed to the channel path.
+   */
   async reconcile(freshOnly = false, signal?: AbortSignal): Promise<number> {
     if (freshOnly && this.runtime.store.admissionFence()) return 0;
     const me = this.#me;
@@ -149,25 +213,108 @@ export class MattermostAdapter {
     for (const channel of channels) {
       if (signal?.aborted) break;
       if (channel.type !== 'D' && !this.config.allowed_channel_ids.includes(channel.id)) continue;
-      const listing = PostList.parse(await (await this.#request(`/channels/${encodeURIComponent(channel.id)}/posts?per_page=50`, { signal: readSignal() })).json());
-      if (signal?.aborted) break;
-      const posts = listing.order.map(id => listing.posts[id]).filter((item): item is z.infer<typeof Post> => item !== undefined).sort((a, b) => a.create_at - b.create_at);
-      const cursorKey = `mattermost:${me.id}:${channel.id}:last_ms`;
-      const saved = this.runtime.store.cursor(cursorKey);
-      if (saved === undefined) {
-        for (const post of posts) this.runtime.store.claimInbound('mattermost', me.id, post.id);
-        this.runtime.store.setCursor(cursorKey, String(posts.at(-1)?.create_at ?? Date.now()));
-        continue;
+      count += await this.#catchUp(channel.id, channel.type, freshOnly, signal, readSignal);
+    }
+    return count;
+  }
+  /**
+   * Walk one channel back from its newest post to the saved boundary in pages of
+   * 200 (`before=<oldest id seen>`), bounded by `catchup.max_posts` posts from
+   * others and twice that many pages' worth of history, then settle
+   * the posts oldest first. Each post is claimed atomically, so live events and
+   * catch-up can interleave without a second task or reply; a post already
+   * claimed is never answered again. The boundary moves only past posts settled
+   * in order, so an interrupted walk resumes where it stopped.
+   */
+  async #catchUp(channelId: string, channelType: string, freshOnly: boolean, signal: AbortSignal | undefined, readSignal: () => AbortSignal): Promise<number> {
+    const me = this.#me!;
+    const store = this.runtime.store;
+    const boundary = this.#boundary(channelId);
+    if (!boundary) {
+      // First sight of a channel: claim its recent history without answering it.
+      const posts = await this.#page(channelId, undefined, readSignal);
+      if (signal?.aborted) return 0;
+      for (const post of posts) store.claimInbound('mattermost', me.id, post.id);
+      const newest = posts[0];
+      // An empty channel starts at 0: every later post is new, whatever the clocks say.
+      this.#saveBoundary(channelId, newest ? { last_ms: newest.create_at, last_post_id: newest.id } : { last_ms: 0, last_post_id: null });
+      return 0;
+    }
+    // The bot's own replies sit in the same history; they do not use the budget,
+    // so the page bound leaves room for one reply per post.
+    const maxPosts = this.config.catchup.max_posts;
+    const maxPages = 2 * Math.ceil(maxPosts / CATCHUP_PAGE);
+    const newer: MattermostPost[] = [];
+    let others = 0, pages = 0, reached = false, full = false, gap: 'walk_bound' | 'retention' | null = null, before: string | undefined;
+    while (!reached && !gap) {
+      const page = await this.#page(channelId, before, readSignal);
+      pages++;
+      if (signal?.aborted) return 0;
+      for (const post of page) {
+        if (post.id === boundary.last_post_id || post.create_at < boundary.last_ms) { reached = true; break; }
+        if (post.user_id !== me.id && others++ >= maxPosts) { full = true; break; }
+        newer.push(post);
       }
-      if (posts.length === 50 && (posts[0]?.create_at ?? 0) > Number(saved)) this.runtime.store.setCursor(`mattermost:${me.id}:${channel.id}:reconcile_gap`, `${saved}:${posts[0]?.create_at ?? 0}`);
-      for (const post of posts) {
-        if (signal?.aborted) break;
-        // Periodic reads recover missed events only. Already claimed work,
-        // including unbound or unknown effects, keeps its existing owner path.
-        if (freshOnly && this.runtime.store.hasInbound('mattermost', me.id, post.id)) continue;
-        await this.handlePost(post, channel.type, signal, freshOnly); count++;
+      if (reached) break;
+      if (full) { gap = 'walk_bound'; break; }
+      if (page.length === 0) {
+        // The pivot post vanished, or retention removed history the boundary still needs.
+        if (pages > 1 || boundary.last_post_id !== null) gap = 'retention';
+        break;
+      }
+      if (page.length < CATCHUP_PAGE) {
+        // The start of the channel's history. Without a boundary post id (a 3.1
+        // cursor or an empty channel) that is the boundary; otherwise it was removed.
+        if (boundary.last_post_id !== null) gap = 'retention';
+        break;
+      }
+      if (pages >= maxPages) { gap = 'walk_bound'; break; }
+      before = page.at(-1)?.id;
+    }
+    const posts = newer.reverse();
+    const oldest = posts[0];
+    if (gap) store.catchup.recordGap('mattermost', me.id, channelId, boundary.last_ms, oldest?.create_at ?? Date.now(), gap);
+    const counters = { recovered: 0, skipped_stale: 0, already_claimed: 0, pages };
+    const unsettled = posts.some(post => this.#eligible(post, channelType) && !store.hasInbound('mattermost', me.id, post.id));
+    const runId = unsettled || gap ? store.catchup.startRun('mattermost', me.id, channelId, freshOnly ? 'timer' : 'connect', pages) : undefined;
+    const staleBefore = Date.now() - this.config.catchup.max_age_hours * 3_600_000;
+    const inboundType = channelType === 'D' ? 'mattermost_dm' : 'mattermost_channel';
+    let settled: Boundary | undefined;
+    // Never move the boundary backwards, for example behind a concurrent reconcile() call.
+    const advance = (next: Boundary) => {
+      const current = this.#boundary(channelId);
+      if (!current || current.last_ms <= next.last_ms) this.#saveBoundary(channelId, next);
+    };
+    let index = 0;
+    let count = 0;
+    let failure: unknown;
+    for (const post of posts) {
+      if (signal?.aborted) break;
+      try {
+        if (!this.#eligible(post, channelType)) { /* not addressed to this bot */ }
+        else if (store.hasInbound('mattermost', me.id, post.id)) {
+          counters.already_claimed++;
+          if (!freshOnly) { await this.handlePost(post, channelType, signal, false); count++; }
+        } else if (post.create_at < staleBefore) {
+          if (store.claimInbound('mattermost', me.id, post.id, inboundType, 'skipped_stale').claimed) counters.skipped_stale++;
+          else counters.already_claimed++;
+        } else { await this.handlePost(post, channelType, signal, freshOnly); count++; counters.recovered++; }
+      } catch (error: unknown) { failure = error; break; }
+      // A post cut short by shutdown may not be claimed yet; it stays owed.
+      if (signal?.aborted) break;
+      settled = { last_ms: post.create_at, last_post_id: post.id };
+      if (++index % 50 === 0) {
+        advance(settled);
+        if (runId !== undefined) store.catchup.updateRun(runId, counters);
       }
     }
+    const complete = !failure && !signal?.aborted;
+    if (settled) advance(settled);
+    // A recorded gap is permanent. With nothing settled past it, forget the lost
+    // boundary post so the next walk does not report the same gap again.
+    else if (gap && complete && boundary.last_post_id !== null) this.#saveBoundary(channelId, { last_ms: boundary.last_ms, last_post_id: null });
+    if (runId !== undefined) store.catchup.finishRun(runId, counters, complete ? (gap ? 'gap' : 'complete') : 'interrupted', gap);
+    if (failure) throw failure;
     return count;
   }
   async connectOnce(signal: AbortSignal): Promise<void> {

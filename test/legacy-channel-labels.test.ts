@@ -16,7 +16,8 @@ it('retains legacy inbound identities and never reclassifies an unknown or known
  const before = old.prepare('SELECT * FROM channel_inbound ORDER BY update_id').all(); old.close();
  const store = new TaskStore(file);
  try {
-  expect(store.db.prepare('SELECT * FROM channel_inbound ORDER BY update_id').all()).toEqual(before);
+  // Existing rows keep every value; the additive disposition column reads as admitted.
+  expect(store.db.prepare('SELECT * FROM channel_inbound ORDER BY update_id').all()).toEqual(before.map(row => ({ ...(row as object), disposition: 'admitted' })));
   expect(store.claimInbound('chattermost','fixture-account','historical','chattermost_dm')).toEqual({claimed:false,taskId:null});
   expect(store.claimInbound('chattermost','fixture-account','unclassified','chattermost_dm').claimed).toBe(false);
   expect(store.db.prepare("SELECT channel_type FROM channel_inbound WHERE update_id='unclassified'").get()).toEqual({channel_type:'unknown'});

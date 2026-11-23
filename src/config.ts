@@ -30,7 +30,10 @@ export const HiveMemConfigSchema = z.object({ provider: z.literal('hivemem'), ba
 export type HiveMemConfig = z.infer<typeof HiveMemConfigSchema>;
 
 const TelegramChannel = z.object({ enabled: z.boolean().default(false), token_env: z.string().regex(envName).default('TELEGRAM_BOT_TOKEN'), allowed_user_ids: z.array(z.number().int().positive()).default([]), allowed_chat_ids: z.array(z.number().int()).default([]), receive_mode: z.literal('polling').default('polling') }).strict();
-const MattermostChannel = z.object({ enabled: z.boolean().default(false), base_url: urlReference.default('${MATTERMOST_URL}'), token_env: z.string().regex(envName).default('MATTERMOST_TOKEN'), allowed_user_ids: z.array(z.string().min(1)).default([]), allowed_channel_ids: z.array(z.string().min(1)).default([]), require_mention: z.boolean().default(true), reply_mode: z.enum(['thread', 'flat']).default('thread') }).strict();
+/** Missed-post recovery. The walk reads at most `max_posts` posts back to the saved boundary; older posts are skipped, not answered. */
+const mattermostCatchupDefault = { max_posts: 2000, max_age_hours: 24 };
+const MattermostCatchup = z.object({ max_posts: z.number().int().min(1).max(10_000).default(2000), max_age_hours: z.number().int().min(1).max(8760).default(24) }).strict();
+const MattermostChannel = z.object({ enabled: z.boolean().default(false), base_url: urlReference.default('${MATTERMOST_URL}'), token_env: z.string().regex(envName).default('MATTERMOST_TOKEN'), allowed_user_ids: z.array(z.string().min(1)).default([]), allowed_channel_ids: z.array(z.string().min(1)).default([]), require_mention: z.boolean().default(true), reply_mode: z.enum(['thread', 'flat']).default('thread'), catchup: MattermostCatchup.default(mattermostCatchupDefault) }).strict();
 /** A plugin module specifier: an npm package name, or an absolute path / file URL to an ES module. */
 const pluginSpecifier = z.string().min(1).max(500).refine(value =>
   /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:\/[A-Za-z0-9._-]+)*$/.test(value) || value.startsWith('/') || value.startsWith('file://'),

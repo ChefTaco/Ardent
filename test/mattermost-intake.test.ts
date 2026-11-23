@@ -23,7 +23,7 @@ describe('Mattermost intake', () => {
 
   it('cuts a post longer than one channel event instead of failing reconciliation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'ardent-mattermost-intake-'));
-    const long = { id: 'long', user_id: 'operator', channel_id: 'dm', message: `/status ${'x'.repeat(16_200)}`, create_at: 2 };
+    const long = { id: 'long', user_id: 'operator', channel_id: 'dm', message: `/status ${'x'.repeat(16_200)}`, create_at: Date.now() - 60_000 };
     const replies: string[] = [];
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
