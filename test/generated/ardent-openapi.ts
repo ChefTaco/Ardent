@@ -420,7 +420,93 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Artifact bytes as application/octet-stream, streamed and verified against the digest as they are sent (a mismatch ends the response before its last chunk). Use /content for the media type, ranges and digest headers. */
         get: operations["getArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/{sha256}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Artifact transfer v2 content. Without Range (or with an If-Range that is not the ETag) the whole artifact is returned with 200 and verified as it streams; a single Range returns 206 with Content-Range, an unsatisfiable one 416. Every response carries Accept-Ranges: bytes, ETag "<sha256>", Repr-Digest (RFC 9530 sha-256), X-Content-SHA256, the manifest media type and Content-Disposition: attachment with the manifest name. A rendition has its own digest and is fetched the same way. */
+        get: operations["getArtifactContent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/{sha256}/renditions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Every current form of an artifact, the original first (role original, purpose download). Given an original or any of its renditions, the list is the same. Select with HiveCommon selectRendition; download always means the original. */
+        get: operations["listArtifactRenditions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/{sha256}/manifest/v2": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Newest current manifest for the digest as manifest 1.1 (a strict superset of 1.0 with optional rendition and provenance.execution). */
+        get: operations["getArtifactManifestV2"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listArtifactImports"];
+        put?: never;
+        /** @description Pull one artifact a configured A2A peer exported from one of its completed tasks, with transfer v2 (Range resume, SHA-256 verification) or, for an older peer, the v1 path up to 2 MiB. Idempotent per peer, task and artifact: a repeat returns the same import, and a failed import is queued again from its retained bytes. The import runs in the background and resumes after a restart. */
+        post: operations["importArtifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/artifacts/imports/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Import progress. error.code is TRANSFER_REQUIRES_V2 (peer lacks urn:hive:artifact-transfer:2 and the artifact is over 2 MiB), DIGEST_MISMATCH (bytes discarded; reissue to retry), TRANSFER_TOO_LARGE, TRANSFER_SOURCE_GONE, TRANSFER_INTERRUPTED (retries exhausted; reissue resumes) or another stable code. */
+        get: operations["getArtifactImport"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2405,6 +2491,337 @@ export interface operations {
             };
         };
     };
+    getArtifactContent: {
+        parameters: {
+            query?: never;
+            header?: {
+                Range?: string;
+                "If-Range"?: string;
+            };
+            path: {
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whole artifact */
+            200: {
+                headers: {
+                    "Accept-Ranges"?: string;
+                    ETag?: string;
+                    "Repr-Digest"?: string;
+                    "X-Content-SHA256"?: string;
+                    "Content-Disposition"?: string;
+                    "Content-Range"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": string;
+                };
+            };
+            /** @description One byte range */
+            206: {
+                headers: {
+                    "Accept-Ranges"?: string;
+                    ETag?: string;
+                    "Repr-Digest"?: string;
+                    "X-Content-SHA256"?: string;
+                    "Content-Disposition"?: string;
+                    "Content-Range"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": string;
+                };
+            };
+            /** @description Artifact absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Range not satisfiable; Content-Range: bytes *\/<size> */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listArtifactRenditions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Original and renditions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        renditions: {
+                            sha256: string;
+                            /** @enum {string} */
+                            role: "original" | "preview" | "model_input";
+                            mime: string;
+                            size: number;
+                            purpose: string;
+                            width?: number;
+                            height?: number;
+                            has_alpha?: boolean;
+                        }[];
+                    };
+                };
+            };
+            /** @description No current manifest */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getArtifactManifestV2: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sha256: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Manifest 1.1 record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        task_id: string;
+                        superseded_by_sha256: string | null;
+                        manifest: {
+                            /** @enum {string} */
+                            schema_version: "1.1";
+                            revision: number;
+                            source_revision: string;
+                            /** @enum {string} */
+                            visibility: "private" | "gm" | "player";
+                            license: string;
+                            preview: {
+                                /** @enum {string} */
+                                mode: "inline" | "thumbnail" | "download_only" | "none";
+                                mime: string;
+                            };
+                            supersedes_sha256: string | null;
+                            /** @enum {string} */
+                            acceptance_status: "unreviewed" | "approved" | "partial" | "rejected";
+                            name: string;
+                            mime: string;
+                            sha256: string;
+                            size: number;
+                            created_at: number;
+                            expires_at: number;
+                            provenance: {
+                                producer: string;
+                                source_id: string;
+                                producer_task_id: string;
+                                lineage: {
+                                    producer: string;
+                                    source_id: string;
+                                }[];
+                                execution?: {
+                                    root: string;
+                                    task?: string;
+                                    step?: string;
+                                };
+                            };
+                            recovery: {
+                                /** @enum {string} */
+                                on_expiry: "request_verified_reexport";
+                            };
+                            artifact_id: string;
+                            rendition?: {
+                                /** @enum {string} */
+                                role: "original" | "preview" | "model_input";
+                                of_sha256: string;
+                                purpose: string;
+                                transform: {
+                                    name: string;
+                                    version: string;
+                                    params: {
+                                        [key: string]: string | number | boolean | (null);
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            /** @description No current manifest */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listArtifactImports: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recent imports, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        imports: {
+                            import_id: string;
+                            peer_id: string;
+                            a2a_task_id: string;
+                            artifact_id: string;
+                            /** @enum {string} */
+                            state: "queued" | "transferring" | "verifying" | "completed" | "failed";
+                            received_bytes: number;
+                            size: number | null;
+                            sha256: string | null;
+                            mime: string | null;
+                            name: string | null;
+                            /** @enum {string|null} */
+                            protocol: "v1" | "v2" | null;
+                            attempts: number;
+                            local_task_id: string | null;
+                            error?: {
+                                code: string;
+                                message: string;
+                            };
+                            created_ms: number;
+                            updated_ms: number;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    importArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    peer_id: string;
+                    a2a_task_id: string;
+                    artifact_id: string;
+                    /** Format: uuid */
+                    task_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted import */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        import_id: string;
+                    };
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Local task absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getArtifactImport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Import state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        import_id: string;
+                        peer_id: string;
+                        a2a_task_id: string;
+                        artifact_id: string;
+                        /** @enum {string} */
+                        state: "queued" | "transferring" | "verifying" | "completed" | "failed";
+                        received_bytes: number;
+                        size: number | null;
+                        sha256: string | null;
+                        mime: string | null;
+                        name: string | null;
+                        /** @enum {string|null} */
+                        protocol: "v1" | "v2" | null;
+                        attempts: number;
+                        local_task_id: string | null;
+                        error?: {
+                            code: string;
+                            message: string;
+                        };
+                        created_ms: number;
+                        updated_ms: number;
+                    };
+                };
+            };
+            /** @description Import absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     getOperationalStatus: {
         parameters: {
             query?: never;
@@ -2414,7 +2831,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Active profile summary */
+            /** @description Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2450,6 +2867,10 @@ export interface operations {
                                     } | null;
                                 }[];
                             };
+                        };
+                        capabilities: {
+                            /** @enum {number} */
+                            artifact_transfer: 2;
                         };
                     };
                 };

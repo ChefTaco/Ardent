@@ -6,6 +6,8 @@ export * from './store.js';
 export * from './tools.js';
 export { toolIdempotencyKey } from './tool-scheduler.js';
 export * from './artifacts.js';
+export * from './artifact-manifests.js';
+export { ArtifactTransfers, ArtifactTransferError, ArtifactImportRequestSchema, ArtifactImportSchema, ArtifactImportStateSchema, peerTransferV2, type ArtifactImport, type ArtifactImportRequest, type ArtifactImportState, type ArtifactTransferOptions } from './artifact-transfer.js';
 export * from './a2a-peers.js';
 export * from './codex.js';
 export * from './context.js';
