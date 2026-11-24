@@ -15,7 +15,8 @@ Magnus monorepo. Preserve LICENSE, NOTICE, `protocol/LICENSE-A2A.txt` and
 | Path | Contents |
 |---|---|
 | `src/` | Runtime, CLI (`cli.ts`, `cli-commands.ts`), management API (`api.ts`), A2A (`a2a*.ts`), channels, jobs, plugins (`plugins.ts`, `plugin-sdk.ts`), native launcher (`native-entry.ts`) |
-| `test/` | Vitest suites; `test/interop/` needs Python, `test/generated/` holds the typed OpenAPI client, `test/fixtures/` the Codex App Server fake and the Python A2A, Hermes and team reference peers |
+| `test/` | Vitest suites; `test/interop/` needs Python, `test/fixtures/` the Codex App Server fake and the Python A2A, Hermes and team reference peers |
+| `client/` | npm workspace `@hivemagnus/ardent-client`: the browser-safe remote client (`src/`, types generated into `src/generated.ts`), its tests (`test/`) and `examples/cli.mjs` |
 | `profiles/assistant/` | Bundled template that `ardent init` copies (config, persona, `grounded-answers` skill) |
 | `openapi/ardent.json` | Pinned management OpenAPI document |
 | `protocol/` | Vendored A2A protobuf and its lock (see `protocol/README.md`) |
@@ -99,7 +100,7 @@ The Magnus node agent calls the management API on loopback; Magnus, its
 console, the UI and ArdentStudio reach a profile only through Magnus. Do not
 change the shape of existing endpoints. When routes or schemas change, regenerate the
 pinned document with `npm run openapi:write` and commit `openapi/ardent.json` and
-`test/generated/ardent-openapi.ts`. Magnus generates its own typed client from
+`client/src/generated.ts`. Magnus generates its own typed client from
 the published package, so a shape change also needs a Magnus update.
 
 Magnus deploys and manages Ardent agents, so **every Ardent release is followed
@@ -116,6 +117,17 @@ Plugin packages that pin an exact `@hivemagnus/ardent` peer version need a
 matching release **before** Magnus moves its pin: a managed upgrade reinstalls
 an installation's retained extension archives with strict peers and holds the
 current runtime when a peer does not match.
+
+## Remote client
+
+`client/` publishes `@hivemagnus/ardent-client` with the same version as
+Ardent (`npm run release:version -- X.Y.Z` bumps both; `npm run version:check`
+fails when they differ). Its default entry must stay browser-safe: no Node
+built-ins, `fetch` and web streams only, and `@hivemagnus/hive-common` as its
+only runtime dependency (`client/test/browser.test.ts` and `npm run pack:check`
+enforce this). Routes it reaches through Magnus follow Magnus's allowlist;
+keep the README's Magnus table in step with the Magnus release that adds
+routes or actions.
 
 ## Tests and gates
 
@@ -137,4 +149,6 @@ and the Python A2A SDK (see `scripts/run-interop.mjs`).
 Use [Conventional Commits](https://www.conventionalcommits.org/). Never
 overwrite published versions or release tags. Releases publish from a `vX.Y.Z`
 tag through `.github/workflows/publish.yml`, which waits for approval on the
-`npm-publish` environment and authenticates with npm trusted publishing.
+`npm-publish` environment and authenticates with npm trusted publishing. It
+publishes `@hivemagnus/ardent` and then `@hivemagnus/ardent-client`; each needs
+its own trusted publisher on npm (the workflow comments give the command).

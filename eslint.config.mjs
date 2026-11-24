@@ -2,7 +2,7 @@ import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig([
-  globalIgnores(['**/coverage/**', '**/dist/**', '**/node_modules/**', 'test/generated/**']),
+  globalIgnores(['**/coverage/**', '**/dist/**', '**/node_modules/**', 'client/src/generated.ts']),
   { linterOptions: { reportUnusedDisableDirectives: 'off' } },
   {
     files: ['**/*.{js,mjs,cjs,ts,mts,cts}'],
@@ -19,8 +19,8 @@ export default defineConfig([
     plugins: { '@typescript-eslint': tseslint.plugin },
   },
   {
-    files: ['src/**/*.ts'],
-    languageOptions: { parserOptions: { project: './tsconfig.json', tsconfigRootDir: import.meta.dirname } },
+    files: ['src/**/*.ts', 'client/src/**/*.ts'],
+    languageOptions: { parserOptions: { project: ['./tsconfig.json', './client/tsconfig.json'], tsconfigRootDir: import.meta.dirname } },
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'error',
       '@typescript-eslint/no-unsafe-call': 'error',

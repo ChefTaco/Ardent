@@ -16,6 +16,10 @@ What you get:
   the reply text as the model writes it. The
   OpenAPI document is served at `/openapi.json` and pinned in
   [`openapi/ardent.json`](openapi/ardent.json).
+- **Remote client** [`@hivemagnus/ardent-client`](client/README.md), released
+  with Ardent, for Node.js and browsers: submit and follow tasks across stream
+  reconnects, drive recovery decisions, read lineage, and download artifacts
+  with resumable, digest-verified transfers, directly or through Magnus.
 - **A2A protocol 1.0** server and client over JSON-RPC, HTTP+JSON, and gRPC,
   with authenticated peers, push notifications, and bounded "team missions"
   that scope which tools a peer may reach.
@@ -431,6 +435,8 @@ is a starting point; compaction is disabled until you enable it.
 | `task.done` | The finished task | Its `result` is the authoritative answer |
 
 The stream closes after 60 seconds; reconnect to continue.
+[`@hivemagnus/ardent-client`](client/README.md) does this for you
+(`tasks.follow`).
 
 Live text works the same for every backend and caller:
 - It holds only what a user would see. Structured output, such as tool or research JSON, is never streamed.
@@ -1037,9 +1043,14 @@ npm run lint
 npm test
 npm run build
 npm run openapi:check
-npm run pack:check      # packs, installs, and smoke-tests the tarball
+npm run pack:check      # packs, installs, and smoke-tests both tarballs
 npm run verify          # every gate CI runs, in order
 ```
+
+The repository is an npm workspace: `client/` is `@hivemagnus/ardent-client`,
+which carries Ardent's version. `npm run release:version -- X.Y.Z` bumps both,
+and `npm run version:check` (part of verify) fails when they differ. One
+`vX.Y.Z` tag publishes the runtime and then the client.
 
 ### Interoperability checks
 

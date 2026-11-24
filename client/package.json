@@ -1,0 +1,52 @@
+{
+  "name": "@hivemagnus/ardent-client",
+  "version": "3.1.4",
+  "description": "Typed client for the Ardent management API: tasks, live streams, recovery, lineage and resumable artifact downloads, direct or through Magnus",
+  "keywords": [
+    "ardent",
+    "agent",
+    "ai-agent",
+    "client",
+    "sdk",
+    "sse",
+    "magnus"
+  ],
+  "author": "ChefTaco",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChefTaco/Ardent.git",
+    "directory": "client"
+  },
+  "homepage": "https://github.com/ChefTaco/Ardent/tree/main/client#readme",
+  "bugs": {
+    "url": "https://github.com/ChefTaco/Ardent/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": "^24.22.3 || ^26.13.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hivemagnus/hive-common": "^0.6.0"
+  }
+}
