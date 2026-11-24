@@ -52,13 +52,16 @@
     "README.md",
     "LICENSE"
   ],
+  "workspaces": [
+    "client"
+  ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc --build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p client --noEmit",
     "test": "vitest run --exclude 'test/interop/**'",
     "interop:test": "vitest run test/interop",
     "interop": "node scripts/run-interop.mjs",
-    "lint": "eslint src test",
+    "lint": "eslint src test client",
     "protocol:check": "node scripts/verify-protocol.mjs",
     "openapi:check": "npm run build && node scripts/check-openapi.mjs",
     "openapi:write": "npm run build && node scripts/check-openapi.mjs --write",
@@ -69,9 +72,12 @@
     "native:check": "npm run build && node scripts/check-native.mjs",
     "scan:secrets": "bash scripts/scan-secrets.sh",
     "check:private": "bash scripts/check-private-data.sh",
-    "privacy:test": "node --test scripts/test-privacy-policy.mjs scripts/test-publish-environment.mjs scripts/test-publish-package.mjs",
+    "privacy:test": "node --test scripts/test-privacy-policy.mjs scripts/test-publish-environment.mjs scripts/test-publish-package.mjs scripts/test-client-version.mjs",
     "hooks:install": "git config core.hooksPath .githooks",
-    "verify": "npm run privacy:test && npm run scan:secrets && npm run check:private && npm run protocol:check && npm run typecheck && npm run lint && npm test && npm run build && npm run openapi:check && npm run pack:check"
+    "verify": "npm run privacy:test && npm run scan:secrets && npm run check:private && npm run version:check && npm run protocol:check && npm run typecheck && npm run lint && npm test && npm run build && npm run client:build && npm run openapi:check && npm run pack:check",
+    "client:build": "npm run build --workspace @hivemagnus/ardent-client",
+    "version:check": "node scripts/check-client-version.mjs",
+    "release:version": "npm version --no-git-tag-version --workspaces --include-workspace-root"
   },
   "dependencies": {
     "@a2a-js/sdk": "1.3.0",
@@ -98,8 +104,8 @@
     "@types/node": "^24.19.2",
     "@types/pdfmake": "0.3.3",
     "@types/ws": "^8.18.2",
+    "esbuild": "0.28.2",
     "eslint": "10.14.0",
-    "openapi-fetch": "0.17.0",
     "openapi-typescript": "^7.13.0",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",

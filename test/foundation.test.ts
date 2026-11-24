@@ -28,7 +28,7 @@ import { ServerCredentials } from '@grpc/grpc-js';
 import { validateTeamEnvelope, validateTeamResult } from '../src/team-contract.js';
 import { readPeersConfig, savePeersConfig } from '../src/a2a-peers.js';
 import { TeamControlService } from '../src/team-control.js';
-import { createArdentManagementClient } from './ardent-client.js';
+import { createArdentClient, direct } from '../client/src/index.js';
 
 const dirs: string[] = [];
 const servers: Server[] = [];
@@ -846,10 +846,10 @@ describe('headless management API', () => {
     const runtime = new ArdentRuntime(dir, loaded.config, {});
     const app = createArdentApi(runtime, loaded, { ARDENT_API_TOKEN: 'fixture-token' });
     try {
-      const client = createArdentManagementClient({ baseUrl: 'http://ardent.test', bearerToken: 'fixture-token', fetch: (input, init) => app.request(new Request(input, init)) });
-      const typedStatus = await client.GET('/api/v1/status');
-      expect(typedStatus.error).toBeUndefined();
-      expect(typedStatus.data?.profile).toBe('assistant');
+      const client = createArdentClient({ transport: direct({ baseUrl: 'http://ardent.test', getToken: () => 'fixture-token', fetch: (input, init) => app.request(new Request(input, init)) }) });
+      const typedStatus = await client.status();
+      expect(typedStatus.profile).toBe('assistant');
+      expect(typedStatus.capabilities.artifact_transfer).toBe(2);
       expect((await app.request('/health/live')).status).toBe(200);
       expect((await app.request('/health/ready')).status).toBe(503);
       expect((await app.request('/api/v1/config')).status).toBe(401);

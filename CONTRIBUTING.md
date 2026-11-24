@@ -29,7 +29,9 @@ npm run native:check
 - Keep TypeScript strict and follow the style of the surrounding code. See [AGENTS.md](AGENTS.md).
 - Add or update tests for behaviour changes; security fixes need a regression test.
 - If you change a management API route or schema, run `npm run openapi:write` and commit the
-  updated `openapi/ardent.json` and `test/generated/ardent-openapi.ts`.
+  updated `openapi/ardent.json` and `client/src/generated.ts` (the types of
+  `@hivemagnus/ardent-client`). A route the client should wrap also needs a client method, a
+  test in `client/test/` and, when Magnus routes it, a line in the client README's Magnus table.
 - Never commit `.env` files, keys, certificates, databases, profile state, or other credentials,
   or details of private infrastructure (real hostnames, IPs, usernames, home paths). The git hooks
   in `.githooks/` enforce this. See [AGENTS.md](AGENTS.md) for the full rules, which apply to people

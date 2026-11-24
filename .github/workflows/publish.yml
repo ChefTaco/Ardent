@@ -1,10 +1,19 @@
 name: Publish to npm
 
-# Publishes @hivemagnus/ardent with provenance when its version is not on npm yet.
-# - Push a tag vX.Y.Z (matching package.json) to publish.
-# - Run it by hand (Actions > Publish to npm > Run workflow) for a dry run.
+# Publishes @hivemagnus/ardent, then @hivemagnus/ardent-client (client/), with provenance when
+# their version is not on npm yet. Both carry the same version (npm run release:version -- X.Y.Z).
+# - Push a tag vX.Y.Z (matching both package.json files) to publish.
+# - Run it by hand (Actions > Publish to npm > Run workflow) for a dry run of both packages.
 # Publishing waits for approval on the `npm-publish` environment, then authenticates to npm
 # through trusted publishing (OIDC). No npm token is stored in this repository.
+# A version already on npm is skipped, so a failed client step can be re-run after the runtime
+# was published.
+#
+# Each package needs its own trusted publisher on npmjs.com, and npm can configure one only for
+# a package that already exists. Before the first release that carries the client, an owner
+# publishes @hivemagnus/ardent-client once by hand (it then has no provenance), then runs:
+#   npm trust github @hivemagnus/ardent-client --file publish.yml --repo ChefTaco/Ardent --env npm-publish --allow-publish
+# Check it with `npm trust list @hivemagnus/ardent-client`. Later releases publish it here.
 
 on:
   push:
@@ -73,5 +82,8 @@ jobs:
           node scripts/check-schedule.mjs
           node scripts/check-native.mjs
 
-      - name: Publish
-        run: node scripts/publish-package.mjs
+      - name: Publish runtime
+        run: node scripts/publish-package.mjs runtime
+
+      - name: Publish client
+        run: node scripts/publish-package.mjs client

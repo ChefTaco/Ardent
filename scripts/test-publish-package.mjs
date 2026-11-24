@@ -1,16 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse } from 'yaml';
-import { publishedVersionExists, publishPackage } from './publish-package.mjs';
+import { publishedVersionExists, publishPackage, publishRelease } from './publish-package.mjs';
 
-function releaseFixture(t, manifest = {}) {
+function releaseFixture(t, manifest = {}, client) {
   const root = mkdtempSync(join(tmpdir(), 'ardent-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, 'package.json'), JSON.stringify({
     name: '@hivemagnus/ardent', version: '1.0.1', publishConfig: { access: 'public' }, ...manifest,
+  }));
+  mkdirSync(join(root, 'client'));
+  writeFileSync(join(root, 'client/package.json'), JSON.stringify({
+    name: '@hivemagnus/ardent-client', version: '1.0.1', publishConfig: { access: 'public' }, ...client,
   }));
   return root;
 }
@@ -39,7 +43,9 @@ test('the workflow publishes only from the protected environment, with OIDC and 
   assert.deepEqual(workflow.on.push.tags, ['v*']);
   assert.equal(workflow.on.workflow_dispatch.inputs.dry_run.default, true);
   const steps = job.steps;
-  assert.equal(steps.at(-1).run, 'node scripts/publish-package.mjs');
+  // The client publishes after the runtime, from the same job, environment and tag.
+  assert.deepEqual(steps.slice(-2).map(step => step.run), ['node scripts/publish-package.mjs runtime', 'node scripts/publish-package.mjs client']);
+  assert.ok(steps.some(step => step.run?.includes('npm run verify')));
   assert.ok(steps.some(step => step.run === 'node scripts/check-publish-environment.mjs' && step.if === "env.DRY_RUN != 'true'"));
   assert.ok(!JSON.stringify(workflow).includes('secrets.'));
 });
@@ -84,4 +90,40 @@ test('package metadata mismatches stop before calling npm', async t => {
   await assert.rejects(publishPackage(options(releaseFixture(t, { name: '@example/other' }))), /public @hivemagnus\/ardent/);
   await assert.rejects(publishPackage(options(releaseFixture(t, { version: 'next' }))), /valid version/);
   await assert.rejects(publishPackage({ root: releaseFixture(t), dryRun: undefined }), /explicit boolean/);
+});
+
+test('one tag publishes the runtime and then the client, each skipped when already on npm', async t => {
+  const root = releaseFixture(t);
+  const calls = [];
+  const lookups = [];
+  const run = (...args) => calls.push(args[2].cwd);
+  const published = new Set(['@hivemagnus/ardent']);
+  const fetcher = async url => {
+    lookups.push(url);
+    const name = decodeURIComponent(url.split('/')[3]);
+    return published.has(name) ? Response.json({ name, version: '1.0.1' }) : new Response('', { status: 404 });
+  };
+  await publishRelease({ root, dryRun: false, ref: 'refs/tags/v1.0.1', run, fetcher });
+  assert.deepEqual(lookups, ['https://registry.npmjs.org/%40hivemagnus%2Fardent/1.0.1', 'https://registry.npmjs.org/%40hivemagnus%2Fardent-client/1.0.1']);
+  assert.deepEqual(calls, [join(root, 'client')]);
+  calls.length = 0;
+  await publishRelease({ root, dryRun: true, ref: 'refs/heads/main', run, fetcher: () => { throw new Error('unexpected registry lookup'); } });
+  assert.deepEqual(calls, [root, join(root, 'client')]);
+  calls.length = 0;
+  await publishRelease({ root, dryRun: true, only: 'client', run });
+  assert.deepEqual(calls, [join(root, 'client')]);
+  await assert.rejects(publishRelease({ root, dryRun: true, only: 'docs', run }), /Unknown release package/);
+});
+
+test('a client that does not carry the runtime version stops the whole release', async t => {
+  const run = () => assert.fail('npm must not run');
+  await assert.rejects(publishRelease({ root: releaseFixture(t, {}, { version: '1.0.0' }), dryRun: true, run }), /different versions/);
+  await assert.rejects(publishRelease({ root: releaseFixture(t, {}, { version: '1.0.0' }), dryRun: true, only: 'runtime', run }), /different versions/);
+  await assert.rejects(publishRelease({ root: releaseFixture(t, {}, { name: '@example/other' }), dryRun: true, run }), /public @hivemagnus\/ardent-client/);
+  await assert.rejects(publishRelease({ root: releaseFixture(t, {}, { private: true }), dryRun: true, run }), /public @hivemagnus\/ardent-client/);
+});
+
+test('the workflow documents the trusted publisher the client needs', () => {
+  const text = readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8');
+  assert.ok(text.includes('npm trust github @hivemagnus/ardent-client --file publish.yml --repo ChefTaco/Ardent --env npm-publish --allow-publish'));
 });

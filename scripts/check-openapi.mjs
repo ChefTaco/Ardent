@@ -8,8 +8,9 @@ import SwaggerParser from '@apidevtools/swagger-parser';
 import { ardentOpenApi } from '../dist/api.js';
 
 const target = resolve(import.meta.dirname, '../openapi/ardent.json');
-// Types for the typed management client the tests use; consumers generate their own from the same document.
-const generatedTypes = resolve(import.meta.dirname, '../test/generated/ardent-openapi.ts');
+// Types of @hivemagnus/ardent-client (client/), which Ardent's own tests also use. They move with the API:
+// --write regenerates them, and the check fails when they differ from the document.
+const generatedTypes = resolve(import.meta.dirname, '../client/src/generated.ts');
 const generator = resolve(import.meta.dirname, '../node_modules/.bin/openapi-typescript');
 const exec = promisify(execFile);
 // openapi-typescript 7 runs on the archived @redocly/openapi-core 1.x, which only calls
@@ -44,8 +45,9 @@ if (process.argv.includes('--write')) {
   try {
     const expectedTypes = resolve(dir, 'ardent-openapi.ts');
     await exec(generator, [target, '-o', expectedTypes], { timeout: 30_000 });
-    if (await readFile(generatedTypes, 'utf8') !== await readFile(expectedTypes, 'utf8'))
-      throw new Error(`Ardent typed client drift: run npm run openapi:write and review ${generatedTypes}`);
+    const committedTypes = await readFile(generatedTypes, 'utf8').catch(() => '');
+    if (committedTypes !== await readFile(expectedTypes, 'utf8'))
+      throw new Error(`Ardent client types drift: run npm run openapi:write and review ${generatedTypes}`);
   } finally { await rm(dir, { recursive: true, force: true }); }
   process.stdout.write(`Ardent OpenAPI 3.1 validated (${operations.size} operations)\n`);
 }
