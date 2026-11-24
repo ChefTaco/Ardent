@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-11-24
+
 **Interrupted tasks now resume by default.** After a crash or restart, a task that was `running` continues under the same id from its last completed model or tool boundary instead of becoming `unknown`; a task with an unsettled effect is held `unknown` with an actionable recovery status. Set `execution.recovery.enabled: false` for the previous behaviour.
 
 ### Added
