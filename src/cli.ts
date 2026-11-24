@@ -499,6 +499,7 @@ async function main(): Promise<void> {
           if (httpServer) await new Promise<void>(resolve => httpServer.close(() => resolve()));
           if (grpcServer) await new Promise<void>(resolve => grpcServer.tryShutdown(() => resolve()));
           if (a2aSurface) {
+            a2aSurface.recovery.close();
             try { await a2aSurface.pushSender.drain(); }
             catch { shutdownUnsettled = true; }
           }

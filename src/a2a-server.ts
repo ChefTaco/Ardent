@@ -28,7 +28,10 @@ export function artifactTransferExtension(maxBytes: number) {
     required: false, params: { max_bytes: maxBytes, range: true, renditions: true } };
 }
 
-export type A2ASurface = { app: Express; grpcServer: GrpcServer; card: AgentCard; grpcAddress: string; grpcListenPort: number; pushSender: SafeA2APushSender; pushInbox: A2APushInbox; handler: IdempotentA2AHandler; taskGate: PeerTaskGate };
+/** Publishes the outcome of A2A tasks whose operation execution recovery resumed, held or continued (see `ArdentA2AExecutor.publishRecovered`). */
+export type A2ARecoveryPublisher = { /** Resolves once no publication pass is running. */ idle(): Promise<void>; /** Stop listening for settled tasks. */ close(): void };
+export type A2ASurface = { app: Express; grpcServer: GrpcServer; card: AgentCard; grpcAddress: string; grpcListenPort: number; pushSender: SafeA2APushSender; pushInbox: A2APushInbox; handler: IdempotentA2AHandler; taskGate: PeerTaskGate;
+  recovery: A2ARecoveryPublisher };
 
 /** Refresh only discovery freshness; the reviewed runtime identity and digests stay pinned to this process. */
 export function freshHermesTeamCard(source: Awaited<ReturnType<typeof hermesTeamCard>>, now = Date.now()) {
@@ -91,7 +94,23 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   const taskStore = new SqliteA2ATaskStore(runtime.store.db);
   const limits = config.a2a.rate_limit;
   const taskGate = new PeerTaskGate(limits.enabled ? limits.max_concurrent_tasks_per_peer : Number.MAX_SAFE_INTEGER);
-  const handler = new IdempotentA2AHandler(runtime.store.db, taskStore, taskGate, card, taskStore, new GatedA2AExecutor(new ArdentA2AExecutor(runtime, env), taskGate), undefined, pushStore, pushSender, async context => {
+  const executor = new ArdentA2AExecutor(runtime, env);
+  // Interrupted peer tasks have no live request left; publish their outcome once now and after each task settles.
+  let recoveryPass: Promise<void> | undefined;
+  let again = false;
+  let closed = false;
+  const publish = (): void => {
+    if (closed) return;
+    if (recoveryPass) { again = true; return; }
+    recoveryPass = executor.publishRecovered(taskStore, pushSender).then(() => undefined, () => undefined)
+      .finally(() => { recoveryPass = undefined; if (again) { again = false; publish(); } });
+  };
+  const unsubscribe = runtime.onTaskSettled(() => publish());
+  const recovery: A2ARecoveryPublisher = {
+    idle: async () => { while (recoveryPass) await recoveryPass; },
+    close: () => { closed = true; unsubscribe(); }
+  };
+  const handler = new IdempotentA2AHandler(runtime.store.db, taskStore, taskGate, card, taskStore, new GatedA2AExecutor(executor, taskGate), undefined, pushStore, pushSender, async context => {
     const peerId = context.user?.userName;
     if (!context.user?.isAuthenticated || !peerId || !peers.some(peer => peer.id === peerId && peer.enabled)) throw new Error('Authenticated configured peer required');
     return {
@@ -217,7 +236,8 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     const raw = call.metadata.get('authorization')[0];
     return limitedGrpcUser(authenticate(typeof raw === 'string' ? raw : undefined), limits.enabled ? peerBucket : undefined);
   } }));
-  return { app, grpcServer, card, grpcAddress, grpcListenPort: listenPort + 1, pushSender, pushInbox, handler, taskGate };
+  publish();
+  return { app, grpcServer, card, grpcAddress, grpcListenPort: listenPort + 1, pushSender, pushInbox, handler, taskGate, recovery };
 }
 
 export async function startA2AGrpc(surface: A2ASurface, host = '127.0.0.1'): Promise<void> {

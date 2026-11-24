@@ -739,10 +739,34 @@ digest), `tool_invocations` (one row per call: `dispatched` before invocation,
 then settled with its result; compacted arguments, so file bytes stay in the
 artifact store), and `task_recovery`. `model_result` events also carry `calls`
 (id, name, compacted arguments). Execution checkpoints are separate from
-context checkpoints; neither reads the other. A resumed channel task records its
-answer in its session but does not send a reply, and an A2A peer is not told
-about a resumed or continued task; both are as before. Rolling back to 3.1.x
-ignores the new tables and holds interrupted tasks as `unknown`.
+context checkpoints; neither reads the other. Rolling back to 3.1.x ignores the
+new tables and holds interrupted tasks as `unknown`.
+
+**Channels.** A recovered task has no in-process handler waiting for it, so the
+Telegram and Mattermost adapters answer its update themselves: at start and
+whenever a task settles they find updates bound to a recovered task with no
+recorded delivery, wait for the resumed task (or for the continuation an
+operator decision creates), and reply through the usual record-before-send path.
+The reply target (conversation, thread, message replied to) is stored with each
+inbound claim (`channel_inbound.reply_target_json`). An update that already has
+a delivery (queued, sent, failed or unknown) is never sent again, and a task
+held awaiting a decision is not answered until its continuation finishes.
+Updates claimed before this release have no stored target and are not answered.
+
+**A2A peers.** The A2A surface publishes the outcome of a peer task whose
+operation was recovered, through the same task store (GetTask, ListTasks) and
+push sender as a live request:
+
+| Operation | Peer task |
+|---|---|
+| Resumed, then completed | Answer, artifacts and `completed` (or `input_required`), as live. |
+| Settled at startup (`failed`, `cancelled`) | `failed` or `canceled`. |
+| Held `awaiting_decision` | Stays `working`; a status message gives the reason, and task metadata `ardentRecovery: { status, reason_code }`. |
+| Continued after a decision | Follows the continuation: its answer and final state are published for the peer's original task, the A2A operation binding moves to the continuation, and `ardentRecovery.continuation_task_id` names it. |
+| Held `unsupported`, or abandoned | `failed` with "Execution outcome is unknown: ...", as an interrupted task with an uncertain effect reports today. |
+
+Each final state is claimed in `a2a_recovery_publications` before it is
+published, so it and its push notification are sent at most once.
 
 ### Execution ancestry
 
