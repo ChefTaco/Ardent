@@ -1,7 +1,8 @@
 import {collectPluginTeamEvidence} from './plugin-evidence.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Role, TaskState, type Artifact, type Message, type Part, type Task, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
-import { AgentEvent, type AgentExecutor, type ExecutionEventBus, type RequestContext } from '@a2a-js/sdk/server';
+import { AgentEvent, ResultManager, ServerCallContext, type AgentExecutionEvent, type AgentExecutor, type ExecutionEventBus, type PushNotificationSender,
+  type RequestContext, type TaskStore as A2ATaskStore } from '@a2a-js/sdk/server';
 import { z } from 'zod';
 import type { ArdentRuntime, RunResult } from './runtime.js';
 import { TEAM_TASK_METADATA_KEY, TEAM_CLARIFICATION_METADATA_KEY, TeamResult as TeamResultSchema, validateTeamEnvelope, validateTeamResult, type TeamEnvelope, type TeamResult } from './team-contract.js';
@@ -90,8 +91,137 @@ export class ArdentA2AExecutor implements AgentExecutor {
     this.#control = new TeamControlService(runtime);
     this.#children = new TeamChildService(runtime, env);
     this.#artifacts = new TeamArtifacts(runtime, runtime.config, env);
+    // What the peer was told about a task execution recovery resumed, held or continued; `final` is set once.
+    runtime.store.db.exec(`CREATE TABLE IF NOT EXISTS a2a_recovery_publications (a2a_task_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL,
+      state TEXT NOT NULL, final INTEGER NOT NULL, updated_ms INTEGER NOT NULL)`);
     // Unacknowledged settlements stay retained for a later flush; never crash startup.
     void this.#children.flush().catch(() => {});
+  }
+  readonly #recovering = new Set<string>();
+  /**
+   * Record what is about to be told to the peer about a recovered task. A final
+   * state is claimed once, so its status (and push) is published at most once;
+   * a held notice once per held state.
+   */
+  #claimPublication(a2aTaskId: string, operationId: string, state: string, final: boolean): boolean {
+    const db = this.runtime.store.db;
+    return db.transaction(() => {
+      const prior = z.object({ state: z.string(), final: z.number().int() }).safeParse(db.prepare('SELECT state,final FROM a2a_recovery_publications WHERE a2a_task_id=?').get(a2aTaskId)).data;
+      if (prior?.final || (prior && !final && prior.state === state)) return false;
+      db.prepare(`INSERT INTO a2a_recovery_publications(a2a_task_id,operation_id,state,final,updated_ms) VALUES (?,?,?,?,?)
+        ON CONFLICT(a2a_task_id) DO UPDATE SET operation_id=excluded.operation_id,state=excluded.state,final=excluded.final,updated_ms=excluded.updated_ms`)
+        .run(a2aTaskId, operationId, state, final ? 1 : 0, Date.now());
+      return true;
+    })();
+  }
+  /** The task whose outcome answers an operation: itself, or the last continuation an operator decision created for it. */
+  #answeringTask(operationId: string) {
+    let task = this.runtime.store.get(operationId);
+    for (let hops = 0; task && hops < 16; hops++) {
+      const next = this.runtime.store.executionState.recovery(task.id)?.continuation_task_id;
+      const continued = next ? this.runtime.store.get(next) : undefined;
+      if (!continued) break;
+      task = continued;
+    }
+    return task;
+  }
+  /**
+   * Tell peers the outcome of A2A tasks whose operation execution recovery
+   * resumed, settled, held or continued after a restart; the in-process
+   * request that would have published it is gone. Events go through the same
+   * task store (GetTask, ListTasks) and push sender as a live request:
+   *
+   * - resumed: the operation's answer, artifacts and final state, as live;
+   * - held awaiting an operator decision: a non-terminal `working` status
+   *   whose message and `ardentRecovery` metadata give the reason;
+   * - continued after a decision: the continuation's outcome, published for
+   *   the peer's original task (the A2A operation binding moves to the
+   *   continuation, and `ardentRecovery.continuation_task_id` names it);
+   * - unsupported, or abandoned: `failed` with "Execution outcome is unknown".
+   *
+   * Each final state is claimed once before it is published, so it (and its
+   * push) is never published twice. Returns the tasks given a final state.
+   */
+  async publishRecovered(taskStore: A2ATaskStore, push: PushNotificationSender | undefined): Promise<number> {
+    const db = this.runtime.store.db;
+    const rows = z.array(z.object({ a2a_task_id: z.string(), operation_id: z.string(), tenant: z.string(), caller: z.string() })).parse(db.prepare(`SELECT m.a2a_task_id,
+      m.operation_id, m.tenant, m.caller FROM a2a_operation_map m WHERE EXISTS (SELECT 1 FROM task_recovery r WHERE r.task_id=m.operation_id)
+        AND NOT EXISTS (SELECT 1 FROM a2a_recovery_publications p WHERE p.a2a_task_id=m.a2a_task_id AND p.final=1) LIMIT 100`).all());
+    let published = 0;
+    await Promise.all(rows.map(async row => {
+      if (this.#recovering.has(row.a2a_task_id) || this.#operations.has(row.a2a_task_id)) return;
+      this.#recovering.add(row.a2a_task_id);
+      try { if (await this.#publishRecoveredTask(taskStore, push, row)) published++; }
+      finally { this.#recovering.delete(row.a2a_task_id); }
+    }));
+    return published;
+  }
+  async #publishRecoveredTask(taskStore: A2ATaskStore, push: PushNotificationSender | undefined,
+    row: { a2a_task_id: string; operation_id: string; tenant: string; caller: string }): Promise<boolean> {
+    const context = new ServerCallContext({ tenant: row.tenant, user: { isAuthenticated: true, userName: row.caller }, requestedVersion: '1.0' });
+    const stored = await taskStore.load(row.a2a_task_id, context);
+    const terminal = [TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED, TaskState.TASK_STATE_REJECTED];
+    if (!stored || (stored.status && terminal.includes(stored.status.state))) {
+      this.#claimPublication(row.a2a_task_id, row.operation_id, 'already_final', true);
+      return false;
+    }
+    const taskId = row.a2a_task_id;
+    const contextId = stored.contextId;
+    let task = this.#answeringTask(row.operation_id);
+    let result: RunResult | undefined;
+    if (task && ['queued', 'running'].includes(task.state)) {
+      try { result = await this.runtime.run(task.id, this.env); } catch { result = undefined; }
+      task = this.#answeringTask(row.operation_id);
+    }
+    if (!task) return false;
+    const original = this.runtime.store.executionState.recovery(row.operation_id);
+    const recovery = this.runtime.store.executionState.recovery(task.id);
+    const metadata = { ardentRecovery: { status: (task.id === row.operation_id ? recovery : original)?.status ?? 'resumed', reason_code: (recovery ?? original)?.reason.code ?? null,
+      ...(task.id !== row.operation_id ? { continuation_task_id: task.id } : {}) } };
+    // Events are applied and pushed in order, exactly as a live request applies them.
+    const results = new ResultManager(taskStore, context);
+    let chain = Promise.resolve();
+    const bus = { publish: (event: AgentExecutionEvent) => {
+      chain = chain.then(async () => {
+        await results.processEvent(event);
+        const payload = event.kind === 'statusUpdate' ? { $case: 'statusUpdate' as const, value: event.data }
+          : event.kind === 'artifactUpdate' ? { $case: 'artifactUpdate' as const, value: event.data } : undefined;
+        if (payload && push) await push.send({ payload }, context, structuredClone(results.getCurrentTask())).catch(() => undefined);
+      });
+    } };
+    const envelopeRow: unknown = this.runtime.store.db.prepare('SELECT envelope_json FROM a2a_team_missions WHERE a2a_task_id=?').get(taskId);
+    const envelope = envelopeRow ? this.runtime.decodeTeamEnvelope(JSON.parse(z.object({ envelope_json: z.string() }).parse(envelopeRow).envelope_json) as unknown) : undefined;
+    const childReference = this.#children.referenceFor(row.operation_id);
+    if (task.state === 'completed' || task.state === 'partial') {
+      if (!this.#claimPublication(taskId, task.id, task.state, true)) return false;
+      if (task.id !== row.operation_id) this.runtime.store.db.transaction(() => {
+        // The peer's task now follows the continuation: its exports, admission and cancellation bind to it.
+        this.runtime.store.db.prepare('UPDATE a2a_operation_map SET operation_id=? WHERE a2a_task_id=?').run(task.id, taskId);
+        if (envelope) this.runtime.store.db.prepare('INSERT OR IGNORE INTO a2a_operation_links(a2a_task_id,operation_id) VALUES (?,?)').run(taskId, task.id);
+      })();
+      result ??= await this.runtime.run(task.id, this.env);
+      const teamResult = envelope ? await this.#teamResult(envelope, result, task.id) : undefined;
+      await this.#publishResult(bus, taskId, contextId, envelope, childReference, teamResult, result, metadata);
+    } else if (task.state === 'failed' || task.state === 'cancelled') {
+      if (!this.#claimPublication(taskId, task.id, task.state, true)) return false;
+      if (childReference) await this.#children.settle(childReference, task.state === 'cancelled' ? 'cancelled' : 'failed', task.error ?? task.state).catch(() => undefined);
+      bus.publish(AgentEvent.statusUpdate({ ...status(taskId, contextId, task.state === 'cancelled' ? TaskState.TASK_STATE_CANCELED : TaskState.TASK_STATE_FAILED, task.error ?? undefined), metadata }));
+    } else if (task.state === 'unknown') {
+      const held = recovery?.status === 'awaiting_decision' || (recovery?.status === 'resolved' && recovery.continuation_task_id);
+      if (held) {
+        if (!this.#claimPublication(taskId, task.id, `held:${task.id}`, false)) return false;
+        bus.publish(AgentEvent.statusUpdate({ ...status(taskId, contextId, TaskState.TASK_STATE_WORKING,
+          `Held for an operator decision: ${recovery?.reason.message ?? 'execution outcome is unknown'}`), metadata }));
+        await chain;
+        return false;
+      }
+      if (!this.#claimPublication(taskId, task.id, 'unknown', true)) return false;
+      if (childReference) await this.#children.settle(childReference, 'unknown', task.error ?? 'Execution outcome is unknown').catch(() => undefined);
+      bus.publish(AgentEvent.statusUpdate({ ...status(taskId, contextId, TaskState.TASK_STATE_FAILED,
+        `Execution outcome is unknown: ${recovery?.reason.message ?? task.error ?? 'interrupted'}`), metadata }));
+    } else return false;
+    await chain;
+    return true;
   }
   async execute(request: RequestContext, bus: ExecutionEventBus): Promise<void> {
     const caller = request.context.user;
@@ -213,35 +343,7 @@ export class ArdentA2AExecutor implements AgentExecutor {
         bus.publish(AgentEvent.statusUpdate(status(taskId, contextId, TaskState.TASK_STATE_FAILED, 'Cancellation was requested during result validation')));
         return;
       }
-      const answerText = teamResult ? JSON.stringify(teamResult) : result.answer;
-      if (childReference && teamResult) {
-        try { await this.#children.settle(childReference, teamResult.outcome, answerText); }
-        catch (error: unknown) { this.runtime.store.append(operation.id, 'team_child_settlement_pending', { reason: error instanceof Error ? error.message : 'Root settlement unavailable' }); }
-      }
-      const answer: Artifact = { artifactId: randomUUID(), name: envelope ? 'Team result' : 'Research answer', description: envelope ? 'Validated team result contract' : 'Ardent answer', parts: [textPart(answerText)], metadata: undefined, extensions: [] };
-      bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: answer, append: false, lastChunk: true, metadata: undefined }));
-      if (result.brief) {
-        const packet: Artifact = { artifactId: randomUUID(), name: 'Evidence packet', description: 'Structured source and claim references', parts: [{ content: { $case: 'data', value: result.brief }, metadata: undefined, filename: 'research-brief.json', mediaType: 'application/json' }], metadata: undefined, extensions: [] };
-        bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: packet, append: false, lastChunk: true, metadata: undefined }));
-      }
-      if (envelope) for (const exported of await this.#artifacts.registerResearch(taskId)) {
-        // The v1 descriptor (at most 2 MiB) is unchanged; above that a v1 consumer
-        // gets an explicit TRANSFER_REQUIRES_V2 result instead.
-        const transfer: Artifact = exported.v1 ? { artifactId: randomUUID(), name: 'Team artifact export',
-          description: 'Task-bound peer export; fetch and recipient delivery require separate receipts',
-          parts: [textPart(JSON.stringify(exported.v1))], metadata: undefined, extensions: [] }
-          : { artifactId: randomUUID(), name: 'Team artifact export requires v2',
-            description: `Task-bound peer export larger than the v1 limit; fetch it with ${ARTIFACT_TRANSFER_V2_URN}`,
-            parts: [textPart(JSON.stringify(exported.requires_v2))], metadata: undefined, extensions: [] };
-        bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: transfer, append: false,
-          lastChunk: true, metadata: undefined }));
-        const v2: Artifact = { artifactId: randomUUID(), name: 'Team artifact export v2',
-          description: 'Task-bound peer export for resumable transfer with renditions; fetch and recipient delivery require separate receipts',
-          parts: [{ content: { $case: 'data', value: exported.v2 }, metadata: undefined, filename: exported.v2.manifest_1_1.name,
-            mediaType: ARTIFACT_TRANSFER_V2_MEDIA_TYPE }], metadata: undefined, extensions: [ARTIFACT_TRANSFER_V2_URN] };
-        bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: v2, append: false, lastChunk: true, metadata: undefined }));
-      }
-      bus.publish(AgentEvent.statusUpdate(status(taskId, contextId, teamResult?.outcome === 'input_required' ? TaskState.TASK_STATE_INPUT_REQUIRED : TaskState.TASK_STATE_COMPLETED)));
+      await this.#publishResult(bus, taskId, contextId, envelope, childReference, teamResult, result);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Ardent execution failed';
       const cancelled = this.#cancelled.has(taskId);
@@ -256,6 +358,39 @@ export class ArdentA2AExecutor implements AgentExecutor {
       this.#operations.delete(taskId);
       this.#cancelled.delete(taskId);
     }
+  }
+  /** Publish a finished operation's answer, evidence and artifacts, settle its team child, then its final status. */
+  async #publishResult(bus: Pick<ExecutionEventBus, 'publish'>, taskId: string, contextId: string, envelope: TeamEnvelope | undefined,
+    childReference: TeamChildReference | undefined, teamResult: TeamResult | undefined, result: RunResult, metadata?: Record<string, unknown>): Promise<void> {
+    const answerText = teamResult ? JSON.stringify(teamResult) : result.answer;
+    if (childReference && teamResult) {
+      try { await this.#children.settle(childReference, teamResult.outcome, answerText); }
+      catch (error: unknown) { this.runtime.store.append(result.task.id, 'team_child_settlement_pending', { reason: error instanceof Error ? error.message : 'Root settlement unavailable' }); }
+    }
+    const answer: Artifact = { artifactId: randomUUID(), name: envelope ? 'Team result' : 'Research answer', description: envelope ? 'Validated team result contract' : 'Ardent answer', parts: [textPart(answerText)], metadata: undefined, extensions: [] };
+    bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: answer, append: false, lastChunk: true, metadata: undefined }));
+    if (result.brief) {
+      const packet: Artifact = { artifactId: randomUUID(), name: 'Evidence packet', description: 'Structured source and claim references', parts: [{ content: { $case: 'data', value: result.brief }, metadata: undefined, filename: 'research-brief.json', mediaType: 'application/json' }], metadata: undefined, extensions: [] };
+      bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: packet, append: false, lastChunk: true, metadata: undefined }));
+    }
+    if (envelope) for (const exported of await this.#artifacts.registerResearch(taskId)) {
+      // The v1 descriptor (at most 2 MiB) is unchanged; above that a v1 consumer
+      // gets an explicit TRANSFER_REQUIRES_V2 result instead.
+      const transfer: Artifact = exported.v1 ? { artifactId: randomUUID(), name: 'Team artifact export',
+        description: 'Task-bound peer export; fetch and recipient delivery require separate receipts',
+        parts: [textPart(JSON.stringify(exported.v1))], metadata: undefined, extensions: [] }
+        : { artifactId: randomUUID(), name: 'Team artifact export requires v2',
+          description: `Task-bound peer export larger than the v1 limit; fetch it with ${ARTIFACT_TRANSFER_V2_URN}`,
+          parts: [textPart(JSON.stringify(exported.requires_v2))], metadata: undefined, extensions: [] };
+      bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: transfer, append: false,
+        lastChunk: true, metadata: undefined }));
+      const v2: Artifact = { artifactId: randomUUID(), name: 'Team artifact export v2',
+        description: 'Task-bound peer export for resumable transfer with renditions; fetch and recipient delivery require separate receipts',
+        parts: [{ content: { $case: 'data', value: exported.v2 }, metadata: undefined, filename: exported.v2.manifest_1_1.name,
+          mediaType: ARTIFACT_TRANSFER_V2_MEDIA_TYPE }], metadata: undefined, extensions: [ARTIFACT_TRANSFER_V2_URN] };
+      bus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact: v2, append: false, lastChunk: true, metadata: undefined }));
+    }
+    bus.publish(AgentEvent.statusUpdate({ ...status(taskId, contextId, teamResult?.outcome === 'input_required' ? TaskState.TASK_STATE_INPUT_REQUIRED : TaskState.TASK_STATE_COMPLETED), metadata }));
   }
   async cancelTask(taskId: string, bus: ExecutionEventBus): Promise<void> {
     this.#cancelled.add(taskId);

@@ -33,11 +33,15 @@ import { readProfileEnv } from './profile-env.js';
 import { ExecutionContextSchema, ExecutionInput, type ExecutionAcceptance } from './execution.js';
 import { TaskLineageSchema, taskLineage } from './lineage.js';
 import { readExecutionHeader } from '@hivemagnus/hive-common/execution';
+import { RecoveryDecisionInput, RecoveryViewSchema, recoveryView, type RecoveryView } from './recovery.js';
+import { RecoveryConflictError } from './runtime.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional(),
   execution: ExecutionInput.optional() }).strict();
-/** A task as the management API reports it: the stored row plus its execution context, when it has one. */
-const TaskView = TaskSchema.extend({ execution: ExecutionContextSchema.optional() });
+/** A task as the management API reports it: the stored row plus its execution context and recovery, when it has them. */
+const TaskView = TaskSchema.extend({ execution: ExecutionContextSchema.optional(), recovery: RecoveryViewSchema.optional() });
+const RecoveryCounts = z.object({ ready: z.number().int(), reconciling: z.number().int(), awaiting_decision: z.number().int(), unsupported: z.number().int() })
+  .describe('Tasks in each open execution recovery status');
 /** Request bodies as documented: `execution` is an execution context v1, accepted leniently. */
 const documented = <T extends z.ZodObject>(schema: T) => schema.extend({ execution: ExecutionContextSchema.optional() });
 /** Contexts a management caller may open a session in. A session serves tasks of its own context only. */
@@ -134,6 +138,10 @@ export function ardentOpenApi(): object {
       '/api/v1/sessions': { get: { operationId: 'listSessions', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'context', description: 'Session context (default direct)', schema: { type: 'string', enum: ['direct', 'mission', 'preview'] } }], responses: { '200': jsonResponse('Caller sessions', z.object({ sessions: z.array(SessionSchema) })) } }, post: { operationId: 'openSession', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(SessionOpen) } } }, responses: { '200': jsonResponse('Existing or new session', SessionSchema) } } },
       '/api/v1/sessions/{id}/messages': { get: { operationId: 'getSessionMessages', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': jsonResponse('Recent caller session messages', z.object({ messages: z.array(SessionMessageSchema) })), '404': { description: 'Session absent' } } } },
       '/api/v1/tasks/{id}': { get: { operationId: 'getTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Task status', content: { 'application/json': { schema: { $ref: '#/components/schemas/Task' }, example: taskExample } } }, '404': { description: 'Task absent' } } } },
+      '/api/v1/tasks/{id}/recovery': {
+        get: { operationId: 'getTaskRecovery', description: 'Execution recovery of a task interrupted by a crash or restart: its status, actionable reason, checkpoint with pending tool calls, and the operator actions valid now. A resumed task stays running under the same id; a held task is unknown.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task recovery', RecoveryViewSchema), '404': { description: 'Task absent, or never interrupted' } } },
+        post: { operationId: 'decideTaskRecovery', description: 'Resolve a task held awaiting_decision. mark_applied (optional result, at most 64 KiB, checked against the tool output schema), mark_not_applied and retry_with_new_deadline (the pending call is dispatched again under its idempotency key; deadline_seconds at most execution.recovery_max_new_deadline_seconds) continue the work as a linked continuation task; abandon only records the decision. A held task stays unknown. Idempotent per task, attempt and action.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(RecoveryDecisionInput) } } }, responses: { '200': jsonResponse('Recovery after the decision; continuation_task_id names the continuation task', RecoveryViewSchema), '400': { description: 'Invalid decision' }, '404': { description: 'Task absent' }, '409': { description: 'No decision, or not this one, is valid now' } } }
+      },
       '/api/v1/tasks/{id}/lineage': { get: { operationId: 'getTaskLineage', description: 'What this profile knows about the task\'s causal tree: its execution context and parent, local child and continuation tasks, model attempts with their request ids, tool calls and artifacts. Rebuilt from SQLite, so it survives a restart. Attribution only.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task lineage', TaskLineageSchema), '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/events': { get: { operationId: 'getTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', description: 'Return events with sequence greater than this cursor', schema: { type: 'integer', minimum: 0, default: 0 } }], responses: { '200': { description: 'Journal events after the supplied sequence cursor', content: { 'application/json': { schema: { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { $ref: '#/components/schemas/TaskEvent' } } } }, example: { events: [eventExample] } } } } } } },
       '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
@@ -151,7 +159,7 @@ export function ardentOpenApi(): object {
         get: { operationId: 'listArtifactImports', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': jsonResponse('Recent imports, newest first', z.object({ imports: z.array(ArtifactImportSchema) })) } }
       },
       '/api/v1/artifacts/imports/{id}': { get: { operationId: 'getArtifactImport', description: 'Import progress. error.code is TRANSFER_REQUIRES_V2 (peer lacks urn:hive:artifact-transfer:2 and the artifact is over 2 MiB), DIGEST_MISMATCH (bytes discarded; reissue to retry), TRANSFER_TOO_LARGE, TRANSFER_SOURCE_GONE, TRANSFER_INTERRUPTED (retries exhausted; reissue resumes) or another stable code.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{32}$' } }], responses: { '200': jsonResponse('Import state', ArtifactImportSchema), '404': { description: 'Import absent' } } } },
-      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int(), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }), capabilities: z.object({ artifact_transfer: z.literal(2) }) })) } } },
+      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int(), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }), capabilities: z.object({ artifact_transfer: z.literal(2) }), recovery: RecoveryCounts.optional() })) } } },
       '/api/v1/jobs/definitions/status': { get: { operationId: 'getJobDefinitionsStatus', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Active profile job definition revision, digest, and redacted window status' }, '503': { description: 'Job engine unavailable' } } } },
       '/api/v1/profile': { get: { operationId: 'getProfile', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Profile identity and path', z.object({ profile: z.string(), name: z.string(), product: z.string(), timezone: z.string(), path: z.string() })) } } },
       '/api/v1/config': { get: { operationId: 'getConfig', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Raw YAML and revision; secrets remain references', z.object({ revision: z.string(), text: z.string() })) } }, put: { operationId: 'saveConfig', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(ConfigEdit) } } }, responses: { '200': jsonResponse('Saved; activation required', z.object({ revision: z.string(), activation_required: z.boolean() })), '409': { description: 'Revision conflict' } } } },
@@ -249,7 +257,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   app.get('/api/v1/status', c => c.json({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend, tasks: runtime.store.list(10).length,
     channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } },
-    capabilities: { artifact_transfer: 2 } }));
+    capabilities: { artifact_transfer: 2 }, recovery: runtime.store.executionState.counts() }));
   app.get('/api/v1/jobs/definitions/status', async c => {
     if (!jobEngine) throw new Error('Job engine is unavailable');
     const status = await jobEngine.status();
@@ -410,7 +418,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   const acceptance = (c: { req: { header(name: string): string | undefined } }, body: unknown): ExecutionAcceptance => ({
     context: body ?? readExecutionHeader(name => c.req.header(name)), source: 'caller',
     requestId: c.req.header('x-request-id'), traceparent: c.req.header('traceparent') });
-  const view = (task: z.infer<typeof TaskSchema>, execution = runtime.store.executionFor(task.id)) => ({ ...task, ...(execution ? { execution } : {}) });
+  const view = (task: z.infer<typeof TaskSchema>, execution = runtime.store.executionFor(task.id), recovery: RecoveryView | undefined = recoveryView(runtime.store, task)) =>
+    ({ ...task, ...(execution ? { execution } : {}), ...(recovery ? { recovery } : {}) });
   app.post('/api/v1/tasks', async c => {
     const input = parseJson(await c.req.json() as unknown, Submit);
     const task = runtime.accept(input.prompt, 'management', 'direct', input.idempotency_key, input.session_id, undefined, undefined, acceptance(c, input.execution));
@@ -431,12 +440,33 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   app.get('/api/v1/tasks', c => {
     const tasks = runtime.store.list(PageLimit.parse(c.req.query('limit') ?? 50));
     const executions = runtime.store.executions.many(tasks.map(task => task.id));
-    return c.json({ tasks: tasks.map(task => view(task, executions.get(task.id)?.context)) });
+    const recoveries = runtime.store.executionState.recoveries(tasks.map(task => task.id));
+    return c.json({ tasks: tasks.map(task => view(task, executions.get(task.id)?.context, recoveryView(runtime.store, task, recoveries.get(task.id)))) });
   });
   app.get('/api/v1/tasks/:id', c => {
     const task = runtime.store.get(c.req.param('id'));
     if (!task) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
     return c.json(view(task));
+  });
+  app.get('/api/v1/tasks/:id/recovery', c => {
+    const task = runtime.store.get(c.req.param('id'));
+    if (!task) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
+    const recovery = recoveryView(runtime.store, task);
+    if (!recovery) return c.json({ error: { code: 'NOT_FOUND', message: 'Task was never interrupted; it has no recovery' } }, 404);
+    return c.json(recovery);
+  });
+  app.post('/api/v1/tasks/:id/recovery', async c => {
+    const id = c.req.param('id');
+    if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
+    const input = parseInput(await c.req.json() as unknown, RecoveryDecisionInput);
+    let decided: Awaited<ReturnType<typeof runtime.decideRecovery>>;
+    try { decided = await runtime.decideRecovery(id, input, env, 'management'); }
+    catch (error: unknown) {
+      if (error instanceof RecoveryConflictError) return c.json({ error: { code: 'CONFLICT', message: error.message.slice(0, 500) } }, 409);
+      throw error;
+    }
+    if (decided.continuation?.state === 'queued') void runtime.run(decided.continuation.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
+    return c.json(decided.recovery);
   });
   app.get('/api/v1/tasks/:id/lineage', c => {
     const lineage = taskLineage(runtime.store, runtime.instanceRef, c.req.param('id'));

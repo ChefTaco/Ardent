@@ -144,8 +144,10 @@ only the *names* of the environment variables that hold them.
 | `timezone` | host zone, else `UTC` | IANA zone used for dates shown to the model. Job schedules carry their own zone. |
 | `identity.soul_file`, `identity.identity_file` | `SOUL.md`, `IDENTITY.md` | Persona files in the profile. |
 | `execution` | required | `backend: llamacpp \| codex`, step, tool-call, parallelism, and deadline limits. See [Tool scheduling](#tool-scheduling). |
+| `execution.recovery.enabled` | `true` | Resume tasks interrupted by a crash or restart. `false` holds them as `unknown`, as before. See [Execution recovery](#execution-recovery). |
+| `execution.recovery_max_new_deadline_seconds` | `deadline_seconds` | Longest deadline an operator may give `retry_with_new_deadline`, 1-86400. |
 | `providers.llamacpp` | required | `base_url`, `model`, `api_key_env`, `request_timeout_seconds`, optional `context_window_tokens`, `max_output_tokens`, `reasoning_effort`. |
-| `providers.codex` | required | `command`, `model`, `auth_mode: chatgpt \| api_key` (default `chatgpt`); `approval_policy: never` and `sandbox: read-only` are fixed. |
+| `providers.codex` | required | `command`, `model`, `auth_mode: chatgpt \| api_key` (default `chatgpt`), `durable_threads` (default `true`: task threads are not ephemeral and their ids are recorded for recovery); `approval_policy: never` and `sandbox: read-only` are fixed. |
 | `memory` | `{ provider: none }` | See [HiveMem](#hivemem-memory). |
 | `research` | disabled | `enabled`, `searxng_url`, `firecrawl_url`, `firecrawl_token_env`. Enables the `news_search`, `news_article`, `news_collect`, and `news_capabilities` tools. |
 | `skills` | `directories: [skills]`, `enabled: []` | Only enabled skills are shown to the model. |
@@ -198,9 +200,10 @@ The llama.cpp and Codex backends dispatch tool calls through the same scheduler:
 - On cancellation, calls that were not dispatched settle as
   `{ ok: false, code: 'CANCELLED', effect: 'none' }` and are journaled as
   `tool_not_dispatched` (with a `reason`). A call already started keeps its
-  uncertainty, so a cancelled task with a started call is `unknown`, never
-  `cancelled`. A call that would exceed `max_tool_calls` is not dispatched and
-  fails the task.
+  uncertainty, so a cancelled task with a started call that may have had an
+  effect (not a `read`, and not settled without effect, for example denied by a
+  plugin) is `unknown`, never `cancelled`. A call that would exceed
+  `max_tool_calls` is not dispatched and fails the task.
 
 Each tool receives `ctx.idempotencyKey`, `sha256("<task id>:<call id>")` in
 hex, as the third `invoke` argument (`defineTool` handlers receive it as their
@@ -208,9 +211,14 @@ third argument). A tool may forward it to its service so that a repeated
 dispatch of the same model call is harmless. A tool can also declare
 `idempotent: true` (repeating it with identical arguments and key is safe) and a
 `reconcile(input, ctx, signal)` hook that asks its service what happened to an
-interrupted call. Execution recovery will use these; the runtime does not call
-`reconcile` yet. Tools that declare none of these keep their existing
-behaviour.
+interrupted call. [Execution recovery](#execution-recovery) re-dispatches an
+interrupted idempotent call under the same key and asks `reconcile` before it
+resumes a task; a tool that declares neither is held for an operator when one of
+its calls is interrupted. `artifact_write` and `document_render` are idempotent
+(a repeat under the same key returns the same registration) and reconcile from
+their manifest row; `team_handoff`, `team_ask_user`, `team_propose_decision` and
+`development_note` reconcile against their local journal rows. HiveMem writes
+and `news_collect` declare neither, so they are held.
 
 ### HiveMem memory
 
@@ -616,6 +624,149 @@ It merges:
 
 `agent_ref` is the profile name. `ardent development list [--after CURSOR]
 [--limit N] [--kind KIND]` prints the same pages.
+
+### Execution recovery
+
+After a crash or restart, every task that was `running` is evaluated before any
+queued work starts. **A write is never repeated merely because execution
+resumed**: an unknown effect needs reconciliation, never a retry. Each task is:
+
+- **resumed under the same id**: it stays `running`, continues at the next
+  unfinished model step, and reuses completed model replies and settled tool
+  results;
+- **reconciled first**: an interrupted tool call whose tool has a `reconcile`
+  hook is asked what happened before the task continues; or
+- **held** as `unknown` (still terminal) with a recovery status and an
+  actionable reason, waiting for an operator decision or marked unsupported.
+
+`TaskState` does not change. Tasks carry an optional `recovery` object (task
+`GET` and list, and `GET /api/v1/tasks/{id}/recovery`), so older clients see
+`running → completed` for a resumed task and `unknown` for a held one:
+
+```json
+{"status": "awaiting_decision", "attempt": 1,
+ "reason": {"code": "UNSETTLED_EXTERNAL_WRITE", "message": "A tool call with a possible external effect was dispatched ..."},
+ "checkpoint": {"step": 0, "completed_calls": 1,
+   "pending_calls": [{"call_id": "call-1", "tool": "news_collect", "effect": "artifact-write", "dispatched_at": "2026-11-23T12:00:00.000Z", "reconcilable": false}]},
+ "actions": ["mark_applied", "mark_not_applied", "retry_with_new_deadline", "abandon"]}
+```
+
+`status` is `ready` or `reconciling` (resuming), `resumed` (running again),
+`awaiting_decision`, `unsupported`, or `resolved` (settled at startup, or
+decided). `actions` lists only the decisions valid now. `GET /api/v1/status`
+reports `recovery: { ready, reconciling, awaiting_decision, unsupported }`.
+
+**How a task is planned.** Rules apply in order:
+
+| Condition | Outcome | `reason.code` |
+|---|---|---|
+| Cancellation was requested | `cancelled`, or held when an effect is uncertain | `CANCELLED_DURING_OUTAGE` / `CANCELLED_WITH_UNSETTLED_EFFECT` |
+| The deadline passed while stopped | `failed`, or held when an effect is uncertain; never extended | `DEADLINE_ELAPSED_DURING_OUTAGE` |
+| `execution.recovery.enabled: false` | held, unsupported | `RECOVERY_DISABLED` |
+| An extension `taskExecutor` with a possible effect ran, or a preview task | held, unsupported | `EXTENSION_EXECUTION_NOT_RESUMABLE` / `PREVIEW_NOT_RESUMABLE` |
+| Codex | see the backend matrix | `CODEX_*` |
+| llama.cpp, no checkpoint, no effectful tool dispatched | `ready`: restart from the beginning | `RESTART_NO_EFFECT` |
+| llama.cpp, no checkpoint, an effectful tool dispatched (for example, from before this release) | held, unsupported | `NO_EXECUTION_CHECKPOINT` |
+| A checkpoint fails its digest | held, unsupported | `CHECKPOINT_INVALID` |
+| Every dispatched call settled, or the unsettled ones are reads or idempotent | `ready`: resume at the next step; unsettled reads and idempotent calls are dispatched again under the same idempotency key | `RESUME_FROM_CHECKPOINT` |
+| An unsettled call whose tool can reconcile | `reconciling`: `applied` settles it with the service's result; `not_applied` tells the model it was not applied (it is not retried); `unknown` holds the task | `RECONCILE_INTERRUPTED_CALL` / `RECONCILIATION_INCONCLUSIVE` |
+| Any other unsettled call with a possible effect | held, awaiting a decision | `UNSETTLED_EXTERNAL_WRITE` |
+
+A call is *uncertain* when it was dispatched without a recorded outcome and is
+not a `read`, or settled with an unknown effect. A call a plugin denied, that
+settled without effect, or that was never dispatched leaves nothing uncertain.
+Until the gateway knows a task's tools (plugins load after the journal opens),
+a call that needs that check reports `reconciling` with `TOOL_CHECK_PENDING`;
+the check runs before any queued work is admitted.
+
+**Resuming.** A resumed task skips the queue transition, journals
+`execution_resumed { attempt, from_step, reused_calls, redispatched_calls, mode }`,
+reloads its transcript, evidence and tool-call count from its checkpoint, and
+continues at the next step, ahead of queued work but still one task per caller
+at a time. Tools, mission scope, memory grants, caller, context, ownership and
+plugin task contexts are re-derived from their owning stores; the checkpoint
+never supplies them, and the system prompt is rebuilt so policy and model
+changes apply. A paused task stays paused and waits at its first boundary. The
+deadline timer is re-armed from the stored deadline. Interrupted work does not
+start again while admission is fenced for a rollback. A task the gateway's
+shutdown deadline stops with nothing uncertain stays `running`
+(`execution_suspended`) and resumes on the next start.
+
+**Operator decisions.** `POST /api/v1/tasks/{id}/recovery`
+`{ action, call_id?, result?, note?, deadline_seconds? }` resolves a task held
+`awaiting_decision`. It is idempotent per task, attempt and action, and returns
+the recovery object:
+
+| Action | Effect |
+|---|---|
+| `mark_applied` | The pending call is settled `operator_applied` with `result` (at most 64 KiB, checked against the tool's output schema) or "result unavailable"; the work continues without dispatching it. |
+| `mark_not_applied` | The pending call is settled `operator_not_applied`; the model is told it was not applied. |
+| `retry_with_new_deadline` | The pending call is dispatched again under its original idempotency key, with a new deadline from now (`deadline_seconds`, at most `execution.recovery_max_new_deadline_seconds`). The only way to get a new deadline. |
+| `abandon` | Records the decision; nothing continues. |
+
+Because `unknown` is terminal, the first three create a **continuation task**:
+the same caller, context, session and prompt (not added to the session again),
+idempotency key `recovery:<original id>:<attempt + 1>`, an execution context
+whose parent is the original task (`source: continuation`, listed in the
+original's lineage `continuations`), and the original's checkpoint with the
+pending call settled as decided. A mission continuation copies the mission and
+its `TeamResult` names the continuation as `task_id` and lists the operator
+decisions in `uncertain_effects`. The original's recovery becomes `resolved`
+with `continuation_task_id`; the journals record `recovery_continued` and
+`recovery_continuation_of`. `mark_*` keep the original deadline, so they are
+offered only while it has not passed. A task held after a cancellation
+request is never continued: a decision only records what the operator
+established.
+
+**Backends.**
+
+| Backend | Recovery |
+|---|---|
+| llama.cpp | Full: checkpoints at every model reply and tool boundary, per the table above. |
+| Codex | With `providers.codex.durable_threads` (default), thread and turn ids are recorded. (a) When no effectful call is unsettled, the protocol lock verifies thread recovery for the installed CLI, and `thread/read` lists every dynamic tool call in the thread with a settled invocation, the thread is resumed (`CODEX_THREAD_RESUME`). (b) When no effectful tool was ever dispatched, the task restarts on a fresh thread (`CODEX_RESTART_NO_EFFECT`). (c) Otherwise it is held unsupported (`CODEX_THREAD_NOT_VERIFIABLE`). `codex-protocol.lock.json` records `thread_resume_verified` and `thread_read_items_verified`; both are `false` for the observed CLI, so (a) is disabled and the reason says so. |
+| Extension `taskExecutor` | Not resumable; held (`EXTENSION_EXECUTION_NOT_RESUMABLE`) when its effect is `possible`. |
+| Preview | Not resumable (`PREVIEW_NOT_RESUMABLE`). |
+
+**Never retried automatically:** a dispatched call with a possible effect and no
+recorded outcome, unless its tool is idempotent or its own service reconciles
+it; HiveMem writes; `news_collect`; extension executors; and anything after the
+original deadline. A settled call is never dispatched again.
+
+**State.** Three additive SQLite tables, written in the same transaction as the
+journal event of each boundary: `execution_state` (the model transcript after
+the last boundary, evidence, tool-call count and Codex thread ids, with a
+digest), `tool_invocations` (one row per call: `dispatched` before invocation,
+then settled with its result; compacted arguments, so file bytes stay in the
+artifact store), and `task_recovery`. `model_result` events also carry `calls`
+(id, name, compacted arguments). Execution checkpoints are separate from
+context checkpoints; neither reads the other. Rolling back to 3.1.x ignores the
+new tables and holds interrupted tasks as `unknown`.
+
+**Channels.** A recovered task has no in-process handler waiting for it, so the
+Telegram and Mattermost adapters answer its update themselves: at start and
+whenever a task settles they find updates bound to a recovered task with no
+recorded delivery, wait for the resumed task (or for the continuation an
+operator decision creates), and reply through the usual record-before-send path.
+The reply target (conversation, thread, message replied to) is stored with each
+inbound claim (`channel_inbound.reply_target_json`). An update that already has
+a delivery (queued, sent, failed or unknown) is never sent again, and a task
+held awaiting a decision is not answered until its continuation finishes.
+Updates claimed before this release have no stored target and are not answered.
+
+**A2A peers.** The A2A surface publishes the outcome of a peer task whose
+operation was recovered, through the same task store (GetTask, ListTasks) and
+push sender as a live request:
+
+| Operation | Peer task |
+|---|---|
+| Resumed, then completed | Answer, artifacts and `completed` (or `input_required`), as live. |
+| Settled at startup (`failed`, `cancelled`) | `failed` or `canceled`. |
+| Held `awaiting_decision` | Stays `working`; a status message gives the reason, and task metadata `ardentRecovery: { status, reason_code }`. |
+| Continued after a decision | Follows the continuation: its answer and final state are published for the peer's original task, the A2A operation binding moves to the continuation, and `ardentRecovery.continuation_task_id` names it. |
+| Held `unsupported`, or abandoned | `failed` with "Execution outcome is unknown: ...", as an interrupted task with an uncertain effect reports today. |
+
+Each final state is claimed in `a2a_recovery_publications` before it is
+published, so it and its push notification are sent at most once.
 
 ### Execution ancestry
 

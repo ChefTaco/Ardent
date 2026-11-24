@@ -94,6 +94,15 @@ export class TeamChildService {
     this.runtime.store.db.prepare('UPDATE a2a_team_child_claims SET operation_id=?,execution_json=coalesce(execution_json,?) WHERE child_id=?')
       .run(operationId, execution ? JSON.stringify(execution) : null, ref.child_id);
   }
+  /** The child reference whose native execution is this operation, when it has a retained claim. */
+  referenceFor(operationId: string): TeamChildReference | undefined {
+    const raw = this.runtime.store.db.prepare("SELECT * FROM a2a_team_child_claims WHERE operation_id=? AND grant_json!='{}' LIMIT 1").get(operationId);
+    if (!raw) return undefined;
+    try {
+      const row = Row.parse(raw);
+      return { version: '1.0', root: row.root, child_id: row.child_id, sha256: Grant.parse(JSON.parse(row.grant_json) as unknown).sha256 };
+    } catch { return undefined; }
+  }
   deadline(ref: TeamChildReference): number {
     const row = this.#row(ref.child_id);
     if (!row || row.grant_json === '{}') throw new Error('Child has no retained root budget');

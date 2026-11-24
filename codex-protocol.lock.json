@@ -5,5 +5,8 @@
   "source": "https://developers.openai.com/codex/app-server/",
   "dynamic_tools_in_observed_thread_start_schema": false,
   "required_capability": "capabilities.experimentalApi",
-  "verification": "2026-09-26 local ChatGPT OAuth wire probe: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. A production profile CLI remains separately unverified."
+  "verification": "2026-09-26 local ChatGPT OAuth wire probe: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. A production profile CLI remains separately unverified.",
+  "thread_resume_verified": false,
+  "thread_read_items_verified": false,
+  "thread_recovery": "Execution recovery resumes an interrupted durable thread (thread/read with includeTurns listing every dynamicToolCall item, then thread/resume) only when both flags are true and the installed CLI is observed_cli_version. Neither was verified against a real CLI; recovery restarts Codex tasks that never dispatched an effectful tool and holds the rest."
 }

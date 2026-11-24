@@ -16,6 +16,10 @@ export const ChannelEvent = z.object({
   attachments: z.array(Attachment).max(5), authorized: z.literal(true), bot_message: z.boolean()
 }).strict();
 export type ChannelEvent = z.infer<typeof ChannelEvent>;
+/** Where a reply to an inbound update goes; recorded with the inbound claim so recovered tasks can still answer. */
+export const ReplyTarget = ChannelEvent.pick({ platform: true, account: true, channel_type: true, user: true, conversation: true, thread: true, update_id: true, reply_to: true }).strict();
+export type ReplyTarget = z.infer<typeof ReplyTarget>;
+const RecoveredInbound = z.object({ update_id: z.string(), task_id: z.string(), reply_target_json: z.string() });
 export type ChannelReply = { text: string; taskId: string | null; artifactIds: string[] };
 export type ChannelDelivery = (reply: ChannelReply) => Promise<string | null>;
 export class DeliveryRejectedError extends Error {}
@@ -65,7 +69,10 @@ export class ChannelCore {
 
   async #send(event: ChannelEvent, reply: ChannelReply, deliver: ChannelDelivery, duplicate: boolean): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {
     const plugins = this.runtime.plugins;
-    const deliveryId = this.runtime.store.queueDelivery(event.platform, event.account, event.update_id, reply.taskId);
+    // Record before send, once per update: an update that already has a delivery is never sent again.
+    const claim = this.runtime.store.claimDelivery(event.platform, event.account, event.update_id, reply.taskId);
+    if (!claim.created) return { duplicate: true, taskId: reply.taskId, delivery: this.runtime.store.delivery(event.platform, event.account, event.update_id)?.state ?? null };
+    const deliveryId = claim.id;
     const failure = this.#hookFailure(event, reply.taskId);
     let view: ArdentChannelDelivery = { delivery_id: deliveryId, task_id: reply.taskId, platform: event.platform, account: event.account,
       update_id: event.update_id, text: reply.text, attempt: 1 };
@@ -94,6 +101,83 @@ export class ChannelCore {
     return { duplicate, taskId: reply.taskId, delivery: outcome.state };
   }
 
+  /** The task whose outcome answers an update: the bound task, or the last continuation an operator decision created for it. */
+  #answeringTask(taskId: string): Task | undefined {
+    let task = this.runtime.store.get(taskId);
+    for (let hops = 0; task && hops < 16; hops++) {
+      const next = this.runtime.store.executionState.recovery(task.id)?.continuation_task_id;
+      if (!next) break;
+      task = this.runtime.store.get(next) ?? task;
+      if (task.id !== next) break;
+    }
+    return task;
+  }
+  /** Whether a task's outcome is final for the channel: a held task awaiting a decision (or running a continuation) is not. */
+  #answerReady(task: Task): boolean {
+    if (['completed', 'partial', 'failed', 'cancelled'].includes(task.state)) return true;
+    if (task.state !== 'unknown') return false;
+    const recovery = this.runtime.store.executionState.recovery(task.id);
+    return !recovery || recovery.status === 'unsupported' || (recovery.status === 'resolved' && !recovery.continuation_task_id);
+  }
+  /**
+   * Answer the updates whose task execution recovery resumed, settled or
+   * continued after a restart, once each. A recovered task has no in-process
+   * handler waiting for it, so this waits for it (or for its continuation) and
+   * then sends through the same record-before-send path: an update that
+   * already has a delivery is never sent again. Call at adapter start and
+   * whenever `runtime.onTaskSettled` fires. Returns the replies sent.
+   */
+  async deliverRecovered(platform: string, account: string, deliverFor: (target: ReplyTarget) => ChannelDelivery): Promise<number> {
+    const rows = z.array(RecoveredInbound).parse(this.runtime.store.db.prepare(`SELECT i.update_id, i.task_id, i.reply_target_json FROM channel_inbound i
+      WHERE i.platform=? AND i.account=? AND i.task_id IS NOT NULL AND i.reply_target_json IS NOT NULL AND i.disposition='admitted'
+        AND NOT EXISTS (SELECT 1 FROM channel_deliveries d WHERE d.platform=i.platform AND d.account=i.account AND d.update_id=i.update_id)
+        AND EXISTS (SELECT 1 FROM task_recovery r WHERE r.task_id=i.task_id)
+      ORDER BY i.created_ms LIMIT 100`).all(platform, account));
+    let sent = 0;
+    await Promise.all(rows.map(async row => {
+      const key = `${platform}:${account}:${row.update_id}`;
+      if (this.#inflight.has(key)) return;
+      const target = ReplyTarget.safeParse(JSON.parse(row.reply_target_json) as unknown);
+      if (!target.success) return;
+      this.#inflight.add(key);
+      try {
+        let task = this.#answeringTask(row.task_id);
+        // Join the resumed run or the continuation; a task with no run here is answered when one settles.
+        if (task && ['queued', 'running'].includes(task.state)) {
+          try { await this.runtime.run(task.id, this.env); } catch { /* the stored state below is authoritative */ }
+          task = this.#answeringTask(row.task_id);
+        }
+        if (!task || !this.#answerReady(task)) return;
+        const event: ChannelEvent = { ...target.data, text: '', attachments: [], authorized: true, bot_message: false };
+        const outcome = await this.#send(event, this.#replyFromTask(task), deliverFor(target.data), true);
+        if (outcome.delivery === 'sent') sent++;
+      } finally { this.#inflight.delete(key); }
+    }));
+    return sent;
+  }
+  /**
+   * Keep answering recovered updates until `signal` aborts: once now, then
+   * after every task this runtime settles. Resolves when stopped and idle.
+   */
+  watchRecovered(platform: string, account: string, deliverFor: (target: ReplyTarget) => ChannelDelivery, signal: AbortSignal): Promise<void> {
+    let running: Promise<void> | undefined;
+    let again = false;
+    const pass = (): void => {
+      if (signal.aborted) return;
+      if (running) { again = true; return; }
+      running = this.deliverRecovered(platform, account, deliverFor).then(() => undefined, error => {
+        try { this.runtime.store.setCursor(`${platform}:${account}:recovered_delivery_error`, error instanceof Error ? error.message.slice(0, 500) : 'unknown'); }
+        catch { /* the journal is closing; a later pass retries */ }
+      }).finally(() => { running = undefined; if (again) { again = false; pass(); } });
+    };
+    const unsubscribe = this.runtime.onTaskSettled(() => pass());
+    pass();
+    return new Promise<void>(resolve => {
+      const stop = () => { unsubscribe(); void (running ?? Promise.resolve()).finally(resolve); };
+      if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+    });
+  }
+
   handle(raw: unknown, deliver: ChannelDelivery): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {
     if (this.runtime.store.admissionFence()) throw new Error('Profile admission is fenced for rollback');
     const event = ChannelEvent.parse(raw);
@@ -104,7 +188,9 @@ export class ChannelCore {
     // Telegram acknowledges its update cursor after handle() returns. Claim
     // inbound under the SQLite fence before returning any Promise to it.
     const claimed = this.runtime.store.claimInbound(event.platform, event.account, event.update_id,
-      event.channel_type ?? 'unknown');
+      event.channel_type ?? 'unknown', 'admitted', ReplyTarget.parse({ platform: event.platform, account: event.account,
+        ...(event.channel_type ? { channel_type: event.channel_type } : {}), user: event.user, conversation: event.conversation, thread: event.thread,
+        update_id: event.update_id, reply_to: event.reply_to }));
     this.#inflight.add(key);
     return this.#handleAuthenticated(event, deliver, claimed).finally(() => this.#inflight.delete(key));
   }
@@ -124,6 +210,8 @@ export class ChannelCore {
       if (existingDelivery || !claimed.taskId) return { duplicate: true, taskId: claimed.taskId, delivery: existingDelivery?.state ?? null };
       let task = this.runtime.store.get(claimed.taskId);
       if (!task || task.state === 'running') return { duplicate: true, taskId: claimed.taskId, delivery: null };
+      // A task execution recovery touched is answered by deliverRecovered, which waits for its continuation.
+      if (this.runtime.store.executionState.recovery(task.id)) return { duplicate: true, taskId: claimed.taskId, delivery: null };
       if (task.state === 'queued') {
         try { await this.runtime.run(task.id, this.env); }
         catch { /* The task state below is authoritative. */ }

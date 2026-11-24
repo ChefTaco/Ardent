@@ -68,9 +68,11 @@ messages:
   selected by task context (`direct`, `peer`, `scheduled`) and, for peers, by a
   validated team mission's `resources`. Keep peer scoping deny-by-default.
 - Every tool declares its effect. Once a tool call with a possible external
-  effect has started, a cancelled or crashed task is `unknown`, never
-  `cancelled`, and is never replayed automatically. Do not "fix" an uncertain
-  effect by retrying it.
+  effect has started without a recorded outcome, a cancelled or crashed task is
+  `unknown`, never `cancelled`, and the call is never replayed automatically:
+  execution recovery resumes only from settled boundaries, re-dispatches only
+  reads and idempotent calls, and otherwise needs the tool's `reconcile` proof
+  or an operator decision. Do not "fix" an uncertain effect by retrying it.
 - Task, event, delivery, and job-window journals in SQLite are the source of
   truth. Keep schema changes additive and migrate existing rows in place.
 - Channel replies and A2A push deliveries are recorded before they are sent so

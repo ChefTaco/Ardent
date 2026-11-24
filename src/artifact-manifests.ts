@@ -189,6 +189,21 @@ export class ArtifactManifests {
       CREATE INDEX IF NOT EXISTS artifact_renditions_rendition ON artifact_renditions(rendition_sha256);
       CREATE TRIGGER IF NOT EXISTS artifact_renditions_immutable BEFORE UPDATE ON artifact_renditions
         BEGIN SELECT RAISE(ABORT, 'Artifact renditions are immutable'); END;`);
+    // Additive: the tool-call idempotency key that registered an artifact, so a
+    // re-dispatched or reconciled call finds its registration instead of adding one.
+    const columns = z.array(z.object({ name: z.string() })).parse(store.db.pragma('table_info(artifact_manifests)'));
+    if (!columns.some(column => column.name === 'idempotency_key')) store.db.exec('ALTER TABLE artifact_manifests ADD COLUMN idempotency_key TEXT');
+    store.db.exec('CREATE INDEX IF NOT EXISTS artifact_manifests_idempotency ON artifact_manifests(task_id, idempotency_key)');
+  }
+
+  /**
+   * The artifact a task registered under a tool-call idempotency key, as 1.0.
+   * `artifact_write` and `document_render` use it to stay idempotent and to
+   * reconcile an interrupted call from the manifest row.
+   */
+  registeredFor(taskId: string, idempotencyKey: string): ArtifactRecord | undefined {
+    const raw = this.store.db.prepare(`${this.#select} WHERE m.task_id=? AND m.idempotency_key=? ORDER BY m.created_ms, m.artifact_id LIMIT 1`).get(taskId, idempotencyKey);
+    return raw ? this.#v10(this.#record(raw)) : undefined;
   }
 
   /**
@@ -216,25 +231,28 @@ export class ArtifactManifests {
    * `provenance.execution`; the returned record, like every 1.0 view, is 1.0.
    */
   async register(input: { taskId: string; name: string; mime: ArtifactMime; bytes: Uint8Array; source: string;
-    revisesSha256?: string | undefined; ttlSeconds?: number | undefined; execution?: ArtifactExecution | undefined }): Promise<ArtifactRecord> {
+    revisesSha256?: string | undefined; ttlSeconds?: number | undefined; execution?: ArtifactExecution | undefined; idempotencyKey?: string | undefined }): Promise<ArtifactRecord> {
+    // A repeated tool call (same idempotency key) returns its registration instead of adding another.
+    const prior = input.idempotencyKey ? this.registeredFor(input.taskId, input.idempotencyKey) : undefined;
+    if (prior) return prior;
     // Every check that can refuse the artifact runs before any byte is stored.
     if (!/^[A-Za-z0-9._-]{1,128}$/.test(input.name)) throw new ProvenNoEffectError('Invalid artifact name', 'INVALID_ARTIFACT');
     if (input.bytes.length > this.artifacts.maxBytes) throw new ProvenNoEffectError(`Artifact exceeds ${formatBytes(this.artifacts.maxBytes)}`, 'ARTIFACT_TOO_LARGE');
     checkArtifactContent(input.mime, input.bytes);
     const execution = input.execution === undefined ? this.executionProvenance(input.taskId) : ArtifactExecutionSchema.safeParse(input.execution).data;
     if (input.execution !== undefined && !execution) throw new ProvenNoEffectError('Invalid execution provenance', 'INVALID_ARTIFACT');
-    const prior = input.revisesSha256 ? this.manifest(input.revisesSha256) : undefined;
-    if (input.revisesSha256 && !prior) throw new ProvenNoEffectError('revises_sha256 does not name a current artifact', 'NOT_FOUND');
-    if (prior && prior.manifest.sha256 === createHash('sha256').update(input.bytes).digest('hex'))
+    const revised = input.revisesSha256 ? this.manifest(input.revisesSha256) : undefined;
+    if (input.revisesSha256 && !revised) throw new ProvenNoEffectError('revises_sha256 does not name a current artifact', 'NOT_FOUND');
+    if (revised && revised.manifest.sha256 === createHash('sha256').update(input.bytes).digest('hex'))
       throw new ProvenNoEffectError('Revision content is identical to the revised artifact', 'INVALID_ARTIFACT');
     const stored = await this.artifacts.put(input.name, input.mime, input.bytes);
     const created = Date.now();
     const id = randomBytes(16).toString('hex');
     const manifest: ArtifactManifest = ArtifactManifestSchema.parse({
-      schema_version: '1.0', revision: prior ? prior.manifest.revision + 1 : 1, source_revision: stored.sha256,
+      schema_version: '1.0', revision: revised ? revised.manifest.revision + 1 : 1, source_revision: stored.sha256,
       visibility: 'private', license: 'NOASSERTION',
       preview: { mode: input.mime === 'application/pdf' || ARTIFACT_MIME_TYPES[input.mime] === 'docx' ? 'download_only' : 'inline', mime: input.mime },
-      supersedes_sha256: prior?.manifest.sha256 ?? null, acceptance_status: 'unreviewed', name: input.name, mime: input.mime,
+      supersedes_sha256: revised?.manifest.sha256 ?? null, acceptance_status: 'unreviewed', name: input.name, mime: input.mime,
       sha256: stored.sha256, size: stored.bytes, created_at: created / 1000,
       expires_at: input.ttlSeconds ? created / 1000 + input.ttlSeconds : NO_EXPIRY_SECONDS,
       provenance: { producer: this.producer, source_id: input.source, producer_task_id: input.taskId,
@@ -243,7 +261,7 @@ export class ArtifactManifests {
     });
     const stored11 = execution ? ArtifactManifest11Schema.parse({ ...manifest, schema_version: '1.1',
       provenance: { ...manifest.provenance, execution } }) : undefined;
-    this.store.db.transaction(() => this.#insert(input.taskId, stored11 ?? manifest, created))();
+    this.store.db.transaction(() => this.#insert(input.taskId, stored11 ?? manifest, created, 'artifact_registered', input.idempotencyKey))();
     return { task_id: input.taskId, superseded_by_sha256: null, manifest };
   }
 
@@ -490,10 +508,10 @@ export class ArtifactManifests {
   }
 
   /** Insert a manifest and journal it on its task. Call inside a transaction. */
-  #insert(taskId: string, manifest: ArtifactManifest | ArtifactManifest11, created: number, kind = 'artifact_registered'): void {
-    this.store.db.prepare(`INSERT INTO artifact_manifests(artifact_id,task_id,sha256,name,mime,size,revision,supersedes_sha256,manifest_json,created_ms,expires_ms)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(manifest.artifact_id, taskId, manifest.sha256, manifest.name, manifest.mime, manifest.size,
-      manifest.revision, manifest.supersedes_sha256, JSON.stringify(manifest), created, Math.floor(manifest.expires_at * 1000));
+  #insert(taskId: string, manifest: ArtifactManifest | ArtifactManifest11, created: number, kind = 'artifact_registered', idempotencyKey?: string): void {
+    this.store.db.prepare(`INSERT INTO artifact_manifests(artifact_id,task_id,sha256,name,mime,size,revision,supersedes_sha256,manifest_json,created_ms,expires_ms,idempotency_key)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(manifest.artifact_id, taskId, manifest.sha256, manifest.name, manifest.mime, manifest.size,
+      manifest.revision, manifest.supersedes_sha256, JSON.stringify(manifest), created, Math.floor(manifest.expires_at * 1000), idempotencyKey ?? null);
     this.store.append(taskId, kind, { artifact_id: manifest.artifact_id, name: manifest.name, mime: manifest.mime,
       sha256: manifest.sha256, size: manifest.size, revision: manifest.revision, supersedes_sha256: manifest.supersedes_sha256, manifest });
   }

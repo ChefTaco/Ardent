@@ -386,6 +386,8 @@ async function main(): Promise<void> {
         runtime = new ArdentRuntime(dir, loaded.config, env);
         await runtime.usePlugins(plugins, env);
         await runtime.prepareGateway(env);
+        // Interrupted tasks that recovery left running resume first, ahead of queued work.
+        await runtime.resumeRecovered(env);
         // Legacy scheduled tasks are not replayed by a new gateway generation.
         // The job engine owns its own window recovery and never replays uncertain effects.
         for (const task of runtime.recovered.queued) if (task.caller === 'management') void runtime.run(task.id, env).catch(() => {});
@@ -497,6 +499,7 @@ async function main(): Promise<void> {
           if (httpServer) await new Promise<void>(resolve => httpServer.close(() => resolve()));
           if (grpcServer) await new Promise<void>(resolve => grpcServer.tryShutdown(() => resolve()));
           if (a2aSurface) {
+            a2aSurface.recovery.close();
             try { await a2aSurface.pushSender.drain(); }
             catch { shutdownUnsettled = true; }
           }

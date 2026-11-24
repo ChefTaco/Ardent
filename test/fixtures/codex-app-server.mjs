@@ -39,10 +39,22 @@ rl.on('line', line => {
     loginPending = false;
     send({ id: message.id, result: { cancelled: true } });
   }
-  else if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  else if (message.method === 'thread/resume') {
+    // A resumed thread continues after its recorded turns: the next turn is a follow-up turn.
+    turnCount = Number(process.env.ARDENT_FIXTURE_RESUMED_TURNS || 1);
+    if (process.env.ARDENT_FIXTURE_RESUME_FAIL) send({ id: message.id, error: { code: -32602, message: 'Unknown thread' } });
+    else send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  }
   else if (message.method === 'config/read') send({ id: message.id, result: { config: { mcp_servers: {}, features: Object.fromEntries(['apps','browser_use','browser_use_external','browser_use_full_cdp_access','computer_use','image_generation','in_app_browser','multi_agent','multi_agent_v2','view_image'].map(key => [key,false])) } } });
   else if (message.method === 'model/list') send({ id: message.id, result: { data: [{ model: 'gpt-6.1-sol', supportedReasoningEfforts: [{ reasoningEffort: 'medium' }, { reasoningEffort: 'high' }] }], nextCursor: null } });
   else if (message.method === 'thread/read' && process.env.ARDENT_FIXTURE_THREAD_READ_FILE) send({ id: message.id, result: JSON.parse(readFileSync(process.env.ARDENT_FIXTURE_THREAD_READ_FILE,'utf8')) });
+  else if (message.method === 'thread/read' && message.params?.includeTurns) {
+    // ARDENT_FIXTURE_THREAD_ITEMS: the dynamic tool call ids the durable thread holds (default ["call-1"]).
+    const calls = process.env.ARDENT_FIXTURE_THREAD_ITEMS ? JSON.parse(process.env.ARDENT_FIXTURE_THREAD_ITEMS) : ['call-1'];
+    const turns = process.env.ARDENT_FIXTURE_THREAD_NO_TURNS ? undefined
+      : [{ id: 'turn-1', status: 'interrupted', items: [{ type: 'userMessage', id: 'user-1' }, ...calls.map(callId => ({ type: 'dynamicToolCall', id: `item-${callId}`, callId, tool: selectedTool, status: 'completed' }))] }];
+    send({ id: message.id, result: { thread: { id: message.params.threadId, ...(turns ? { turns } : {}) } } });
+  }
   else if (message.method === 'thread/read') send({ id: message.id, result: { thread: { model: process.env.ARDENT_FIXTURE_OBSERVED_MODEL || selectedModel, reasoningEffort: selectedEffort } } });
   else if (message.method === 'thread/start') {
     selectedModel = message.params.model; selectedEffort = message.params.config?.model_reasoning_effort;

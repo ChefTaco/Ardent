@@ -1,4 +1,6 @@
-export { ArdentRuntime, type RunResult } from './runtime.js';
+export { ArdentRuntime, RecoveryConflictError, RecoveryHeldError, type RunResult } from './runtime.js';
+export { RecoveryDecisionInput, RecoveryViewSchema, RECOVERY_REASONS, type RecoveryView, type RecoveryReasonCode } from './recovery.js';
+export type { InvocationState, RecoveryStatus, RecoveryAction, RecoveryReason, RecoveryCheckpoint, RecoveryDecision } from './execution-state.js';
 export { ConfigSchema, loadConfig, initProfile, saveConfig, profilePath, parseConfig, runtimeProblems, maxParallelTasks, isConfigNotice, type ArdentConfig, type LoadedConfig } from './config.js';
 export { ResearchBriefSchema } from './research.js';
 export { TaskStore, type Task } from './store.js';

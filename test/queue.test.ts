@@ -66,7 +66,7 @@ describe('bounded runtime scheduling', () => {
       expect(runtime.store.get(a2.id)?.state).toBe('cancelled');
     } finally { runtime.close(); }
   });
-  it('marks interrupted running work unknown on restart without replay', async () => {
+  it('marks interrupted running work with an uncertain effect unknown on restart without replay', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'ardent-queue-'));
     dirs.push(dir);
     await initTestProfile(dir);
@@ -74,11 +74,14 @@ describe('bounded runtime scheduling', () => {
     const first = new ArdentRuntime(dir, config);
     const task = first.accept('Interrupted', 'alice');
     first.store.setState(task.id, 'running');
+    // An effectful call journaled without a checkpoint (as by an older release) is never replayed.
+    first.store.append(task.id, 'tool_attempt', { id: 'call-1', name: 'news_collect', effect: 'artifact-write' });
     first.close();
     const restarted = new ArdentRuntime(dir, config);
     try {
       expect(restarted.recovered.interrupted).toBe(1);
       expect(restarted.store.get(task.id)?.state).toBe('unknown');
+      expect(restarted.recoveryFor(task.id)).toMatchObject({ status: 'unsupported', reason: { code: 'NO_EXECUTION_CHECKPOINT' } });
       await expect(restarted.run(task.id)).rejects.toThrow('Task is unknown');
     } finally { restarted.close(); }
   });

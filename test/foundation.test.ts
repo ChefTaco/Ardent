@@ -113,10 +113,18 @@ describe('profile and durable tasks', () => {
     expect(() => store.accept({ ...input, prompt: 'Different request' })).toThrow('different task content');
     expect(store.accept({ ...input, caller: 'bob' }).id).not.toBe(first.id);
     store.setState(first.id, 'running');
+    store.append(first.id, 'tool_attempt', { id: 'call-1', name: 'external_write', effect: 'external-write' });
+    const clean = store.accept({ ...input, idempotencyKey: 'update-2', prompt: 'Research Y' });
+    store.setState(clean.id, 'running');
     store.close();
     const restarted = new TaskStore(join(dir, 'state', 'ardent.sqlite'));
-    expect(restarted.recover().interrupted).toBe(1);
+    const recovered = restarted.recover();
+    expect(recovered.interrupted).toBe(2);
+    // An uncertain effect holds the task; one that dispatched nothing stays running to restart.
     expect(restarted.get(first.id)?.state).toBe('unknown');
+    expect(recovered.held).toEqual([first.id]);
+    expect(restarted.get(clean.id)?.state).toBe('running');
+    expect(recovered.resumed).toEqual([clean.id]);
     restarted.close();
   });
   it('persists conversation turns and keeps sessions scoped to their caller', async () => {

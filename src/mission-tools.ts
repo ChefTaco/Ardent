@@ -7,7 +7,7 @@ import { formatBytes } from './artifacts.js';
 import { DevelopmentNoteInput, type DevelopmentRecords } from './development.js';
 import { MAX_RENDER_SOURCE_CHARS, renderDocx, renderPdf } from './document-render.js';
 import type { Task, TaskStore } from './store.js';
-import { defineTool, ProvenNoEffectError, type ToolContext, type ToolRegistry } from './tools.js';
+import { defineTool, ProvenNoEffectError, type ToolContext, type ToolReconcileContext, type ToolReconcileResult, type ToolRegistry } from './tools.js';
 
 /** Tools a mission may be granted with a `tool:<name>` resource. */
 export const MISSION_TOOL_NAMES = ['team_handoff', 'team_ask_user', 'team_propose_decision', 'artifact_write', 'development_note', 'document_render'] as const;
@@ -50,11 +50,39 @@ async function readWorkspaceFile(workspaceDir: string, path: string, maxBytes: n
   } finally { await file.close(); }
 }
 
+/**
+ * Reconcile a call that records a journal event: applied when the task holds
+ * exactly that event from after the dispatch, otherwise not applied (the
+ * record is a local SQLite write, so its absence is proof).
+ */
+function reconcileEvent(deps: MissionToolDeps, event: string, note: string) {
+  return async (input: unknown, ctx: ToolReconcileContext): Promise<ToolReconcileResult> => {
+    const found = deps.store.db.prepare('SELECT 1 FROM events WHERE task_id=? AND kind=? AND created_ms>=? AND detail_json=? LIMIT 1')
+      .get(deps.task.id, event, ctx.dispatchedMs, JSON.stringify(input));
+    return found ? { status: 'applied', value: { recorded: true, event, note } } : { status: 'not_applied' };
+  };
+}
+/** Reconcile a registration from the manifest row its idempotency key recorded. */
+function reconcileArtifact(deps: MissionToolDeps) {
+  return async (_input: unknown, ctx: ToolReconcileContext): Promise<ToolReconcileResult> => {
+    const record = deps.artifacts.registeredFor(deps.task.id, ctx.idempotencyKey);
+    return record ? { status: 'applied', value: registered(record) } : { status: 'not_applied' };
+  };
+}
+
 /** `development_note`: a durable note about how the agent works. Direct tasks always have it; missions need `tool:development_note`. */
 export function registerDevelopmentNoteTool(registry: ToolRegistry, deps: MissionToolDeps, contexts: readonly ToolContext[]): void {
   registry.register(defineTool({ name: 'development_note', description: 'Record a durable note about your own development: what you learned, how you work best, or a method you changed. Kinds such as self_understanding, method, lesson. Do not store secrets.',
     input: DevelopmentNoteInput, output: z.object({ id: z.string(), kind: z.string(), title: z.string() }).strict(),
-    effect: 'artifact-write', contexts, timeoutMs: 5_000, handler: async input => {
+    effect: 'artifact-write', contexts, timeoutMs: 5_000,
+    // The record is a local SQLite row: its presence or absence proves the outcome.
+    reconcile: async (input, ctx) => {
+      const raw = deps.store.db.prepare('SELECT id,kind,title FROM development_records WHERE task_id=? AND kind=? AND title=? AND created_ms>=? ORDER BY created_ms LIMIT 1')
+        .get(deps.task.id, input.kind, input.title, ctx.dispatchedMs);
+      const row = z.object({ id: z.string(), kind: z.string(), title: z.string() }).safeParse(raw);
+      return row.success ? { status: 'applied', value: row.data } : { status: 'not_applied' };
+    },
+    handler: async input => {
       const record = deps.development.add({ ...input, author: 'agent', epistemic: 'agent_reported', taskId: deps.task.id });
       return { id: record.id, kind: record.kind, title: record.title };
     } }));
@@ -74,37 +102,45 @@ export function registerMissionTools(registry: ToolRegistry, deps: MissionToolDe
   if (has('team_handoff')) registry.register(defineTool({ name: 'team_handoff', description: 'Ask the team coordinator to hand work to another team role. This records the request; the coordinator decides whether to start it.',
     input: z.object({ to_role: line(128), objective: line(4000), deliverables: z.array(line(500)).max(16).optional(), note: line(2000).optional() }).strict(),
     output: Recorded, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 5_000,
+    reconcile: reconcileEvent(deps, 'team_handoff', 'Handoff request recorded for the coordinator. Ardent does not start other agents; continue or finish your turn.'),
     handler: async input => record('team_handoff', input, 'Handoff request recorded for the coordinator. Ardent does not start other agents; continue or finish your turn.') }));
   if (has('team_ask_user')) registry.register(defineTool({ name: 'team_ask_user', description: 'Ask the user a question you cannot answer from the mission or tools. Your turn ends after this call and the task finishes as input_required.',
     input: z.object({ question: line(1200), options: z.array(line(300)).max(8).optional() }).strict(),
     output: Recorded, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 5_000,
+    reconcile: reconcileEvent(deps, 'team_ask_user', 'Question recorded. Finish now with one short sentence for the user; the task ends as input_required.'),
     handler: async input => record('team_ask_user', input, 'Question recorded. Finish now with one short sentence for the user; the task ends as input_required.') }));
   if (has('team_propose_decision')) registry.register(defineTool({ name: 'team_propose_decision', description: 'Propose a team decision for the user to accept. This records the proposal; only the user decides.',
     input: z.object({ title: line(200), statement: line(4000), rationale: line(4000).optional() }).strict(),
     output: Recorded, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 5_000,
+    reconcile: reconcileEvent(deps, 'team_propose_decision', 'Decision proposal recorded for the user.'),
     handler: async input => record('team_propose_decision', input, 'Decision proposal recorded for the user.') }));
   if (has('artifact_write')) registry.register(defineTool({ name: 'artifact_write', description: `Save a deliverable file (Markdown, text, JSON, CSV, SVG, PNG, JPEG, WebP, PDF or DOCX; at most ${formatBytes(maxBytes)}). Give exactly one of text, base64 or workspace_path. Set revises_sha256 to replace an earlier version.`,
     input: z.object({ name: safeName, mime: ArtifactMimeSchema, text: z.string().min(1).max(maxBytes).optional(),
       base64: z.string().min(1).max(Math.ceil(maxBytes / 3) * 4).regex(/^[A-Za-z0-9+/]+={0,2}$/).optional(),
       workspace_path: line(512).optional(), revises_sha256: digest.optional() }).strict()
       .refine(value => [value.text, value.base64, value.workspace_path].filter(item => item !== undefined).length === 1, 'Give exactly one of text, base64 or workspace_path'),
-    output: Registered, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 30_000, handler: async input => {
+    output: Registered, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 30_000,
+    // Content-addressed and keyed by the call's idempotency key: a repeat returns the same registration.
+    idempotent: true, reconcile: reconcileArtifact(deps), handler: async (input, _signal, ctx) => {
       const bytes = input.text !== undefined ? Buffer.from(input.text, 'utf8')
         : input.base64 !== undefined ? Buffer.from(input.base64, 'base64')
           : await readWorkspaceFile(deps.workspaceDir, input.workspace_path ?? '', maxBytes);
       return registered(await deps.artifacts.register({ taskId: deps.task.id, name: input.name, mime: input.mime, bytes,
-        source: 'artifact_write', revisesSha256: input.revises_sha256 }));
+        source: 'artifact_write', revisesSha256: input.revises_sha256, idempotencyKey: ctx?.idempotencyKey }));
     } }));
   if (has('development_note')) registerDevelopmentNoteTool(registry, deps, ['mission']);
   if (has('document_render')) registry.register(defineTool({ name: 'document_render', description: 'Render Markdown to a PDF or DOCX deliverable and save it as an artifact. ```svg blocks become vector figures in PDF only; images are embedded in DOCX only from PNG or JPEG data: URIs.',
     input: z.object({ source_markdown: z.string().min(1).max(MAX_RENDER_SOURCE_CHARS), format: z.enum(['pdf', 'docx']), name: safeName, revises_sha256: digest.optional() }).strict(),
-    output: Registered, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 60_000, handler: async input => {
+    output: Registered, effect: 'artifact-write', contexts: ['mission'], timeoutMs: 60_000,
+    idempotent: true, reconcile: reconcileArtifact(deps), handler: async (input, _signal, ctx) => {
+      const prior = ctx ? deps.artifacts.registeredFor(deps.task.id, ctx.idempotencyKey) : undefined;
+      if (prior) return registered(prior);
       const extension = `.${input.format}`;
       const name = input.name.toLowerCase().endsWith(extension) ? input.name : `${input.name.slice(0, 128 - extension.length)}${extension}`;
       const title = name.slice(0, -extension.length);
       const bytes = input.format === 'pdf' ? await renderPdf(input.source_markdown, title) : await renderDocx(input.source_markdown, title);
       return registered(await deps.artifacts.register({ taskId: deps.task.id, name,
         mime: input.format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        bytes, source: 'document_render', revisesSha256: input.revises_sha256 }));
+        bytes, source: 'document_render', revisesSha256: input.revises_sha256, idempotencyKey: ctx?.idempotencyKey }));
     } }));
 }
