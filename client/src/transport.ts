@@ -17,19 +17,35 @@ export interface DirectTransportOptions {
   readonly fetch?: FetchLike;
 }
 
-export interface MagnusTransportOptions extends DirectTransportOptions {
-  /** The Magnus Control API origin, e.g. `https://magnus.example.com`. */
-  readonly baseUrl: string;
+interface MagnusTarget {
   /** The managed node that runs the profile. */
   readonly nodeId: string;
   /** The Ardent profile on that node. */
   readonly profile: string;
+  readonly getToken: TokenProvider;
+  /** Extra headers for every request. */
+  readonly headers?: Readonly<Record<string, string>>;
+  /** Defaults to the global `fetch`. */
+  readonly fetch?: FetchLike;
 }
+
+/**
+ * Where Magnus is: either its origin (`baseUrl`; the client adds `/api/v1`) or the API root itself
+ * (`apiBase`, e.g. a Hive console's `https://console.example.com/api/magnus`, where the console
+ * serves Magnus's `/api/v1`). Give exactly one.
+ */
+export type MagnusTransportOptions = MagnusTarget & (
+  | { /** The Magnus Control API origin, e.g. `https://magnus.example.com`. */ readonly baseUrl: string; readonly apiBase?: undefined }
+  | { /** The Magnus API root, the URL that stands for Magnus's `/api/v1`, e.g. `https://console.example.com/api/magnus`. */ readonly apiBase: string; readonly baseUrl?: undefined }
+);
+
+/** The options a Magnus transport carries once `viaMagnus()` has checked them: `apiBase` is always set. */
+export type ResolvedMagnusTransportOptions = MagnusTarget & { readonly baseUrl?: string | undefined; readonly apiBase: string };
 
 /** How the client reaches a profile: built by `direct()` or `viaMagnus()`. */
 export interface ArdentTransport {
   readonly kind: 'direct' | 'magnus';
-  readonly options: DirectTransportOptions | MagnusTransportOptions;
+  readonly options: DirectTransportOptions | ResolvedMagnusTransportOptions;
 }
 
 /** Talk to a standalone Ardent management API. */
@@ -39,20 +55,27 @@ export function direct(options: DirectTransportOptions): ArdentTransport {
 
 /**
  * Talk to a Magnus-managed profile through the Magnus Control API
- * (`/api/v1/ardent/installations/:nodeId/profiles/:profile/...`). Only routes Magnus allows are
- * available; the others raise `UnsupportedCapabilityError`.
+ * (`/api/v1/ardent/installations/:nodeId/profiles/:profile/...`). Give Magnus's origin as
+ * `baseUrl`, or, behind a proxy that serves Magnus's `/api/v1` under another path (a Hive
+ * console's `/api/magnus`), that path as `apiBase`. Only routes Magnus allows are available;
+ * the others raise `UnsupportedCapabilityError`.
  */
 export function viaMagnus(options: MagnusTransportOptions): ArdentTransport {
   for (const [name, value] of [['nodeId', options.nodeId], ['profile', options.profile]] as const)
     if (!/^[A-Za-z0-9._-]{1,128}$/.test(value)) throw new ArdentClientError('invalid_request', `Invalid Magnus ${name}`, { status: 400 });
-  return { kind: 'magnus', options: { ...options, baseUrl: checkedBase(options.baseUrl) } };
+  const { baseUrl, apiBase } = options as { baseUrl?: unknown; apiBase?: unknown };
+  if ((baseUrl === undefined) === (apiBase === undefined))
+    throw new ArdentClientError('invalid_request', 'Give viaMagnus either baseUrl (the Magnus origin) or apiBase (the Magnus API root), not both', { status: 400 });
+  if (apiBase !== undefined) return { kind: 'magnus', options: { ...options, apiBase: checkedBase(apiBase, 'apiBase') } };
+  const origin = checkedBase(baseUrl, 'baseUrl');
+  return { kind: 'magnus', options: { ...options, baseUrl: origin, apiBase: `${origin}/api/v1` } };
 }
 
-function checkedBase(value: string): string {
+function checkedBase(value: unknown, name = 'baseUrl'): string {
   let url: URL;
-  try { url = new URL(value); } catch { throw new ArdentClientError('invalid_request', 'baseUrl must be an absolute http(s) URL', { status: 400 }); }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ArdentClientError('invalid_request', 'baseUrl must be an absolute http(s) URL', { status: 400 });
-  if (url.username || url.password) throw new ArdentClientError('invalid_request', 'baseUrl must not carry credentials; use getToken', { status: 400 });
+  try { url = new URL(String(value)); } catch { throw new ArdentClientError('invalid_request', `${name} must be an absolute http(s) URL`, { status: 400 }); }
+  if (typeof value !== 'string' || (url.protocol !== 'http:' && url.protocol !== 'https:')) throw new ArdentClientError('invalid_request', `${name} must be an absolute http(s) URL`, { status: 400 });
+  if (url.username || url.password) throw new ArdentClientError('invalid_request', `${name} must not carry credentials; use getToken`, { status: 400 });
   url.search = '';
   url.hash = '';
   return url.toString().replace(/\/+$/, '');
@@ -127,7 +150,9 @@ class NetworkFailure extends Error {}
 /** One profile reached through one transport: URLs, authentication, retries and error mapping. */
 export class Connection {
   readonly kind: 'direct' | 'magnus';
-  readonly #options: DirectTransportOptions;
+  readonly #options: DirectTransportOptions | ResolvedMagnusTransportOptions;
+  /** The API root: `<baseUrl>/api/v1` directly, Magnus's API root through Magnus. */
+  readonly #api: string;
   readonly #magnus: { readonly nodeId: string; readonly profile: string } | undefined;
   readonly #fetch: FetchLike;
   readonly #signal: AbortSignal | undefined;
@@ -139,7 +164,9 @@ export class Connection {
   constructor(transport: ArdentTransport, options: { signal?: AbortSignal | undefined; retryPolicy?: RetryPolicy | undefined; deadlineMs?: number | undefined } = {}) {
     this.kind = transport.kind;
     this.#options = transport.options;
-    this.#magnus = 'nodeId' in transport.options ? { nodeId: transport.options.nodeId, profile: transport.options.profile } : undefined;
+    const resolved = transport.options;
+    this.#magnus = 'nodeId' in resolved ? { nodeId: resolved.nodeId, profile: resolved.profile } : undefined;
+    this.#api = 'apiBase' in resolved ? resolved.apiBase : `${resolved.baseUrl}/api/v1`;
     const custom = transport.options.fetch;
     this.#fetch = custom ?? ((input, init) => globalThis.fetch(input, init));
     this.#signal = options.signal;
@@ -153,7 +180,7 @@ export class Connection {
 
   /** The URL of an Ardent path below `/api/v1/` on this transport. */
   url(path: string, query: Query = {}): string {
-    const base = this.kind === 'direct' ? `${this.#options.baseUrl}/api/v1/${path}` : `${this.#profileBase()}/${path}`;
+    const base = this.kind === 'direct' ? `${this.#api}/${path}` : `${this.#profileBase()}/${path}`;
     const search = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) if (value !== undefined) search.set(key, String(value));
     const text = search.toString();
@@ -162,7 +189,7 @@ export class Connection {
 
   #profileBase(): string {
     const magnus = this.#magnus ?? { nodeId: '', profile: '' };
-    return `${this.#options.baseUrl}/api/v1/ardent/installations/${encodeURIComponent(magnus.nodeId)}/profiles/${encodeURIComponent(magnus.profile)}`;
+    return `${this.#api}/ardent/installations/${encodeURIComponent(magnus.nodeId)}/profiles/${encodeURIComponent(magnus.profile)}`;
   }
 
   async headers(refresh: boolean): Promise<Record<string, string>> {
@@ -296,7 +323,7 @@ export class Connection {
     this.#reportLoad ??= (async (): Promise<MagnusReport> => {
       const magnus = this.#magnus ?? { nodeId: '', profile: '' };
       try {
-        const response = await this.send({ url: `${this.#options.baseUrl}/api/v1/ardent/installations/${encodeURIComponent(magnus.nodeId)}`, method: 'GET', effect: 'none' });
+        const response = await this.send({ url: `${this.#api}/ardent/installations/${encodeURIComponent(magnus.nodeId)}`, method: 'GET', effect: 'none' });
         const data = await this.#json<Record<string, unknown>>(response);
         const profiles: unknown[] = Array.isArray(data['profiles']) ? data['profiles'] : [];
         const profile = profiles.filter(isRecord).find(item => item['id'] === magnus.profile);

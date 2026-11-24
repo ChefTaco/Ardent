@@ -3,6 +3,10 @@
 //
 //   ARDENT_TOKEN=... node examples/cli.mjs --url http://127.0.0.1:9910 --prompt "Write the report" [--out ./downloads]
 //   MAGNUS_TOKEN=... node examples/cli.mjs --magnus https://magnus.example.com --node <nodeId> --profile <profile> --prompt "..."
+//   MAGNUS_TOKEN=... node examples/cli.mjs --magnus-api https://console.example.com/api/magnus --node <nodeId> --profile <profile> --prompt "..."
+//
+// --magnus is the Magnus origin (the client adds /api/v1); --magnus-api is the Magnus API root behind a
+// proxy, such as a Hive console's /api/magnus.
 //
 // It prints the reply text as it streams to stderr and a JSON summary to stdout. The stream
 // reconnects from its cursor when Ardent rotates it or the network drops it; downloads resume
@@ -23,18 +27,20 @@ function options(argv) {
     flags[key.slice(2)] = value;
   }
   if (!flags.prompt) throw new Error('--prompt is required');
-  if (!flags.url === !flags.magnus) throw new Error('Give either --url (standalone Ardent) or --magnus with --node and --profile');
+  if ([flags.url, flags.magnus, flags['magnus-api']].filter(Boolean).length !== 1)
+    throw new Error('Give either --url (standalone Ardent) or --magnus (or --magnus-api) with --node and --profile');
   return flags;
 }
 
 /** Run the example. Returns the summary it prints. */
 export async function run({ argv = process.argv.slice(2), env = process.env, log = text => process.stderr.write(text), signal } = {}) {
   const flags = options(argv);
-  const token = flags.magnus ? env.MAGNUS_TOKEN : env.ARDENT_TOKEN;
-  if (!token) throw new Error(flags.magnus ? 'MAGNUS_TOKEN is required' : 'ARDENT_TOKEN is required');
+  const magnus = flags.magnus ? { baseUrl: flags.magnus } : flags['magnus-api'] ? { apiBase: flags['magnus-api'] } : undefined;
+  const token = magnus ? env.MAGNUS_TOKEN : env.ARDENT_TOKEN;
+  if (!token) throw new Error(magnus ? 'MAGNUS_TOKEN is required' : 'ARDENT_TOKEN is required');
   const getToken = () => token;
-  const transport = flags.magnus
-    ? viaMagnus({ baseUrl: flags.magnus, nodeId: flags.node, profile: flags.profile, getToken })
+  const transport = magnus
+    ? viaMagnus({ ...magnus, nodeId: flags.node, profile: flags.profile, getToken })
     : direct({ baseUrl: flags.url, getToken });
   const ardent = createArdentClient({ transport, ...(signal ? { signal } : {}) });
 

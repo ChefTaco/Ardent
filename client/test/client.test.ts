@@ -295,4 +295,49 @@ describe('through Magnus', () => {
     await expect(magnusClient(service.url).lineage(accepted.task_id)).rejects.toBeInstanceOf(UnsupportedCapabilityError);
     expect(() => viaMagnus({ baseUrl: magnus.url, nodeId: '../node', profile: 'assistant', getToken: () => 'magnus-fixture-token' })).toThrow(ArdentClientError);
   }, 20_000);
+
+  it('reaches Magnus at its origin (baseUrl, plus /api/v1) or at an API root a console serves it under (apiBase)', async () => {
+    const server = await ardent({ size: 64 * 1024 });
+    const getToken = () => 'magnus-fixture-token';
+    const run = async (transport: ReturnType<typeof viaMagnus>) => {
+      const ardentClient = createArdentClient({ transport, retryPolicy: fast });
+      const accepted = await ardentClient.tasks.submit({ prompt: 'Write the report' });
+      expect((await ardentClient.tasks.follow(accepted.task_id)).state).toBe('completed');
+      const [artifact] = await ardentClient.artifacts.list(accepted.task_id);
+      const download = await ardentClient.artifacts.download(artifact!.manifest.sha256);
+      expect((await bytes(download.stream)).equals(server.content)).toBe(true);
+      expect(await ardentClient.capabilities()).toMatchObject({ transport: 'magnus', features: { recovery: true } });
+    };
+
+    // baseUrl is unchanged: the origin, with or without a trailing slash, gets /api/v1 appended.
+    const origin = await fakeMagnus(server.url, { release: 'next' });
+    const direct1 = viaMagnus({ baseUrl: `${origin.url}/`, nodeId: 'node-1', profile: 'assistant', getToken });
+    expect(direct1.options).toMatchObject({ baseUrl: origin.url, apiBase: `${origin.url}/api/v1` });
+    await run(direct1);
+    expect(origin.requests.length).toBeGreaterThan(0);
+    expect(origin.requests.every(path => path.startsWith('/api/v1/ardent/installations/node-1'))).toBe(true);
+
+    // apiBase is used as given: no /api/v1 is added below the console's /api/magnus.
+    const consoleIngress = await fakeMagnus(server.url, { release: 'next', apiPath: '/api/magnus' });
+    const viaConsole = viaMagnus({ apiBase: `${consoleIngress.url}/api/magnus/?ignored=1#fragment`, nodeId: 'node-1', profile: 'assistant', getToken });
+    expect(viaConsole.options).toMatchObject({ apiBase: `${consoleIngress.url}/api/magnus` });
+    await run(viaConsole);
+    expect(consoleIngress.requests.length).toBeGreaterThan(0);
+    expect(consoleIngress.requests.every(path => path.startsWith('/api/magnus/ardent/installations/node-1'))).toBe(true);
+    // The CLI example's --magnus-api is that apiBase.
+    const out = await mkdtemp(join(tmpdir(), 'ardent-client-'));
+    try {
+      const summary = await runExample({ argv: ['--magnus-api', `${consoleIngress.url}/api/magnus`, '--node', 'node-1', '--profile', 'assistant', '--prompt', 'Write the report', '--out', out],
+        env: { MAGNUS_TOKEN: 'magnus-fixture-token' }, log: () => undefined });
+      expect(summary).toMatchObject({ state: 'completed' });
+    } finally { await rm(out, { recursive: true, force: true }); }
+    await expect(runExample({ argv: ['--magnus', origin.url, '--magnus-api', `${consoleIngress.url}/api/magnus`, '--prompt', 'x'], env: {} })).rejects.toThrow(/either --url/);
+
+    // Exactly one of the two, each an absolute http(s) URL without credentials.
+    const both = { baseUrl: origin.url, apiBase: `${origin.url}/api/v1`, nodeId: 'node-1', profile: 'assistant', getToken } as unknown as Parameters<typeof viaMagnus>[0];
+    expect(() => viaMagnus(both)).toThrow(/either baseUrl .* or apiBase/);
+    expect(() => viaMagnus({ nodeId: 'node-1', profile: 'assistant', getToken } as unknown as Parameters<typeof viaMagnus>[0])).toThrow(/either baseUrl .* or apiBase/);
+    expect(() => viaMagnus({ apiBase: 'ftp://example.com/api/magnus', nodeId: 'node-1', profile: 'assistant', getToken })).toThrow(/apiBase must be an absolute/);
+    expect(() => viaMagnus({ apiBase: 'https://user:secret@example.com/api/magnus', nodeId: 'node-1', profile: 'assistant', getToken })).toThrow(/apiBase must not carry credentials/);
+  }, 20_000);
 });

@@ -48,12 +48,21 @@ const ardent = createArdentClient({
 });
 ```
 
+`baseUrl` is the Magnus origin; the client adds `/api/v1`. Behind a proxy that
+serves Magnus's `/api/v1` under another path, such as a Hive console's
+`/api/magnus`, give that path as `apiBase` instead (exactly one of the two):
+
+```ts
+viaMagnus({ apiBase: 'https://console.example.com/api/magnus', nodeId: 'node-1', profile: 'assistant', getToken: () => session.token });
+```
+
 `client/examples/cli.mjs` in the Ardent repository runs submit, follow and
 download end to end:
 
 ```bash
 ARDENT_TOKEN=... node examples/cli.mjs --url http://127.0.0.1:9910 --prompt "Write the report" --out ./downloads
 MAGNUS_TOKEN=... node examples/cli.mjs --magnus https://magnus.example.com --node node-1 --profile assistant --prompt "Write the report"
+MAGNUS_TOKEN=... node examples/cli.mjs --magnus-api https://console.example.com/api/magnus --node node-1 --profile assistant --prompt "Write the report"
 ```
 
 ## API
@@ -61,7 +70,7 @@ MAGNUS_TOKEN=... node examples/cli.mjs --magnus https://magnus.example.com --nod
 ```ts
 createArdentClient({ transport, execution?, signal?, retryPolicy? }): ArdentClient
 direct({ baseUrl, getToken, headers?, fetch? }): ArdentTransport
-viaMagnus({ baseUrl, nodeId, profile, getToken, headers?, fetch? }): ArdentTransport
+viaMagnus({ baseUrl | apiBase, nodeId, profile, getToken, headers?, fetch? }): ArdentTransport
 
 ardent.tasks.submit({ prompt, idempotencyKey?, sessionId?, execution?, signal? }): Promise<TaskAccepted>
 ardent.tasks.get(id, { signal? }): Promise<Task>
@@ -236,7 +245,8 @@ report.
 | `artifacts.import` | `POST /api/v1/artifacts/imports` | action `artifact-import`, from Magnus 3.3.0 |
 | `status`, `capabilities` | `GET /api/v1/status` | read `status`, plus `GET /api/v1/ardent/installations/{nodeId}` |
 
-Magnus reads are `GET {baseUrl}/api/v1/ardent/installations/{nodeId}/profiles/{profile}/{route}`
+Magnus reads are `GET {apiBase}/ardent/installations/{nodeId}/profiles/{profile}/{route}`
+(`apiBase` is `{baseUrl}/api/v1` when `baseUrl` is given)
 and actions `POST …/action` with `{ action, target?, body? }`; the client
 unwraps Magnus's `{ success, data }` envelope. A route Magnus refuses (`403`,
 `404`, or `400` for an action it does not know, while it does not advertise the
