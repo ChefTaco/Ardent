@@ -619,4 +619,59 @@ describe('message and tool lifecycle hooks', () => {
     expect(() => registerPlugin({ name: 'bad-hook', beforeToolCall: 'deny' } as unknown as ArdentPlugin)).toThrow('hook beforeToolCall must be a function');
   });
 });
+
+describe('plugin tool recovery semantics', () => {
+  /** Run a task until its first tool attempt is journaled, then "crash" (close the database) before the tool runs. */
+  async function interruptedAfterAttempt(tool: () => ReturnType<typeof defineTool>) {
+    const dir = await temp(); await initProfile(dir);
+    const config = (await loadConfig(dir)).config;
+    vi.spyOn(LlamaCppBackend.prototype, 'discover').mockResolvedValue({ modelListed: true, contextTokens: 32768, supportsTools: true, supportsReasoningEffort: false, sampling: { temperature: null, topP: null }, reasoningFormat: null, chatFormat: null });
+    vi.spyOn(LlamaCppBackend.prototype, 'countInputTokens').mockResolvedValue(100);
+    vi.spyOn(LlamaCppBackend.prototype, 'complete').mockImplementation(async messages =>
+      messages.at(-1)?.role === 'tool' ? { content: 'Done', toolCalls: [] } : { content: '', toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'plugin_effect', arguments: '{}' } }] });
+    const plugin = definePlugin({ name: 'effects', taskTools: () => [tool()] });
+    const first = new ArdentRuntime(dir, config, {});
+    await first.usePlugins([plugin], {});
+    const append = first.store.append.bind(first.store);
+    let attempted = false;
+    first.store.append = (id, kind, detail) => { append(id, kind, detail); if (kind === 'tool_attempt') attempted = true; };
+    const admission = first.store.taskAdmission.bind(first.store);
+    first.store.taskAdmission = id => { if (attempted && first.store.db.open) first.store.db.close(); if (!first.store.db.open) throw new Error('simulated crash'); return admission(id); };
+    const task = first.accept('Use the plugin tool');
+    await first.run(task.id, {}).catch(() => undefined);
+    const restarted = new ArdentRuntime(dir, config, {});
+    await restarted.usePlugins([plugin], {});
+    return { task, restarted };
+  }
+
+  it('re-dispatches an interrupted idempotent plugin tool with the same idempotency key', async () => {
+    const keys: string[] = [];
+    const { task, restarted } = await interruptedAfterAttempt(() => defineTool({ name: 'plugin_effect', description: 'Idempotent effect', input: z.object({}).strict(),
+      output: z.object({ ok: z.literal(true) }), effect: 'external-write', contexts: ['direct'], timeoutMs: 1000, idempotent: true,
+      handler: async (_input, _signal, ctx) => { keys.push(ctx?.idempotencyKey ?? ''); return { ok: true as const }; } }));
+    try {
+      expect(keys).toEqual([]);
+      await restarted.resumeRecovered({});
+      expect((await restarted.run(task.id, {})).answer).toBe('Done');
+      expect(keys).toEqual([createHash('sha256').update(`${task.id}:call-1`).digest('hex')]);
+    } finally { restarted.close(); }
+  });
+
+  it('asks a reconcile hook first and uses the outcome its service proves, without invoking again', async () => {
+    const seen: unknown[] = [];
+    let invoked = 0;
+    const { task, restarted } = await interruptedAfterAttempt(() => defineTool({ name: 'plugin_effect', description: 'Reconcilable effect', input: z.object({}).strict(),
+      output: z.object({ receipt: z.string() }), effect: 'external-write', contexts: ['direct'], timeoutMs: 1000,
+      reconcile: async (_input, ctx) => { seen.push(ctx); return { status: 'applied', value: { receipt: 'from-service' } }; },
+      handler: async () => { invoked++; return { receipt: 'invoked' }; } }));
+    try {
+      expect(restarted.recoveryFor(task.id)?.status).toBe('reconciling');
+      await restarted.resumeRecovered({});
+      expect((await restarted.run(task.id, {})).answer).toBe('Done');
+      expect(invoked).toBe(0);
+      expect(seen).toEqual([expect.objectContaining({ taskId: task.id, callId: 'call-1', idempotencyKey: createHash('sha256').update(`${task.id}:call-1`).digest('hex'), dispatchedMs: expect.any(Number) })]);
+      expect(restarted.store.executionState.invocation(task.id, 'call-1')).toMatchObject({ state: 'reconciled_applied', result: { ok: true, value: { receipt: 'from-service' } } });
+    } finally { restarted.close(); }
+  });
+});
 });

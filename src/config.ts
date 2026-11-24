@@ -65,8 +65,14 @@ export const ConfigSchema = z.object({
     max_parallel_tool_calls: z.number().int().min(1).max(16).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS),
     /** Deprecated: despite its name it limits tasks. Used only when `max_parallel_tasks` is absent. */
     max_parallel_tools: z.number().int().min(1).max(16).optional(),
-    deadline_seconds: z.number().int().min(1).max(86400), max_delegation_depth: z.number().int().min(0).max(8) }).strict(),
-  providers: z.object({ llamacpp: provider, codex: z.object({ command: z.string().min(1).max(500), model: z.string().min(1).max(200), auth_mode: z.enum(['chatgpt', 'api_key']).default('chatgpt'), approval_policy: z.literal('never'), sandbox: z.literal('read-only') }).strict() }).strict(),
+    deadline_seconds: z.number().int().min(1).max(86400), max_delegation_depth: z.number().int().min(0).max(8),
+    /** Execution recovery after a crash or restart. Disabled, interrupted tasks are held as `unknown` as before. */
+    recovery: z.object({ enabled: z.boolean().default(true) }).strict().default({ enabled: true }),
+    /** Longest deadline an operator may give `retry_with_new_deadline`. Defaults to `deadline_seconds`. */
+    recovery_max_new_deadline_seconds: z.number().int().min(1).max(86400).optional() }).strict(),
+  providers: z.object({ llamacpp: provider, codex: z.object({ command: z.string().min(1).max(500), model: z.string().min(1).max(200), auth_mode: z.enum(['chatgpt', 'api_key']).default('chatgpt'), approval_policy: z.literal('never'), sandbox: z.literal('read-only'),
+    /** Keep task threads durable (not ephemeral) and record their ids, so execution recovery can verify and resume them. */
+    durable_threads: z.boolean().default(true) }).strict() }).strict(),
   /** Long-term memory. `none` (default) disables memory tools; `hivemem` uses a HiveMem server. */
   memory: z.discriminatedUnion('provider', [NoMemory, HiveMemConfigSchema]).default({ provider: 'none' }),
   research: z.object({ enabled: z.boolean().default(false), searxng_url: urlReference.default('${ARDENT_SEARXNG_URL}'), firecrawl_url: urlReference.default('${ARDENT_FIRECRAWL_URL}'), firecrawl_token_env: z.string().regex(envName).default('FIRECRAWL_API_KEY') }).strict().default(researchDefault),

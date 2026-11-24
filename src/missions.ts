@@ -78,9 +78,11 @@ function boundedText(value: string, bytes: number): string {
  * result whose summary is the reply. A recorded team_ask_user makes the result
  * input_required. Artifacts always come from the task's own registrations.
  */
-export function missionTeamResult(store: TaskStore, task: Task, mission: TeamMission, answer: string, submitted?: unknown): TeamResult {
+export function missionTeamResult(store: TaskStore, task: Task, mission: TeamMission, answer: string, submitted?: unknown,
+  continuation: { priorTaskIds: readonly string[]; uncertainEffects: readonly string[] } = { priorTaskIds: [], uncertainEffects: [] }): TeamResult {
   const envelope = missionEnvelope(task, mission);
-  const events = store.events(task.id, 0, 500);
+  // A recovery continuation also reports what the tasks it continues registered and observed.
+  const events = [...[...continuation.priorTaskIds].reverse().flatMap(id => store.events(id, 0, 500)), ...store.events(task.id, 0, 500)];
   const byName = new Map<string, TeamResult['artifacts'][number]>();
   for (const event of events) {
     if (event.kind !== 'artifact_registered') continue;
@@ -108,7 +110,8 @@ export function missionTeamResult(store: TaskStore, task: Task, mission: TeamMis
   if (candidate !== undefined && !asked?.success) {
     try {
       const parsed = TeamResult.parse(candidate);
-      const merged = { ...parsed, artifacts: [...artifacts, ...parsed.artifacts.filter(item => !byName.has(item.name) && known.has(item.reference))].slice(0, 32) };
+      const merged = { ...parsed, artifacts: [...artifacts, ...parsed.artifacts.filter(item => !byName.has(item.name) && known.has(item.reference))].slice(0, 32),
+        uncertain_effects: [...new Set([...parsed.uncertain_effects, ...continuation.uncertainEffects])] };
       return validateTeamResult(JSON.stringify(merged), envelope, known);
     } catch (error: unknown) {
       store.append(task.id, 'team_result_rejected', { reason: (error instanceof Error ? error.message : 'Invalid team result').slice(0, 1000) });
@@ -120,7 +123,7 @@ export function missionTeamResult(store: TaskStore, task: Task, mission: TeamMis
     version: TEAM_VERSION, mission_id: mission.id, mission_revision: mission.revision, task_id: task.id,
     outcome: asked?.success ? 'input_required' : 'partial', summary,
     checks: mission.acceptance_criteria.map(criterion => ({ criterion, status: 'unknown', evidence: [] })),
-    artifacts, uncertain_effects: [],
+    artifacts, uncertain_effects: [...continuation.uncertainEffects],
     ...(asked?.success ? { clarification: { missing_fact: boundedText(asked.data.question, 1200),
       choices: (asked.data.options ?? []).slice(0, 8).map((label, index) => ({ id: `option-${index + 1}`, label: boundedText(label, 300) })),
       blocked_task: task.id, intended_respondent: 'operator' } } : {})

@@ -299,6 +299,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Execution recovery of a task interrupted by a crash or restart: its status, actionable reason, checkpoint with pending tool calls, and the operator actions valid now. A resumed task stays running under the same id; a held task is unknown. */
+        get: operations["getTaskRecovery"];
+        put?: never;
+        /** @description Resolve a task held awaiting_decision. mark_applied (optional result, at most 64 KiB, checked against the tool output schema), mark_not_applied and retry_with_new_deadline (the pending call is dispatched again under its idempotency key; deadline_seconds at most execution.recovery_max_new_deadline_seconds) continue the work as a linked continuation task; abandon only records the decision. A held task stays unknown. Idempotent per task, attempt and action. */
+        post: operations["decideTaskRecovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/lineage": {
         parameters: {
             query?: never;
@@ -923,6 +941,37 @@ export interface components {
                 readonly inputs?: string[];
                 attempt?: number;
                 deadline_ms?: number;
+            };
+            /** @description Execution recovery of a task interrupted by a crash or restart. Absent for a task that was never interrupted. */
+            recovery?: {
+                /** @enum {string} */
+                status: "ready" | "reconciling" | "resumed" | "awaiting_decision" | "unsupported" | "resolved";
+                reason: {
+                    code: string;
+                    message: string;
+                };
+                attempt: number;
+                checkpoint?: {
+                    step: number;
+                    completed_calls: number;
+                    pending_calls: {
+                        call_id: string;
+                        tool: string;
+                        effect: string;
+                        dispatched_at: string | null;
+                        reconcilable: boolean;
+                    }[];
+                };
+                /** @description Only the actions valid now */
+                actions: ("mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon")[];
+                continuation_task_id?: string;
+                decided?: {
+                    /** @enum {string} */
+                    action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                    by: string;
+                    at: string;
+                    note?: string;
+                };
             };
         };
         TaskEvent: {
@@ -1670,6 +1719,37 @@ export interface operations {
                                 attempt?: number;
                                 deadline_ms?: number;
                             };
+                            /** @description Execution recovery of a task interrupted by a crash or restart. Absent for a task that was never interrupted. */
+                            recovery?: {
+                                /** @enum {string} */
+                                status: "ready" | "reconciling" | "resumed" | "awaiting_decision" | "unsupported" | "resolved";
+                                reason: {
+                                    code: string;
+                                    message: string;
+                                };
+                                attempt: number;
+                                checkpoint?: {
+                                    step: number;
+                                    completed_calls: number;
+                                    pending_calls: {
+                                        call_id: string;
+                                        tool: string;
+                                        effect: string;
+                                        dispatched_at: string | null;
+                                        reconcilable: boolean;
+                                    }[];
+                                };
+                                /** @description Only the actions valid now */
+                                actions: ("mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon")[];
+                                continuation_task_id?: string;
+                                decided?: {
+                                    /** @enum {string} */
+                                    action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                                    by: string;
+                                    at: string;
+                                    note?: string;
+                                };
+                            };
                         }[];
                     };
                 };
@@ -2227,11 +2307,183 @@ export interface operations {
                             attempt?: number;
                             deadline_ms?: number;
                         };
+                        /** @description Execution recovery of a task interrupted by a crash or restart. Absent for a task that was never interrupted. */
+                        recovery?: {
+                            /** @enum {string} */
+                            status: "ready" | "reconciling" | "resumed" | "awaiting_decision" | "unsupported" | "resolved";
+                            reason: {
+                                code: string;
+                                message: string;
+                            };
+                            attempt: number;
+                            checkpoint?: {
+                                step: number;
+                                completed_calls: number;
+                                pending_calls: {
+                                    call_id: string;
+                                    tool: string;
+                                    effect: string;
+                                    dispatched_at: string | null;
+                                    reconcilable: boolean;
+                                }[];
+                            };
+                            /** @description Only the actions valid now */
+                            actions: ("mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon")[];
+                            continuation_task_id?: string;
+                            decided?: {
+                                /** @enum {string} */
+                                action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                                by: string;
+                                at: string;
+                                note?: string;
+                            };
+                        };
                     };
                 };
             };
             /** @description Task absent */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getTaskRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task recovery */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ready" | "reconciling" | "resumed" | "awaiting_decision" | "unsupported" | "resolved";
+                        reason: {
+                            code: string;
+                            message: string;
+                        };
+                        attempt: number;
+                        checkpoint?: {
+                            step: number;
+                            completed_calls: number;
+                            pending_calls: {
+                                call_id: string;
+                                tool: string;
+                                effect: string;
+                                dispatched_at: string | null;
+                                reconcilable: boolean;
+                            }[];
+                        };
+                        /** @description Only the actions valid now */
+                        actions: ("mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon")[];
+                        continuation_task_id?: string;
+                        decided?: {
+                            /** @enum {string} */
+                            action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                            by: string;
+                            at: string;
+                            note?: string;
+                        };
+                    };
+                };
+            };
+            /** @description Task absent, or never interrupted */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    decideTaskRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                    call_id?: string;
+                    result?: unknown;
+                    note?: string;
+                    deadline_seconds?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Recovery after the decision; continuation_task_id names the continuation task */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ready" | "reconciling" | "resumed" | "awaiting_decision" | "unsupported" | "resolved";
+                        reason: {
+                            code: string;
+                            message: string;
+                        };
+                        attempt: number;
+                        checkpoint?: {
+                            step: number;
+                            completed_calls: number;
+                            pending_calls: {
+                                call_id: string;
+                                tool: string;
+                                effect: string;
+                                dispatched_at: string | null;
+                                reconcilable: boolean;
+                            }[];
+                        };
+                        /** @description Only the actions valid now */
+                        actions: ("mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon")[];
+                        continuation_task_id?: string;
+                        decided?: {
+                            /** @enum {string} */
+                            action: "mark_applied" | "mark_not_applied" | "retry_with_new_deadline" | "abandon";
+                            by: string;
+                            at: string;
+                            note?: string;
+                        };
+                    };
+                };
+            };
+            /** @description Invalid decision */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No decision, or not this one, is valid now */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3079,6 +3331,13 @@ export interface operations {
                         capabilities: {
                             /** @enum {number} */
                             artifact_transfer: 2;
+                        };
+                        /** @description Tasks in each open execution recovery status */
+                        recovery?: {
+                            ready: number;
+                            reconciling: number;
+                            awaiting_decision: number;
+                            unsupported: number;
                         };
                     };
                 };

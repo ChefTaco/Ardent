@@ -5,6 +5,8 @@ import Database from './sqlite.js';
 import { z } from 'zod';
 import { CatchupJournal } from './channel-catchup.js';
 import { TaskExecutions, type ExecutionContext, type TaskExecution } from './execution.js';
+import { ExecutionStates } from './execution-state.js';
+import { planRecovery, type RecoveryPlanOptions } from './recovery.js';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
@@ -30,6 +32,8 @@ export class TaskStore {
   readonly catchup: CatchupJournal;
   /** Execution ancestry (attribution only; never read for tool, memory or mission scope). */
   readonly executions: TaskExecutions;
+  /** Execution checkpoints, tool invocations and recovery status (`execution-state.ts`). */
+  readonly executionState: ExecutionStates;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path);
@@ -121,7 +125,9 @@ export class TaskStore {
       BEFORE DELETE ON session_messages BEGIN SELECT RAISE(ABORT, 'Session messages are immutable'); END;`);
     this.catchup = new CatchupJournal(this.db);
     this.executions = new TaskExecutions(this.db);
+    this.executionState = new ExecutionStates(this.db);
   }
+  parseTask(row: unknown): Task { return TaskSchema.parse(row); }
   /** The execution context a task was accepted with, if it has one (attribution only). */
   executionFor(taskId: string): ExecutionContext | undefined { return this.executions.get(taskId)?.context; }
   close(): void { this.db.close(); }
@@ -180,9 +186,11 @@ export class TaskStore {
    * `onAccepted` journals it in the same transaction, only for a newly accepted task.
    * `execution` builds the task's execution context; it is recorded in
    * `task_execution` and in the `accepted` event, and never enters the digest.
+   * `suppressSessionUserMessage` keeps the prompt out of the session, for a
+   * recovery continuation whose prompt the session already holds.
    */
   accept(input: { caller: string; context: TaskContext; sessionId?: string; prompt: string; idempotencyKey?: string; backend: 'llamacpp' | 'codex'; deadlineMs: number;
-    content?: unknown; onAccepted?: (task: Task) => void; execution?: (task: Task) => TaskExecution }): Task {
+    content?: unknown; onAccepted?: (task: Task) => void; execution?: (task: Task) => TaskExecution; suppressSessionUserMessage?: boolean }): Task {
     if (!input.caller || input.caller.length > 128 || !input.prompt.trim() || input.prompt.length > 16000 || (input.idempotencyKey && input.idempotencyKey.length > 128)) throw new Error('Invalid task input');
     const hash = createHash('sha256').update(JSON.stringify(input.content === undefined ? [input.prompt, input.backend] : [input.prompt, input.backend, input.content])).digest('hex');
     return this.db.transaction(() => {
@@ -205,7 +213,7 @@ export class TaskStore {
       const task: Task = { id: randomUUID(), caller: input.caller, context: input.context, session_id: input.sessionId ?? null, prompt: input.prompt, content_hash: hash, idempotency_key: input.idempotencyKey ?? null, backend: input.backend, state: 'queued', result: null, error: null, deadline_ms: input.deadlineMs, created_ms: now, updated_ms: now };
       this.db.prepare(`INSERT INTO tasks (id,caller,context,session_id,prompt,content_hash,idempotency_key,backend,state,result,error,deadline_ms,created_ms,updated_ms)
         VALUES (@id,@caller,@context,@session_id,@prompt,@content_hash,@idempotency_key,@backend,@state,@result,@error,@deadline_ms,@created_ms,@updated_ms)`).run(task);
-      if (task.session_id) this.db.prepare('INSERT INTO session_messages(session_id,task_id,role,content,created_ms) VALUES (?,?,?,?,?)').run(task.session_id, task.id, 'user', task.prompt, now);
+      if (task.session_id && !input.suppressSessionUserMessage) this.db.prepare('INSERT INTO session_messages(session_id,task_id,role,content,created_ms) VALUES (?,?,?,?,?)').run(task.session_id, task.id, 'user', task.prompt, now);
       const execution = input.execution?.(task);
       if (execution) this.executions.insert(execution);
       this.append(task.id, 'accepted', { caller: input.caller, context: input.context, backend: input.backend, ...(execution ? { execution: execution.context } : {}) });
@@ -375,12 +383,17 @@ export class TaskStore {
       return EventSchema.parse({ sequence: value.sequence, task_id: value.task_id, kind: value.kind, detail: JSON.parse(value.detail_json) as unknown, created_ms: value.created_ms });
     });
   }
-  recover(): { queued: Task[]; interrupted: number } {
-    const running = this.db.prepare("SELECT id FROM tasks WHERE state='running'").all().map(row => z.object({ id: z.string() }).parse(row));
-    this.db.transaction(() => {
-      for (const row of running) this.setState(row.id, 'unknown', null, 'Interrupted during execution; provider/tool effect may be unresolved');
-      this.db.prepare("UPDATE channel_deliveries SET state='unknown',error='Process stopped during a queued delivery; send outcome is uncertain',updated_ms=? WHERE state='queued'").run(Date.now());
-    })();
-    return { queued: this.db.prepare("SELECT * FROM tasks WHERE state='queued' ORDER BY created_ms").all().map(row => TaskSchema.parse(row)), interrupted: running.length };
+  /**
+   * Startup recovery, before any queued work is admitted. Each `running` task
+   * is planned by the execution recovery rules (`recovery.ts`): resumed under
+   * the same id (it stays `running`), settled, or held as `unknown`. A queued
+   * channel delivery's send outcome is uncertain, so it becomes `unknown`.
+   */
+  recover(options: RecoveryPlanOptions = {}): { queued: Task[]; interrupted: number; resumed: string[]; held: string[] } {
+    const interrupted = z.object({ count: z.number().int() }).parse(this.db.prepare("SELECT count(*) AS count FROM tasks WHERE state='running'").get()).count;
+    const planned = planRecovery(this, options);
+    this.db.prepare("UPDATE channel_deliveries SET state='unknown',error='Process stopped during a queued delivery; send outcome is uncertain',updated_ms=? WHERE state='queued'").run(Date.now());
+    return { queued: this.db.prepare("SELECT * FROM tasks WHERE state='queued' ORDER BY created_ms").all().map(row => TaskSchema.parse(row)), interrupted,
+      resumed: planned.resumed, held: planned.held };
   }
 }
