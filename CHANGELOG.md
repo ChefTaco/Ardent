@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.2.1 - 2026-11-24
+
 ### Fixed
 
 - `@hivemagnus/ardent-client`: `viaMagnus` now reaches Magnus through a Hive console. Give `apiBase`, the URL that stands for Magnus's `/api/v1` (a console's `https://<console>/api/magnus`), instead of `baseUrl`; the client then adds no `/api/v1`. `baseUrl` (the Magnus origin) behaves as before, and giving both or neither is refused. The CLI example takes `--magnus-api`.
