@@ -211,14 +211,17 @@ const CURRENT_ACTIONS = new Set(['session-open', 'task-submit', 'task-cancel', '
  * A small Magnus Control API: its read allowlist, stream relay and action shapes as of
  * Magnus 3.2 (`release: 'current'`), or with the routes, actions and top-level `execution`
  * that Magnus 3.3.0 adds (`release: 'next'`). Answers in Magnus's `{ success, data }` envelope.
+ * `apiPath` serves the API under another path, as a Hive console serves Magnus's `/api/v1` at `/api/magnus`.
  */
 export async function fakeMagnus(ardentUrl: string, options: { release: 'current' | 'next'; nodeId?: string; profile?: string; capabilities?: Capabilities;
-  oldProfile?: boolean; readableReport?: boolean }) {
+  oldProfile?: boolean; readableReport?: boolean; apiPath?: string }) {
   const nodeId = options.nodeId ?? 'node-1';
   const profile = options.profile ?? 'assistant';
   const next = options.release === 'next';
   const capabilities = options.capabilities ?? (next ? { studio: 4, recovery: 1, lineage: 1, artifact_transfer: 2 } : { studio: 3 });
   const actions: Array<Record<string, unknown>> = [];
+  /** The path of every request, in order. */
+  const requests: string[] = [];
   const fail = (res: ServerResponse, status: number, code: string, message: string, extra: Record<string, unknown> = {}) => {
     res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify({ success: false, error: { code, message, ...extra } }));
   };
@@ -248,8 +251,9 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://magnus.invalid');
+      requests.push(url.pathname);
       if (req.headers.authorization !== 'Bearer magnus-fixture-token') return fail(res, 401, 'UNAUTHORIZED', 'Authentication required');
-      const base = `/api/v1/ardent/installations/${nodeId}`;
+      const base = `${options.apiPath ?? '/api/v1'}/ardent/installations/${nodeId}`;
       if (url.pathname === base) {
         if (options.readableReport === false) return fail(res, 403, 'FORBIDDEN', 'Requires one of: ADMIN');
         return ok(res, { nodeId, installed: true, version: '3.2.0', capabilities, profiles: [{ id: profile, name: 'Assistant', running: true }] });
@@ -301,5 +305,5 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
       return ok(res, await upstream.json());
     })().catch(error => { if (!res.headersSent) fail(res, 500, 'INTERNAL_ERROR', String(error)); else res.destroy(); });
   });
-  return { url: await listen(server), nodeId, profile, actions };
+  return { url: await listen(server), nodeId, profile, actions, requests };
 }

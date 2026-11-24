@@ -8,7 +8,7 @@ export type {
   ArdentCapabilities, ArdentClient, ArdentClientOptions, CallOptions, FollowTaskOptions, RecoveryDecision, SubmitInput,
 } from './client.js';
 export { direct, viaMagnus } from './transport.js';
-export type { ArdentTransport, DirectTransportOptions, FetchLike, MagnusTransportOptions, TokenProvider } from './transport.js';
+export type { ArdentTransport, DirectTransportOptions, FetchLike, MagnusTransportOptions, ResolvedMagnusTransportOptions, TokenProvider } from './transport.js';
 export type { FollowOptions } from './follow.js';
 export type { ArtifactDownload, DownloadOptions, DownloadProgress, ResumeSource } from './download.js';
 export {

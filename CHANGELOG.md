@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `@hivemagnus/ardent-client`: `viaMagnus` now reaches Magnus through a Hive console. Give `apiBase`, the URL that stands for Magnus's `/api/v1` (a console's `https://<console>/api/magnus`), instead of `baseUrl`; the client then adds no `/api/v1`. `baseUrl` (the Magnus origin) behaves as before, and giving both or neither is refused. The CLI example takes `--magnus-api`.
+
 ## 3.2.0 - 2026-11-24
 
 **Interrupted tasks now resume by default.** After a crash or restart, a task that was `running` continues under the same id from its last completed model or tool boundary instead of becoming `unknown`; a task with an unsettled effect is held `unknown` with an actionable recovery status. Set `execution.recovery.enabled: false` for the previous behaviour.

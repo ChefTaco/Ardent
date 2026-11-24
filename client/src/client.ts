@@ -12,7 +12,7 @@ import type {
 } from './types.js';
 
 export interface ArdentClientOptions {
-  /** `direct({ baseUrl, getToken })` or `viaMagnus({ baseUrl, nodeId, profile, getToken })`. */
+  /** `direct({ baseUrl, getToken })` or `viaMagnus({ baseUrl | apiBase, nodeId, profile, getToken })`. */
   readonly transport: ArdentTransport;
   /** Execution context v1 sent with every submission (attribution only; it never grants access). */
   readonly execution?: ExecutionContext;
