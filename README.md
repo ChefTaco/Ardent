@@ -9,8 +9,10 @@ App Server, calls typed tools, and keeps a durable journal of every task.
 What you get:
 
 - **Durable tasks** with idempotency keys, cancellation, deadlines, and a
-  per-task event journal in SQLite. Interrupted work is marked `unknown`,
-  never silently replayed.
+  per-task event journal in SQLite. Interrupted work resumes from its last
+  verified step after a restart; an operation whose effect is uncertain is
+  held for a decision, never silently replayed (see
+  [Execution recovery](#execution-recovery)).
 - **Management API** (Hono, bearer-token protected) for tasks, sessions,
   config, identity, skills, peers, channels, and live event streams, including
   the reply text as the model writes it. The
