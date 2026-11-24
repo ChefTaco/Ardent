@@ -115,6 +115,9 @@ export class TaskStore {
          'mattermost_dm','mattermost_channel','chattermost_dm','chattermost_channel'))`);
     if (!inboundColumns.some(column => column.name === 'disposition')) this.db.exec(`ALTER TABLE channel_inbound ADD COLUMN
       disposition TEXT NOT NULL DEFAULT 'admitted' CHECK(disposition IN ('admitted','skipped_stale'))`);
+    // Where a reply goes (conversation, thread, the message replied to), so a
+    // task that execution recovery resumes or continues can still answer it.
+    if (!inboundColumns.some(column => column.name === 'reply_target_json')) this.db.exec('ALTER TABLE channel_inbound ADD COLUMN reply_target_json TEXT');
     this.db.exec(`CREATE TRIGGER IF NOT EXISTS channel_inbound_type_immutable
       BEFORE UPDATE OF channel_type ON channel_inbound
       WHEN OLD.channel_type != NEW.channel_type
@@ -253,7 +256,7 @@ export class TaskStore {
       .get(platform, account, updateId) !== undefined;
   }
   claimInbound(platform: string, account: string, updateId: string,
-    channelType: InboundChannelType = 'unknown', disposition: InboundDisposition = 'admitted'): { claimed: boolean; taskId: string | null } {
+    channelType: InboundChannelType = 'unknown', disposition: InboundDisposition = 'admitted', replyTarget?: unknown): { claimed: boolean; taskId: string | null } {
     if (!platform || !account || !updateId || updateId.length > 256) throw new Error('Invalid channel update identity');
     if ((platform === 'telegram' && (channelType.startsWith('mattermost_') || channelType.startsWith('chattermost_'))) ||
         (['mattermost', 'chattermost'].includes(platform) && channelType.startsWith('telegram_')) ||
@@ -270,8 +273,8 @@ export class TaskStore {
         return { claimed: false, taskId: prior.task_id };
       }
       this.db.prepare(`INSERT INTO channel_inbound
-        (platform,account,update_id,task_id,created_ms,channel_type,disposition) VALUES (?,?,?,?,?,?,?)`)
-        .run(platform, account, updateId, null, Date.now(), channelType, disposition);
+        (platform,account,update_id,task_id,created_ms,channel_type,disposition,reply_target_json) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(platform, account, updateId, null, Date.now(), channelType, disposition, replyTarget === undefined ? null : JSON.stringify(replyTarget));
       return { claimed: true, taskId: null };
     })();
   }
@@ -300,6 +303,17 @@ export class TaskStore {
     const id = randomUUID();
     this.db.prepare('INSERT OR IGNORE INTO channel_deliveries(id,platform,account,update_id,task_id,state,external_id,error,created_ms,updated_ms) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, platform, account, updateId, taskId, 'queued', null, null, Date.now(), Date.now());
     return this.delivery(platform, account, updateId)?.id ?? id;
+  }
+  /**
+   * Record a delivery before it is sent, only if none exists for the update.
+   * `created` is false when a delivery (queued, sent, failed or unknown) was
+   * already recorded: the caller must not send again.
+   */
+  claimDelivery(platform: string, account: string, updateId: string, taskId: string | null): { id: string; created: boolean } {
+    const id = randomUUID();
+    const result = this.db.prepare('INSERT OR IGNORE INTO channel_deliveries(id,platform,account,update_id,task_id,state,external_id,error,created_ms,updated_ms) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, platform, account, updateId, taskId, 'queued', null, null, Date.now(), Date.now());
+    return { id: result.changes === 1 ? id : this.delivery(platform, account, updateId)?.id ?? id, created: result.changes === 1 };
   }
   /** Provider requests a channel delivery made, retries included. */
   recordDeliveryAttempts(platform: string, account: string, updateId: string, attempts: number): void {

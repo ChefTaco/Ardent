@@ -124,7 +124,7 @@ export class MattermostAdapter {
     const text = (isDm ? post.message : post.message.replace(mentionPattern(me.username), '$1').trim()).slice(0, MAX_EVENT_TEXT);
     const event: ChannelEvent = { platform: 'mattermost', channel_type: isDm ? 'mattermost_dm' : 'mattermost_channel',
       account: me.id, user: post.user_id, conversation: post.channel_id, thread: post.root_id || null, update_id: post.id, reply_to: post.id, text, attachments, authorized: true, bot_message: false };
-    const operation = this.#core.handle(event, async reply => this.#deliver(post, channelType, reply)).catch(error => {
+    const operation = this.#core.handle(event, async reply => this.#deliver({ channel_id: post.channel_id, root_id: post.root_id, id: post.id }, channelType, reply)).catch(error => {
       this.runtime.store.setCursor(`mattermost:${me.id}:last_error`, error instanceof Error ? error.message.slice(0, 500) : 'unknown');
     });
     // A live post never moves an existing boundary: posts missed before it are
@@ -171,7 +171,14 @@ export class MattermostAdapter {
     return listing.order.map(id => listing.posts[id]).filter((item): item is MattermostPost => item !== undefined)
       .sort((a, b) => b.create_at - a.create_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   }
-  async #deliver(post: z.infer<typeof Post>, channelType: string, reply: ChannelReply): Promise<string | null> {
+  /** Answer posts whose task execution recovery resumed or continued, until `signal` aborts. Call after `initialize`. */
+  watchRecovered(signal: AbortSignal): Promise<void> {
+    const me = this.#me;
+    if (!me) throw new Error('Mattermost adapter has not initialized');
+    return this.#core.watchRecovered('mattermost', me.id, target => reply => this.#deliver({ channel_id: target.conversation, root_id: target.thread ?? '',
+      id: target.reply_to ?? target.update_id }, target.channel_type === 'mattermost_dm' ? 'D' : 'O', reply), signal);
+  }
+  async #deliver(post: { channel_id: string; root_id: string; id: string }, channelType: string, reply: ChannelReply): Promise<string | null> {
     const ids: string[] = [];
     let last: string | null = null;
     try {
@@ -381,6 +388,12 @@ export class MattermostAdapter {
   }
   async run(signal: AbortSignal): Promise<void> {
     await this.initialize();
+    // Tasks execution recovery resumed or continued have no waiting handler; answer them once each.
+    const stop = new AbortController();
+    const recovered = this.watchRecovered(AbortSignal.any([signal, stop.signal]));
+    try { await this.#connectLoop(signal); } finally { stop.abort(); await recovered; }
+  }
+  async #connectLoop(signal: AbortSignal): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
       try { await this.connectOnce(signal); failures = 0; }

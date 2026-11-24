@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ArdentRuntime } from './runtime.js';
 import type { JobEngine } from './job-engine.js';
-import { ChannelCore, DeliveryRejectedError, type ChannelEvent, type ChannelReply } from './channels.js';
+import { ChannelCore, DeliveryRejectedError, type ChannelEvent, type ChannelReply, type ReplyTarget } from './channels.js';
 import { AttemptError, lastAttemptError, retryWithPolicy } from './retry.js';
 
 const User = z.object({ id: z.number().int(), is_bot: z.boolean().default(false), username: z.string().optional() }).passthrough();
@@ -162,18 +162,28 @@ export class TelegramAdapter {
    */
   async run(signal: AbortSignal, deliverySignal: AbortSignal = signal): Promise<void> {
     await this.initialize(signal);
-    let failures = 0;
-    while (!signal.aborted) {
-      try { await this.pollOnce(signal, deliverySignal); failures = 0; }
-      catch (error: unknown) {
-        if (signal.aborted) break;
-        if (error instanceof TelegramConflictError) throw error;
-        failures++;
-        // Abort-aware so shutdown does not wait out the reconnect backoff.
-        await sleep(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)), undefined, { signal }).catch(() => {});
+    // Tasks execution recovery resumed or continued have no waiting handler; answer them once each.
+    const stop = new AbortController();
+    const recovered = this.watchRecovered(AbortSignal.any([signal, stop.signal]), deliverySignal);
+    try {
+      let failures = 0;
+      while (!signal.aborted) {
+        try { await this.pollOnce(signal, deliverySignal); failures = 0; }
+        catch (error: unknown) {
+          if (signal.aborted) break;
+          if (error instanceof TelegramConflictError) throw error;
+          failures++;
+          // Abort-aware so shutdown does not wait out the reconnect backoff.
+          await sleep(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)), undefined, { signal }).catch(() => {});
+        }
       }
-    }
-    await this.drain();
+      await this.drain();
+    } finally { stop.abort(); await recovered; }
+  }
+  /** Answer updates whose task execution recovery resumed or continued, until `signal` aborts. Call after `initialize`. */
+  watchRecovered(signal: AbortSignal, deliverySignal: AbortSignal = signal): Promise<void> {
+    if (!this.#bot) throw new Error('Telegram adapter has not initialized');
+    return this.#core.watchRecovered('telegram', String(this.#bot.id), target => reply => this.#deliverTo(target, reply, deliverySignal), signal);
   }
   async #handleUpdate(update: z.infer<typeof Update>, ready: () => void, signal?: AbortSignal): Promise<void> {
     const message = update.message;
@@ -224,12 +234,14 @@ export class TelegramAdapter {
     const initialTyping = showTyping();
     const typing = setInterval(() => { void showTyping(); }, 4000);
     try {
-      const operation = this.#core.handle(event, async reply => { await initialTyping; return this.#deliver(message, reply, signal, event); });
+      const operation = this.#core.handle(event, async reply => { await initialTyping; return this.#deliverTo(event, reply, signal); });
       ready();
       await operation;
     } finally { clearInterval(typing); }
   }
-  async #deliver(message: z.infer<typeof Message>, reply: ChannelReply, signal: AbortSignal | undefined, event: ChannelEvent): Promise<string | null> {
+  async #deliverTo(target: ReplyTarget, reply: ChannelReply, signal: AbortSignal | undefined): Promise<string | null> {
+    const message = { chat: { id: Number(target.conversation) }, message_id: Number(target.reply_to), message_thread_id: target.thread === null ? undefined : Number(target.thread) };
+    const event = target;
     const common = { chat_id: message.chat.id, reply_parameters: { message_id: message.message_id }, ...(message.message_thread_id === undefined ? {} : { message_thread_id: message.message_thread_id }) };
     let last: string | null = null;
     // Every Bot API request this delivery made, retries included, lands on its delivery row.

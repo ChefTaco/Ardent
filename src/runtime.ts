@@ -109,6 +109,7 @@ export class ArdentRuntime {
   #gatewayPrepared = false;
   #pluginsStarted = false;
   readonly #taskContexts = new Map<string, ArdentTaskPluginContext>();
+  readonly #settledListeners = new Set<(taskId: string) => void>();
   #pluginEnvironment: NodeJS.ProcessEnv = {};
   #closing = false;
   #closed = false;
@@ -246,6 +247,18 @@ export class ArdentRuntime {
       backend: this.config.execution.backend, deadlineMs: Date.now() + this.config.execution.deadline_seconds * 1000,
       content: request.content, onAccepted: request.onAccepted, execution: this.#execution(execution) }), this.store, input);
   }
+  /**
+   * Be told when a task run by this runtime settles, or when an operator
+   * decides a held task. Channel adapters and the A2A surface use it to deliver
+   * the outcome of resumed and continued tasks. Returns an unsubscribe function.
+   */
+  onTaskSettled(listener: (taskId: string) => void): () => void {
+    this.#settledListeners.add(listener);
+    return () => { this.#settledListeners.delete(listener); };
+  }
+  #notifySettled(taskId: string): void {
+    for (const listener of [...this.#settledListeners]) { try { listener(taskId); } catch { /* a listener failure never affects the task */ } }
+  }
   /** The recovery object (C3) of a task interrupted by a crash or restart; undefined for one never interrupted. */
   recoveryFor(taskId: string): RecoveryView | undefined {
     const task = this.store.get(taskId);
@@ -295,6 +308,7 @@ export class ArdentRuntime {
         states.setRecovery(taskId, { status: 'resolved', reason: row.reason, attempt: row.attempt, decided });
         this.store.append(taskId, 'recovery_decided', { action: input.action, attempt: row.attempt, continued: false, ...(target ? { call_id: target.call_id } : {}) });
       })();
+      this.#notifySettled(taskId);
       return { recovery: view() };
     }
     const max = this.config.execution.recovery_max_new_deadline_seconds ?? this.config.execution.deadline_seconds;
@@ -306,6 +320,7 @@ export class ArdentRuntime {
     }
     if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
     const continuation = this.#acceptContinuation(task, row.attempt, row.reason, input.action, decided, deadlineMs, target, input.result);
+    this.#notifySettled(taskId);
     return { recovery: view(), continuation };
   }
   #acceptContinuation(original: Task, attempt: number, why: RecoveryReason, action: 'mark_applied' | 'mark_not_applied' | 'retry_with_new_deadline',
@@ -517,8 +532,8 @@ export class ArdentRuntime {
         pending.onText?.(chunk, step);
       };
       void this.#execute(taskId, pending.env, onText, pending.resume === true).then(
-        result => { this.liveText.end(taskId); settled(); pending.resolve(result); },
-        error => { this.liveText.end(taskId); settled(); pending.reject(error instanceof Error ? error : new Error('Task failed')); }
+        result => { this.liveText.end(taskId); settled(); pending.resolve(result); this.#notifySettled(taskId); },
+        error => { this.liveText.end(taskId); settled(); pending.reject(error instanceof Error ? error : new Error('Task failed')); this.#notifySettled(taskId); }
       );
     }
   }
