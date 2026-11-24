@@ -43,7 +43,11 @@ export interface Tool {
   effect: ToolEffect;
   contexts: readonly ToolContext[];
   timeoutMs: number;
-  /** Repeating the call with identical arguments and idempotency key is safe. */
+  /**
+   * Repeating the call with identical arguments and idempotency key is safe.
+   * Execution recovery re-dispatches an interrupted idempotent call (with the
+   * same key) instead of holding it; declare it only when that is true.
+   */
   idempotent?: boolean;
   /**
    * Scheduling within one model turn. By default a `read` tool may overlap
@@ -53,9 +57,12 @@ export interface Tool {
   concurrency?: ToolConcurrency;
   /**
    * Ask the tool's own service what happened to a call interrupted after
-   * dispatch. Only an outcome the service proves may be `applied` or
-   * `not_applied`. Declared for execution recovery; the runtime does not call
-   * it yet.
+   * dispatch (a crash or restart before its result was recorded). Only an
+   * outcome the service proves may be `applied` (its `value` must match
+   * `output`; it becomes the call's result) or `not_applied` (the model is
+   * told, and the call is not retried); anything else, a throw included, is
+   * `unknown` and holds the task for an operator. Execution recovery calls it
+   * before the task resumes, for a non-idempotent tool with a possible effect.
    */
   reconcile?(input: unknown, ctx: ToolReconcileContext, signal: AbortSignal): Promise<ToolReconcileResult>;
   invoke(input: unknown, signal: AbortSignal, ctx?: ToolInvocationContext): Promise<unknown>;
