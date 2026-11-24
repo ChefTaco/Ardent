@@ -56,7 +56,11 @@ describe('example CLI: submit, follow, download', () => {
       const download = summary.downloads[0]!;
       expect(download).toMatchObject({ sha256: sha256(server.content), size: server.content.length, resumes: 1, verified: true });
       const contents = proxy.log.filter(entry => entry.url.endsWith('/content'));
-      expect(contents.map(entry => [entry.range, entry.ifRange])).toEqual([[undefined, undefined], [`bytes=${1024 * 1024 + 7}-`, `"${download.sha256}"`]]);
+      // The resume starts where the delivered bytes ended (at most the cut point; a socket may lose its last write).
+      expect(contents.map(entry => [entry.range, entry.ifRange])).toEqual([[undefined, undefined], [expect.stringMatching(/^bytes=\d+-$/), `"${download.sha256}"`]]);
+      const resumedAt = Number(/^bytes=(\d+)-$/.exec(contents[1]!.range!)![1]);
+      expect(resumedAt).toBeGreaterThan(0);
+      expect(resumedAt).toBeLessThanOrEqual(1024 * 1024 + 7);
       expect(sha256(await readFile(download.path))).toBe(download.sha256);
       expect(await readdir(out)).toEqual(['report.pdf']);
     } finally { await rm(out, { recursive: true, force: true }); }

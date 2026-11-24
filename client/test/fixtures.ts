@@ -223,7 +223,14 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
     res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify({ success: false, error: { code, message, ...extra } }));
   };
   const ok = (res: ServerResponse, data: unknown) => { res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, data })); };
-  const ardentFetch = (path: string, init: RequestInit = {}) => fetch(`${ardentUrl}/api/v1/${path}`, { ...init, headers: { authorization: `Bearer ${TOKEN}`, ...init.headers } });
+  /** Only fixed-shape Ardent API paths on the fixture's own origin are forwarded. */
+  const ardentFetch = (path: string, init: RequestInit = {}) => {
+    if (!/^[a-z]+(?:\/[a-z0-9-]+)*(?:\?[a-z_]+=[A-Za-z0-9_-]+(?:&[a-z_]+=[A-Za-z0-9_-]+)*)?$/.test(path) || path.includes('..'))
+      throw new Error('Refused fixture path');
+    const target = new URL(`/api/v1/${path}`, ardentUrl);
+    if (target.origin !== new URL(ardentUrl).origin) throw new Error('Refused fixture origin');
+    return fetch(target, { ...init, headers: { authorization: `Bearer ${TOKEN}`, ...init.headers } });
+  };
   const relay = async (res: ServerResponse, upstream: Response) => {
     const headers: Record<string, string> = {};
     upstream.headers.forEach((value, key) => { if (!['content-encoding', 'transfer-encoding', 'connection'].includes(key)) headers[key] = value; });
@@ -257,6 +264,7 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
         const keys = Object.keys(input).filter(key => !['action', 'target', 'body', ...(next ? ['execution'] : [])].includes(key));
         if (typeof input['action'] !== 'string' || !allowed.has(input['action']) || keys.length) return fail(res, 400, 'VALIDATION_ERROR', 'Invalid Ardent action');
         const target = typeof input['target'] === 'string' ? input['target'] : '';
+        if (target && !/^[0-9a-f-]{36}$/.test(target)) return fail(res, 400, 'VALIDATION_ERROR', 'Invalid Ardent action target');
         const action = input['action'];
         const payload = (input['body'] ?? {}) as Record<string, unknown>;
         if (action === 'task-submit' && (typeof payload['idempotency_key'] !== 'string' || !/^[0-9a-f-]{36}$/.test(payload['idempotency_key'])))
