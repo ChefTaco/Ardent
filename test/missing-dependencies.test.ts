@@ -58,6 +58,24 @@ describe('missing backend and channel dependencies', () => {
           expect((await probe.json() as { error: { message: string } }).error.message).toMatch(authMode === 'none' ? /login required/ : /wrong auth mode/);
         } finally { codexRuntime.close(); }
       }
+
+      // The provider probe honours providers.codex.auth_mode, as readiness does.
+      for (const [fixtureMode, expected] of [['wrong', 200], ['chatgpt', 503]] as const) {
+        const config = (await loadConfig(dir)).config;
+        config.execution.backend = 'codex';
+        config.providers.codex.command = codex;
+        config.providers.codex.model = 'fixture';
+        config.providers.codex.auth_mode = 'api_key';
+        const codexEnv = { ARDENT_API_TOKEN: 'fixture-management-token', ARDENT_FIXTURE_AUTH_MODE: fixtureMode };
+        const codexRuntime = new ArdentRuntime(dir, config, codexEnv);
+        try {
+          const app = createArdentApi(codexRuntime, await loadConfig(dir), codexEnv);
+          const probe = await app.request('/api/v1/providers/test', { method: 'POST', headers: { Authorization: 'Bearer fixture-management-token' } });
+          expect(probe.status).toBe(expected);
+          if (expected === 200) expect(await probe.json()).toEqual({ backend: 'codex', auth_mode: 'api_key' });
+          else expect((await probe.json() as { error: { message: string } }).error.message).toMatch(/wrong auth mode/);
+        } finally { codexRuntime.close(); }
+      }
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

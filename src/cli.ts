@@ -8,7 +8,8 @@ import { stdin, stdout, stderr } from 'node:process';
 import { z } from 'zod';
 import { ardentHome, ConfigSchema, DEFAULT_PROFILE, initProfile, loadConfig, profilePath, redactedConfig, resolveReference, runtimeProblems } from './config.js';
 import { ArdentRuntime } from './runtime.js';
-import { TaskStore } from './store.js';
+import { JOB_TICK_ERROR_CURSOR, readJobTickError, TaskStore, type JobTickError } from './store.js';
+import { ardentLogger } from './log.js';
 import { ardentOpenApi, createArdentApi } from './api.js';
 import { serve } from '@hono/node-server';
 import { listSkills, readSkill, setSkillEnabled } from './skills.js';
@@ -37,12 +38,13 @@ import { PlainTextFilter } from './live-text.js';
 import { developmentQuery, missionSubmitInput, previewInput } from './cli-commands.js';
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
 import { ArtifactTransfers } from './artifact-transfer.js';
+import { inspectJournal, journalPolicy } from './journal.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
 function args(argv: string[], extraValues: readonly string[] = []): Parsed {
   const words: string[] = [];
   const options = new Map<string, string | true>();
-  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model', 'peer', 'task', 'artifact', 'local-task']);
+  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model', 'peer', 'task', 'artifact', 'local-task', 'db']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg) continue;
@@ -67,6 +69,16 @@ async function environment(dir: string, explicitFile?: string): Promise<NodeJS.P
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [name, val] of Object.entries(await readProfileEnv(dir, explicitFile))) if (env[name] === undefined) env[name] = val;
   return env;
+}
+/** Read-only. A profile that has never run has no journal; doctor never fails on a journal it cannot open. */
+async function profileJobTickError(dir: string): Promise<JobTickError | null> {
+  const path = join(dir, 'state', 'ardent.sqlite');
+  const stat = await lstat(path).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink()) return null;
+  try {
+    const database = new Database(path, { readonly: true, fileMustExist: true });
+    try { return readJobTickError(database); } finally { database.close(); }
+  } catch { return null; }
 }
 function print(value: unknown): void { stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 async function assertNoGateway(dir: string): Promise<void> {
@@ -100,6 +112,8 @@ Commands:
   jobs definitions status                  Show installed job definitions
   context status | compact                 Inspect or compact a session context
   admission status | close --release-id ID Inspect or close the admission fence
+  journal status [--db FILE] [--json]      Report whether the journal holds active, unknown or unsupported work (read-only)
+  journal policy                           Print the journal table classification
   a2a discover <peer> | call <peer>        Talk to a configured A2A peer
   a2a team-card                            Print the Hermes team card (a2a.hermes_compat)
   openapi export                           Print the management OpenAPI document
@@ -134,6 +148,18 @@ async function main(): Promise<void> {
     const entries = await readdir(join(ardentHome(), 'profiles'), { withFileTypes: true }).catch(() => []);
     print(entries.filter(entry => entry.isDirectory()).map(entry => ({ name: entry.name })));
     return;
+  }
+  if (command === 'journal') {
+    // Read-only and independent of config and plugins, so it also answers for a profile that cannot start.
+    // Output is always JSON; --json is accepted for scripts that ask for it explicitly.
+    if (subcommand === 'policy') { print(journalPolicy()); return; }
+    if (subcommand === 'status') {
+      const db = value(parsed.options, 'db');
+      const path = db ? resolvePath(db) : join(dir, 'state', 'ardent.sqlite');
+      print({ ardent_version: ARDENT_VERSION, ...(db ? {} : { profile }), ...await inspectJournal(path) });
+      return;
+    }
+    throw new Error('Use journal status [--db FILE] or journal policy');
   }
   const loaded = await loadConfig(dir);
   const env = await environment(dir, value(parsed.options, 'env-file'));
@@ -228,6 +254,7 @@ async function main(): Promise<void> {
     if (action === 'status') {
       let activeJobs = 0;
       let unknownJobs = 0;
+      let lastTickError: JobTickError | null = null;
       const dbPath = join(dir, 'state', 'ardent.sqlite');
       const dbStat = await lstat(dbPath);
       if (!dbStat.isFile() || dbStat.isSymbolicLink()) throw new Error('Profile job database is unavailable');
@@ -239,9 +266,10 @@ async function main(): Promise<void> {
           activeJobs = count.parse(database.prepare("SELECT count(*) AS n FROM job_windows WHERE state IN ('queued','running','retry')").get()).n;
           unknownJobs = count.parse(database.prepare("SELECT count(*) AS n FROM job_windows WHERE state='unknown'").get()).n;
         }
+        lastTickError = readJobTickError(database);
       } finally { database.close(); }
       print({ profile, revision: validated.definitions.revision, sha256, job_count: validated.job_count,
-        active_jobs: activeJobs, unknown_jobs: unknownJobs, last_validation_error: null });
+        active_jobs: activeJobs, unknown_jobs: unknownJobs, last_validation_error: null, last_tick_error: lastTickError });
       return;
     }
     throw new Error('Use jobs definitions validate or jobs definitions status');
@@ -263,7 +291,11 @@ async function main(): Promise<void> {
   if (command === 'config' && subcommand === 'validate') { print({ valid: true, revision: loaded.revision, runtime_problems: runtimeProblems(loaded.config, env) }); return; }
   if (command === 'config' && subcommand === 'show') { print({ revision: loaded.revision, config: redactedConfig(loaded.config) }); return; }
   if (command === 'config' && subcommand === 'schema') { print(toJsonSchema(ConfigSchema)); return; }
-  if (command === 'doctor') { print({ profile: loaded.config.profile, config_valid: true, runtime_problems: runtimeProblems(loaded.config, env), checked_at: new Date().toISOString() }); return; }
+  if (command === 'doctor') {
+    print({ profile: loaded.config.profile, config_valid: true, runtime_problems: runtimeProblems(loaded.config, env),
+      last_job_tick_error: await profileJobTickError(dir), checked_at: new Date().toISOString() });
+    return;
+  }
   if (command === 'a2a' && subcommand === 'team-card') {
     if (!loaded.config.a2a.hermes_compat) throw new Error('Hermes team card requires a2a.hermes_compat: true');
     const lock = await createLockFile(join(dir, 'state', 'gateway.lock'));
@@ -380,6 +412,7 @@ async function main(): Promise<void> {
       }
       const lockPath = join(dir, 'state', 'gateway.lock');
       const lock = await acquireGatewayLock(lockPath);
+      const logger = ardentLogger().child({ profile: loaded.config.profile });
       let runtime: ArdentRuntime | undefined;
       let shutdownUnsettled = false;
       try {
@@ -413,7 +446,7 @@ async function main(): Promise<void> {
         // The API reloads rotated credentials from the same file the gateway started from.
         const envFile = value(parsed.options, 'env-file');
         const artifactTransfers = new ArtifactTransfers(runtime, env);
-        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers });
+        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger });
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
         // Imports a previous process left unfinished resume from their retained bytes.
@@ -433,7 +466,11 @@ async function main(): Promise<void> {
           if (jobEngine) {
             const tickJobs = () => {
               const operation = jobEngine.tick(new Date(), deliveryAbort.signal, channelAbort.signal)
-                .catch(error => runtime?.store.setCursor('jobs:last_error', error instanceof Error ? error.message.slice(0, 500) : 'unknown'));
+                .catch((error: unknown) => {
+                  // Reported by /api/v1/status, /api/v1/jobs/definitions/status and `ardent doctor`.
+                  runtime?.store.setCursor(JOB_TICK_ERROR_CURSOR, error instanceof Error ? error.message.slice(0, 500) : 'unknown');
+                  logger.error('Job engine tick failed', { err: error });
+                });
               noticeRuns.add(operation);
               void operation.finally(() => noticeRuns.delete(operation));
             };
@@ -513,7 +550,7 @@ async function main(): Promise<void> {
         if (!shutdownUnsettled) await lock.release();
       }
       if (shutdownUnsettled) {
-        stderr.write('Gateway shutdown left unresolved work; interrupted tasks will be marked unknown on restart.\n');
+        stderr.write('Gateway shutdown left unresolved work; on restart execution recovery resumes or holds interrupted tasks (they are marked unknown when execution.recovery.enabled is false).\n');
         process.exit(1);
       }
       return;

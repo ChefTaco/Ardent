@@ -76,6 +76,11 @@ messages:
   or an operator decision. Do not "fix" an uncertain effect by retrying it.
 - Task, event, delivery, and job-window journals in SQLite are the source of
   truth. Keep schema changes additive and migrate existing rows in place.
+  Classify every new table, and every new state value of a state table, in
+  `JOURNAL_TABLES` (`src/journal.ts`) in the same change: backup and upgrade
+  tools such as Magnus's node agent use it (`@hivemagnus/ardent/journal`,
+  `ardent journal status`) to decide whether a stopped profile is idle, and
+  `test/journal.test.ts` fails on an unclassified table.
 - Channel replies and A2A push deliveries are recorded before they are sent so
   a restart cannot send twice.
 - Context checkpoints are historical, unverified data. Never use a summary to

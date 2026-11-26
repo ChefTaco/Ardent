@@ -5607,7 +5607,17 @@
                     "tasks": {
                       "type": "integer",
                       "minimum": -9007199254740991,
-                      "maximum": 9007199254740991
+                      "maximum": 9007199254740991,
+                      "description": "Number of tasks in the journal"
+                    },
+                    "task_states": {
+                      "description": "Number of tasks in each state",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      }
                     },
                     "channels": {
                       "type": "object",
@@ -5778,6 +5788,33 @@
                         "unsupported"
                       ],
                       "description": "Tasks in each open execution recovery status"
+                    },
+                    "jobs": {
+                      "type": "object",
+                      "properties": {
+                        "last_tick_error": {
+                          "nullable": true,
+                          "description": "Last scheduler tick failure the gateway recorded, or null",
+                          "type": "object",
+                          "properties": {
+                            "message": {
+                              "type": "string"
+                            },
+                            "at": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                            }
+                          },
+                          "required": [
+                            "message",
+                            "at"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "last_tick_error"
+                      ]
                     }
                   },
                   "required": [

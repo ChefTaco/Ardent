@@ -3,6 +3,7 @@ import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
+import { ardentLogger, type Logger } from './log.js';
 import { ConfigSchema, type LoadedConfig } from './config.js';
 import { isConfigNotice, runtimeProblems, saveConfig, loadConfig, resolveReference, parseConfig } from './config.js';
 import type { ArdentRuntime } from './runtime.js';
@@ -159,7 +160,9 @@ export function ardentOpenApi(): object {
         get: { operationId: 'listArtifactImports', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': jsonResponse('Recent imports, newest first', z.object({ imports: z.array(ArtifactImportSchema) })) } }
       },
       '/api/v1/artifacts/imports/{id}': { get: { operationId: 'getArtifactImport', description: 'Import progress. error.code is TRANSFER_REQUIRES_V2 (peer lacks urn:hive:artifact-transfer:2 and the artifact is over 2 MiB), DIGEST_MISMATCH (bytes discarded; reissue to retry), TRANSFER_TOO_LARGE, TRANSFER_SOURCE_GONE, TRANSFER_INTERRUPTED (retries exhausted; reissue resumes) or another stable code.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{32}$' } }], responses: { '200': jsonResponse('Import state', ArtifactImportSchema), '404': { description: 'Import absent' } } } },
-      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int(), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }), capabilities: z.object({ artifact_transfer: z.literal(2) }), recovery: RecoveryCounts.optional() })) } } },
+      '/api/v1/status': { get: { operationId: 'getOperationalStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Active profile summary; capabilities.artifact_transfer is the highest artifact transfer version served', z.object({ version: z.string(), profile: z.string(), backend: z.enum(['llamacpp', 'codex']), tasks: z.number().int().describe('Number of tasks in the journal'),
+        task_states: z.record(z.string(), z.number().int()).optional().describe('Number of tasks in each state'), channels: z.object({ mattermost: z.object({ catchup: z.array(CatchupStatusSchema).describe('Latest missed-post catch-up walk per Mattermost channel') }) }), capabilities: z.object({ artifact_transfer: z.literal(2) }), recovery: RecoveryCounts.optional(),
+        jobs: z.object({ last_tick_error: z.object({ message: z.string(), at: z.string().datetime() }).nullable().describe('Last scheduler tick failure the gateway recorded, or null') }).optional() })) } } },
       '/api/v1/jobs/definitions/status': { get: { operationId: 'getJobDefinitionsStatus', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Active profile job definition revision, digest, and redacted window status' }, '503': { description: 'Job engine unavailable' } } } },
       '/api/v1/profile': { get: { operationId: 'getProfile', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Profile identity and path', z.object({ profile: z.string(), name: z.string(), product: z.string(), timezone: z.string(), path: z.string() })) } } },
       '/api/v1/config': { get: { operationId: 'getConfig', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('Raw YAML and revision; secrets remain references', z.object({ revision: z.string(), text: z.string() })) } }, put: { operationId: 'saveConfig', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(ConfigEdit) } } }, responses: { '200': jsonResponse('Saved; activation required', z.object({ revision: z.string(), activation_required: z.boolean() })), '409': { description: 'Revision conflict' } } } },
@@ -192,8 +195,9 @@ export function ardentOpenApi(): object {
  * environment file the gateway started from, if any (default `<profile>/.env`).
  */
 export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, env: NodeJS.ProcessEnv = process.env,
-  jobEngine?: JobEngine, options: { envFile?: string; artifactTransfers?: ArtifactTransfers } = {}): Hono {
+  jobEngine?: JobEngine, options: { envFile?: string; artifactTransfers?: ArtifactTransfers; logger?: Logger } = {}): Hono {
   const app = new Hono();
+  const logger = options.logger ?? ardentLogger();
   const transfers = options.artifactTransfers ?? new ArtifactTransfers(runtime, env);
   let current = loaded;
   // A saved configuration requires activation; it must not rotate the live
@@ -226,6 +230,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
       : /unavailable|stale|unconfigured|missing|login required|wrong auth mode|CODEX_LOGIN_REQUIRED|CODEX_WRONG_AUTH_MODE|fetch failed|ECONNREFUSED|ETIMEDOUT|timeout/i.test(message) ? 503
       : error instanceof z.ZodError || error instanceof SyntaxError || /invalid|must be|exceeds|requires/i.test(message) ? 400 : 500;
     const code = status === 409 ? 'CONFLICT' : status === 404 ? 'NOT_FOUND' : status === 503 ? 'DEPENDENCY_UNAVAILABLE' : status === 400 ? 'INVALID_REQUEST' : 'INTERNAL_ERROR';
+    // The caller sees only a generic message; record what failed so the operator can find it.
+    if (status === 500) logger.error('Unhandled management API error', { method: c.req.method, path: c.req.path, err: error });
     return c.json({ error: { code, message: status === 500 ? 'Internal request error' : message.slice(0, 500) } }, status);
   });
   app.get('/health/live', c => c.json({ status: 'live' }));
@@ -255,14 +261,15 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     if (!expected || !authEqual(supplied, expected)) return c.json({ error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } }, 401);
     return next();
   });
-  app.get('/api/v1/status', c => c.json({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend, tasks: runtime.store.list(10).length,
-    channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } },
-    capabilities: { artifact_transfer: 2 }, recovery: runtime.store.executionState.counts() }));
+  app.get('/api/v1/status', c => { const tasks = runtime.store.taskCounts(); return c.json({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend,
+    tasks: tasks.total, task_states: tasks.by_state,
+    channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } }, jobs: { last_tick_error: runtime.store.jobTickError() },
+    capabilities: { artifact_transfer: 2 }, recovery: runtime.store.executionState.counts() }); });
   app.get('/api/v1/jobs/definitions/status', async c => {
     if (!jobEngine) throw new Error('Job engine is unavailable');
     const status = await jobEngine.status();
     return c.json({ profile: runtime.config.profile, revision: status.active_revision,
-      sha256: status.active_sha256, ...status });
+      sha256: status.active_sha256, ...status, last_tick_error: runtime.store.jobTickError() });
   });
   app.get('/api/v1/profile', c => c.json({ profile: runtime.config.profile, name: runtime.config.name, product: runtime.config.product, timezone: runtime.config.timezone, path: runtime.profileDir }));
   app.get('/api/v1/config', c => c.json({ revision: current.revision, text: current.text }));
@@ -314,7 +321,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
       try {
         await server.initialize();
         const auth = await server.accountStatus();
-        if (auth !== 'chatgpt') throw new Error(auth === 'login-required' ? 'Codex ChatGPT login required' : 'Codex account uses the wrong auth mode');
+        // Match readiness: the account must use the configured auth mode (ChatGPT sign-in or API key).
+        if (auth !== runtime.config.providers.codex.auth_mode) throw new Error(auth === 'login-required' ? 'Codex login required' : 'Codex account uses the wrong auth mode');
         return c.json({ backend: 'codex', auth_mode: auth });
       }
       finally { server.close(); }

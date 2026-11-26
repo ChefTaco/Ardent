@@ -75,9 +75,10 @@ try {
   const files = listing[0].files.map(file => file.path);
   const allowed = [/^dist\/[A-Za-z0-9._-]+\.(?:js|d\.ts)$/, /^profiles\/assistant\//, /^protocol\//,
     /^model-policy\.default\.json$/, /^README\.md$/, /^LICENSE$/, /^package\.json$/];
-  const unexpected = files.filter(path => !allowed.some(pattern => pattern.test(path)));
+  // Test files import devDependencies such as vitest; they never ship.
+  const unexpected = files.filter(path => !allowed.some(pattern => pattern.test(path)) || /\.test\.(?:js|d\.ts)$/.test(path));
   if (unexpected.length) throw new Error(`Unexpected packed files: ${unexpected.join(', ')}`);
-  for (const required of ['dist/cli.js', 'dist/index.js', 'dist/index.d.ts', 'dist/plugins.js', 'dist/plugin-sdk.js', 'dist/plugin-sdk.d.ts', 'profiles/assistant/config.yaml',
+  for (const required of ['dist/cli.js', 'dist/index.js', 'dist/index.d.ts', 'dist/plugins.js', 'dist/plugin-sdk.js', 'dist/plugin-sdk.d.ts', 'dist/journal.js', 'dist/journal.d.ts', 'profiles/assistant/config.yaml',
     'protocol/LICENSE-A2A.txt', 'model-policy.default.json', 'README.md', 'LICENSE'])
     if (!files.includes(required)) throw new Error(`Packed file missing: ${required}`);
   const filename = (await run('npm', ['pack', '--pack-destination', temporary, '--silent'])).trim().split('\n').at(-1);
@@ -92,6 +93,7 @@ try {
   if (packageJson.name !== sourcePackage.name || packageJson.version !== sourcePackage.version)
     throw new Error('Installed package identity differs');
   await run(process.execPath, ['--input-type=module', '-e', "const sdk=await import('@hivemagnus/ardent/plugin-sdk');const db=new sdk.SqliteDatabase(':memory:');try{if(db.prepare('SELECT sqlite_version() AS version').get().version!=='3.54.1'||typeof sdk.loadPlugins!=='function')throw Error('Plugin SDK is unavailable')}finally{db.close()}"], { cwd: install });
+  await run(process.execPath, ['--input-type=module', '-e', "const journal=await import('@hivemagnus/ardent/journal');if(journal.JOURNAL_POLICY_VERSION!==1||typeof journal.inspectJournal!=='function'||!journal.journalPolicy().tables.tasks)throw Error('Journal inspector is unavailable')"], { cwd: install });
   await run(process.execPath, ['-e', "const {DatabaseSync}=require(process.argv[1]);const db=new DatabaseSync(':memory:');if(db.prepare('select sqlite_version() v').get().v!=='3.54.1')throw Error('Unexpected embedded SQLite');db.close()", join(install, 'node_modules/@photostructure/sqlite')]);
   const env = { ...process.env, ARDENT_HOME: join(temporary, 'home') };
   const cli = join(packageDir, 'dist/cli.js');

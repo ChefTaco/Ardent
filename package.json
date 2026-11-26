@@ -33,6 +33,10 @@
       "types": "./dist/plugin-sdk.d.ts",
       "default": "./dist/plugin-sdk.js"
     },
+    "./journal": {
+      "types": "./dist/journal.d.ts",
+      "default": "./dist/journal.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -86,7 +90,7 @@
     "@hivemagnus/canvas-word-codec": "1.1.0",
     "@hivemagnus/emberfold": "0.1.0",
     "@hivemagnus/hive-common": "0.6.0",
-    "@hono/node-server": "^2.1.6",
+    "@hono/node-server": "^2.1.11",
     "@photostructure/sqlite": "3.3.1",
     "dotenv": "^18.0.9",
     "express": "5.3.0",
@@ -94,7 +98,7 @@
     "marked": "18.1.1",
     "parse5": "8.1.1",
     "pdfmake": "0.3.13",
-    "ws": "^8.22.0",
+    "ws": "^8.23.0",
     "yaml": "2.9.1",
     "zod": "^4.6.7"
   },

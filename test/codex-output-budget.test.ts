@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CodexOutputBudget, CODEX_PRODUCTION_OUTPUT_MAX_BYTES } from './codex-output-budget.js';
+import { CodexOutputBudget, CODEX_PRODUCTION_OUTPUT_MAX_BYTES } from '../src/codex-output-budget.js';
 
 describe('Codex aggregate agent output byte bound', () => {
   it('counts Unicode bytes, including surrogate pairs split across deltas, without double counting completion', () => {
