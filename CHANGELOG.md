@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.3.0 - 2026-11-26
+
+### Upgrade notes
+
+- No configuration or schema change is needed. Backup and upgrade tools that keep their own list of Ardent journal tables can switch to `@hivemagnus/ardent/journal` (`inspectJournalFile`) or `ardent journal status --json` to decide whether a stopped profile is idle; Magnus adopts it in its next release.
+
 ### Added
 
 - **Journal quiescence is owned by Ardent.** `@hivemagnus/ardent/journal` exports `JOURNAL_TABLES` / `journalPolicy()`, a versioned (`JOURNAL_POLICY_VERSION` 1), JSON-serializable classification of every SQLite table and its idle rule, and `inspectJournal(path)` / `inspectJournalFile(path)`, which return `{ idle, active, unknown, unsupported, tables }` for a profile journal without loading a runtime, store or plugin. `ardent journal status [--db FILE] [--json]` prints the same result read-only (it inspects a digest-verified private copy of the database and its WAL, and needs no valid configuration); `ardent journal policy` prints the classification. Backup and upgrade tools such as Magnus's node agent can use it instead of their own table list. A test fails when a `CREATE TABLE` in `src/` has no classification. See "Journal quiescence" in the README.
