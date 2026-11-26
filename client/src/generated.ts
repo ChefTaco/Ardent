@@ -889,6 +889,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Profile metrics in the OpenMetrics text format: tasks by state, open recovery statuses, job windows, channel and A2A push deliveries by state, A2A rate-limit refusals since the process started (ardent_a2a_rate_limited_total by scope ip, peer or tasks) and Mattermost catch-up boundary and walk ages and gaps per channel. Gauges are read from the journal when scraped. */
+        get: operations["getMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/credentials/management/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Re-read the management token named by api.token_env from the profile environment file the gateway started from and require it for every later request, without a restart. The replaced token is still accepted for overlap_seconds (default 300, at most 3600; 0 ends it now), so a caller can switch over. Authenticate this request with the token in use. The token is never returned. */
+        post: operations["reloadManagementCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/credentials/peers/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Re-read the inbound and outbound tokens of every configured A2A peer from the profile environment file and use them without a restart (the peer list itself still needs a restart). A replaced inbound token is still accepted for overlap_seconds (default 300, at most 3600). The new set is validated as at startup; when it is not valid nothing changes. Tokens are never returned. */
+        post: operations["reloadPeerCredentials"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/memory/credential/reload": {
         parameters: {
             query?: never;
@@ -4040,6 +4091,156 @@ export interface operations {
                         reason: string | null;
                     };
                 };
+            };
+        };
+    };
+    getMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OpenMetrics text, ending with # EOF */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/openmetrics-text": string;
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reloadManagementCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    overlap_seconds?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Credential reloaded; changed is false when the file holds the token already in use */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        reloaded: true;
+                        token_env: string;
+                        changed: boolean;
+                        /**
+                         * Format: date-time
+                         * @description Until when the replaced token is still accepted, or null
+                         */
+                        previous_valid_until: string | null;
+                    };
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Token missing, too short or malformed, or the environment file is unreadable; the token in use stays */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reloadPeerCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    overlap_seconds?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Peer credentials reloaded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        reloaded: true;
+                        /** @description Enabled peers */
+                        peers: number;
+                        /** @description Peers whose inbound token changed */
+                        changed: string[];
+                        /**
+                         * Format: date-time
+                         * @description Until when the replaced inbound tokens are still accepted, or null
+                         */
+                        previous_valid_until: string | null;
+                    };
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The A2A surface is not running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A peer credential is missing, too short, reused or not directional, or the environment file is unreadable; the credentials in use stay */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -126,7 +126,7 @@ describe('A2A surface limits', () => {
   });
 
   it('limits every route by client address before authentication and answers Retry-After', async () => {
-    const { base } = await surface({ ip_requests_per_minute: 1, ip_burst: 2 });
+    const { base, runtime } = await surface({ ip_requests_per_minute: 1, ip_burst: 2 });
     expect((await fetch(`${base}/.well-known/agent-card.json`)).status).toBe(200);
     expect((await fetch(`${base}/a2a/jsonrpc`, { method: 'POST' })).status).toBe(401);
     for (const [url, init] of [[`${base}/team/artifacts/x`, {}], [`${base}/team/artifacts/x/manifest`, {}], [`${base}/team/artifacts/x/renditions`, {}],
@@ -136,6 +136,8 @@ describe('A2A surface limits', () => {
       expect(response.status, url).toBe(429);
       expect(Number(response.headers.get('retry-after')), url).toBeGreaterThanOrEqual(1);
     }
+    // Every refusal is counted for GET /api/v1/metrics.
+    expect(runtime.counters.value('a2a_rate_limited', { scope: 'ip' })).toBe(8);
   });
 
   it('ignores X-Forwarded-For unless the connecting address is a configured proxy', async () => {
@@ -173,7 +175,7 @@ describe('A2A surface limits', () => {
   });
 
   it('limits each authenticated peer separately on every authenticated route', async () => {
-    const { base } = await surface({ ...generous, peer_requests_per_minute: 1, peer_burst: 1 });
+    const { base, runtime } = await surface({ ...generous, peer_requests_per_minute: 1, peer_burst: 1 });
     expect((await fetch(`${base}/.well-known/hermes-team-card.json`, { headers: auth() })).status).toBe(200);
     for (const [url, init] of [[`${base}/team/artifacts/x?context=y`, { headers: auth() }], [`${base}/team/artifacts/x/manifest?context=y`, { headers: auth() }],
       [`${base}/team/artifacts/x/renditions?context=y`, { headers: auth() }], [`${base}/a2a/rest/tasks`, { headers: auth() }],
@@ -183,6 +185,7 @@ describe('A2A surface limits', () => {
       expect(response.status, url).toBe(429);
       expect(response.headers.get('retry-after'), url).toBeTruthy();
     }
+    expect(runtime.counters.value('a2a_rate_limited', { scope: 'peer' })).toBe(6);
     expect((await fetch(`${base}/.well-known/hermes-team-card.json`, { headers: auth(OTHER) })).status).toBe(200);
     // A failed login spends no peer's tokens.
     expect((await fetch(`${base}/.well-known/hermes-team-card.json`, { headers: auth('wrong-token') })).status).toBe(401);

@@ -36,6 +36,7 @@ import { compactToolArguments } from './tool-arguments.js';
 import { buildTaskExecution, executionInstance, taskRef, TaskPropagation, type ExecutionAcceptance, type ExecutionContext } from './execution.js';
 import { ErrorCode, HiveError, invalidRequest, notAcceptingWork, notFound } from './errors.js';
 import { silentLogger, type Logger } from './log.js';
+import { RuntimeCounters } from './metrics.js';
 
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
@@ -122,6 +123,10 @@ export class ArdentRuntime {
    * `ardentLogger({ requestContext: false })`.
    */
   logger: Logger = silentLogger;
+  /** In-process counters for GET /api/v1/metrics (A2A rate-limit refusals). */
+  readonly counters = new RuntimeCounters();
+  /** When this runtime was created. */
+  readonly startedMs = Date.now();
   #pluginEnvironment: NodeJS.ProcessEnv = {};
   #closing = false;
   #closed = false;

@@ -18,6 +18,8 @@
 - `@hivemagnus/ardent-client/openapi` exports the generated OpenAPI `paths`/`operations`/`components` types and `ARDENT_ROUTES`, a route manifest marking each management operation as `read` or `action` (with `auth` and `stream`), plus `matchArdentRoute(method, path)`. `npm run openapi:write` generates it and `openapi:check` fails on drift.
 - `GET /api/v1/tasks` pages through every task: it returns `next`, a cursor to pass as `after`, and filters by `state` (comma-separated), `context`, `caller`, `since` and `until` (epoch milliseconds or ISO 8601). Without the new parameters it answers as before, plus `next`. `TaskStore.page()` backs it (new index `tasks_created_id`).
 - `TaskStore.onAppend(taskId, listener)` notifies after each journal event the store appends.
+- `GET /api/v1/metrics` (management token): OpenMetrics text with tasks by state, open recovery statuses, job windows, channel and A2A push deliveries by state, A2A rate-limit refusals (`ardent_a2a_rate_limited_total{scope}`) and Mattermost catch-up boundary and walk ages and gaps per channel. `ArdentRuntime.counters` holds the in-process counters.
+- Credential rotation without a restart: `POST /api/v1/credentials/management/reload` and `POST /api/v1/credentials/peers/reload` re-read the management token and the A2A peer tokens from the profile environment file; a replaced inbound token stays valid for `overlap_seconds` (default 300). `loadPeers()` also returns a reloadable `PeerAuthenticator`, and `A2ASurface.peerAuthenticator` is it.
 
 ### Changed
 

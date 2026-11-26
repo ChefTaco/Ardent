@@ -73,10 +73,12 @@ export async function listPeers(profileDir: string, config: ArdentConfig): Promi
   return parsePeersConfig(await readFile(join(profileDir, config.a2a.peers_file), 'utf8'));
 }
 
-export async function loadPeers(profileDir: string, config: ArdentConfig, env: NodeJS.ProcessEnv = process.env): Promise<{ peers: PeerConfig[]; authenticate: (authorization: string | undefined) => string | undefined }> {
-  const peers = await listPeers(profileDir, config);
+type PeerCredential = { id: string; token: Buffer };
+
+/** Validate every enabled peer's credentials in `env` and return their inbound tokens. */
+function peerCredentials(peers: readonly PeerConfig[], env: NodeJS.ProcessEnv): PeerCredential[] {
   const seen = new Set<string>();
-  const credentials: Array<{ id: string; token: Buffer }> = [];
+  const credentials: PeerCredential[] = [];
   for (const peer of peers) {
     if (seen.has(peer.id)) throw new Error(`Duplicate A2A peer id: ${peer.id}`);
     seen.add(peer.id);
@@ -92,12 +94,50 @@ export async function loadPeers(profileDir: string, config: ArdentConfig, env: N
       throw new Error(`A2A inbound credential is assigned to multiple peers: ${peer.id}`);
     credentials.push({ id: peer.id, token: Buffer.from(inbound) });
   }
-  return { peers, authenticate: authorization => {
-    // `Bearer <token>` with a case-insensitive scheme, as RFC 9110 allows; anything else is refused.
+  return credentials;
+}
+
+/**
+ * Inbound peer authentication whose credentials can be replaced while the
+ * gateway runs. After a reload a peer's previous inbound token is still
+ * accepted until its overlap window ends, so a peer can switch at its own pace.
+ */
+export class PeerAuthenticator {
+  #current: PeerCredential[];
+  #previous: Array<PeerCredential & { until: number }> = [];
+  constructor(readonly peers: readonly PeerConfig[], credentials: PeerCredential[], readonly now: () => number = () => Date.now()) { this.#current = credentials; }
+
+  /** The peer whose `Bearer` token this is (scheme case-insensitive), or undefined. */
+  authenticate(authorization: string | undefined): string | undefined {
     const bearer = readBearerToken(authorization);
     if (!bearer) return undefined;
     const candidate = Buffer.from(bearer);
-    for (const entry of credentials) if (entry.token.length === candidate.length && timingSafeEqual(entry.token, candidate)) return entry.id;
-    return undefined;
-  } };
+    const match = (entry: PeerCredential) => entry.token.length === candidate.length && timingSafeEqual(entry.token, candidate);
+    const current = this.#current.find(match);
+    if (current) return current.id;
+    const now = this.now();
+    this.#previous = this.#previous.filter(entry => entry.until > now);
+    return this.#previous.find(match)?.id;
+  }
+
+  /**
+   * Replace the credentials with those `env` holds for the same peers. Throws,
+   * changing nothing, when they are not valid. Returns the peers whose inbound
+   * token changed; their previous token stays valid for `overlapMs`.
+   */
+  reload(env: NodeJS.ProcessEnv, overlapMs: number): { changed: string[] } {
+    const next = peerCredentials(this.peers, env);
+    const now = this.now();
+    const changed = next.filter(entry => { const prior = this.#current.find(item => item.id === entry.id); return !prior || !prior.token.equals(entry.token); }).map(entry => entry.id);
+    const retired = this.#current.filter(entry => !next.some(item => item.id === entry.id && item.token.equals(entry.token)));
+    this.#previous = [...this.#previous.filter(entry => entry.until > now), ...(overlapMs > 0 ? retired.map(entry => ({ ...entry, until: now + overlapMs })) : [])];
+    this.#current = next;
+    return { changed };
+  }
+}
+
+export async function loadPeers(profileDir: string, config: ArdentConfig, env: NodeJS.ProcessEnv = process.env): Promise<{ peers: PeerConfig[]; authenticate: (authorization: string | undefined) => string | undefined; authenticator: PeerAuthenticator }> {
+  const peers = await listPeers(profileDir, config);
+  const authenticator = new PeerAuthenticator(peers, peerCredentials(peers, env));
+  return { peers, authenticate: authorization => authenticator.authenticate(authorization), authenticator };
 }

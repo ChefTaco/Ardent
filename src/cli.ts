@@ -448,14 +448,15 @@ async function main(): Promise<void> {
         // The API reloads rotated credentials from the same file the gateway started from.
         const envFile = value(parsed.options, 'env-file');
         const artifactTransfers = new ArtifactTransfers(runtime, env);
-        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger });
+        let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
+        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger,
+          peerAuthenticator: () => a2aSurface?.peerAuthenticator });
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
         // Imports a previous process left unfinished resume from their retained bytes.
         artifactTransfers.resumePending();
         let a2aHttp: HttpServer | undefined;
         let a2aGrpc: Awaited<ReturnType<typeof createA2ASurface>>['grpcServer'] | undefined;
-        let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
         // Shutdown first stops intake (polling, listening, new job windows and
         // outbox claims), then drains, and only then aborts in-flight delivery.
         const channelAbort = new AbortController();
