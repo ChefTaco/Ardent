@@ -143,6 +143,9 @@ matchArdentRoute('GET', '/api/v1/tasks/1b9d…/events'); // { operationId: 'getT
 returns the task. Ardent closes a stream after 60 seconds, and networks drop
 connections; the client reconnects with the last event sequence (`after` and
 `Last-Event-ID`), so every journaled event reaches `onEvent` once and in order.
+From Ardent 3.5.1 that includes the task's last events: `task.done` comes after
+the final `state` event and after events a run records once it has finished (a
+direct research task's `method_reflection` and `memory_stored`).
 Live reply text (`onText`) is not journaled: after a reconnect a `text`
 snapshot of the current step replaces what the `delta`s built up. To resume a
 follow later, pass the last `event.sequence` you handled as `after`.
