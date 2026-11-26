@@ -14,6 +14,7 @@
 
 - CI: the Magnus downstream contract job builds Magnus's agent package before its native-snapshot tests, which now import the agent's built journal module.
 - `codex-protocol.lock.json` records the live thread recovery probe against Codex CLI 0.172.0 (`thread_recovery_probe`, passed 2026-11-26).
+- Dependabot now opens one grouped weekly pull request (group `hivemagnus`) for `@hivemagnus/*` package updates, so suite package bumps arrive together. Repository configuration only; nothing to do when upgrading.
 
 ## 3.4.0 - 2026-11-26
 
