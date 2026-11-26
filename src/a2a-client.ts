@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { parseExecutionContext } from '@hivemagnus/hive-common/execution';
 import { EXECUTION_METADATA_KEY, type ExecutionContext } from './execution.js';
 import { isTransportError, lastAttemptError, responseFailure, retryWithPolicy, type AttemptFailure, type RetryWithPolicyOptions } from './retry.js';
+import { dependencyUnavailable, notFound } from './errors.js';
 
 /**
  * What the last HTTP exchange of one A2A call looked like. The SDK reports failures as plain
@@ -68,9 +69,9 @@ export class ArdentA2AClient {
   async open(peerId: string, signal?: AbortSignal): Promise<{ card: AgentCard; client: Client; authorization: string; observation: WireObservation }> {
     const { peers } = await loadPeers(this.profileDir, this.config, this.env);
     const peer = peers.find(item => item.id === peerId && item.enabled);
-    if (!peer) throw new Error(`A2A peer is not configured: ${peerId}`);
+    if (!peer) throw notFound(`A2A peer is not configured: ${peerId}`);
     const token = this.env[outboundTokenEnv(peer)];
-    if (!token) throw new Error(`A2A outbound credential is missing: ${outboundTokenEnv(peer)}`);
+    if (!token) throw dependencyUnavailable(`A2A outbound credential is missing: ${outboundTokenEnv(peer)}`);
     const base = new URL(peer.url);
     const basePort = Number(base.port || (base.protocol === 'https:' ? 443 : 80));
     const allowedPorts = new Set([basePort, ...peer.transport_ports]);

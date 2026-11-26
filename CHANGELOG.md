@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Upgrade notes
+
+- The management API accepts only `Authorization: Bearer <token>`; a bare token without the scheme is now refused with 401 (the scheme is case-insensitive). A2A peer authentication parses the header the same way. Magnus, HiveXUI, ArdentStudio and `@hivemagnus/ardent-client` already send the scheme.
+- Management request bodies are limited to 1 MiB (`413 BODY_TOO_LARGE`), as plugin `httpRoutes` already were; plugin `routes` under `/api/v1/plugins/<name>/` now have the same limit.
+- An error's HTTP status now comes from its type, not its message. Some answers change: an internal error whose message happened to contain words such as "missing", "invalid" or "timeout" is a `500 INTERNAL_ERROR` (it was 400 or 503); a peer that is not configured is `404` (it was 500); a fenced or draining profile is `503 NOT_ACCEPTING_WORK` (it was 500); a validation message without those words, a session opened for another context and a duplicate peer ID are `400` (they were 500); a HiveMem URL that is not valid is `503` (it was 400). Plugin route errors without a type keep the old classification.
+- `GET /api/v1/providers` reports `codex.auth_mode: not_selected` for a llama.cpp profile instead of starting a Codex App Server on every call; pass `?probe=codex` for the previous answer.
+
+### Changed
+
+- Typed management API errors (`src/errors.ts`, HiveCommon `HiveError`): every core route maps statuses explicitly; dependency probes (providers, channels, peers, HiveMem search) answer `503 DEPENDENCY_UNAVAILABLE` with the probe's message. `@hivemagnus/ardent/plugin-sdk` exports `HiveError`, `ErrorCode`, `invalidRequest`, `notFound`, `conflict`, `dependencyUnavailable` and `notAcceptingWork` for plugin routes; `RecoveryConflictError` is a `HiveError` (409).
+- `/health/live` and `/health/ready` use `@hivemagnus/hive-common/health`: their bodies add `service`, `version`, `time` and (readiness) `checks`, the shape of the other suite services. Readiness keeps `problems` and its `degraded` status on 503.
+- Readiness and `GET /api/v1/providers` share one Codex account probe, cached for 30 seconds.
+
 ## 3.3.0 - 2026-11-26
 
 ### Upgrade notes

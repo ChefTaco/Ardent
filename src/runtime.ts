@@ -34,6 +34,7 @@ import { acceptPreview, previewOverrides, PREVIEW_ARTIFACT_TTL_SECONDS, type Pre
 import { acceptMission, contextItemMessages, missionEnvelope, missionRecord, missionTeamResult, type MissionSubmit } from './missions.js';
 import { compactToolArguments } from './tool-arguments.js';
 import { buildTaskExecution, executionInstance, taskRef, TaskPropagation, type ExecutionAcceptance, type ExecutionContext } from './execution.js';
+import { ErrorCode, HiveError, invalidRequest, notAcceptingWork, notFound } from './errors.js';
 
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
@@ -46,7 +47,11 @@ const SHUTDOWN_DEADLINE = 'gateway shutdown deadline';
 /** A resuming task was held as `unknown`; its recovery status says why. */
 export class RecoveryHeldError extends Error {}
 /** A recovery decision that is not valid now (HTTP 409). */
-export class RecoveryConflictError extends Error {}
+/** No recovery decision, or not this one, is valid now (HTTP 409 CONFLICT). */
+export class RecoveryConflictError extends HiveError {
+  override readonly name: string = 'RecoveryConflictError';
+  constructor(message: string) { super(ErrorCode.conflict, message, { status: 409 }); }
+}
 
 function addSources(value: unknown, evidence: Evidence, extracted = false, retrievedAt?: string): void {
   if (!Array.isArray(value)) return;
@@ -213,7 +218,7 @@ export class ArdentRuntime {
    */
   accept(prompt: string, caller = 'local', context: TaskContext = 'direct', idempotencyKey?: string, sessionId?: string, originalDeadlineMs?: number, backendOverride?: 'llamacpp' | 'codex',
     execution: ExecutionAcceptance = {}): Task {
-    if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
+    if (this.#draining) throw notAcceptingWork('Gateway is draining and cannot accept new work');
     const deadlineMs = Math.min(Date.now() + this.config.execution.deadline_seconds * 1000, originalDeadlineMs ?? Number.POSITIVE_INFINITY);
     return this.store.accept({ caller, context, prompt, ...(idempotencyKey ? { idempotencyKey } : {}), ...(sessionId ? { sessionId } : {}), backend: backendOverride ?? this.config.execution.backend, deadlineMs,
       execution: this.#execution(execution) });
@@ -228,7 +233,7 @@ export class ArdentRuntime {
    * `execution` defaults to the submission's own `execution` field.
    */
   acceptMission(input: MissionSubmit, caller = 'management', execution: ExecutionAcceptance = { context: input.execution }): Task {
-    if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
+    if (this.#draining) throw notAcceptingWork('Gateway is draining and cannot accept new work');
     return acceptMission(request => this.store.accept({ caller, context: 'mission', prompt: request.prompt, idempotencyKey: request.idempotencyKey,
       ...(request.sessionId ? { sessionId: request.sessionId } : {}), backend: this.config.execution.backend,
       deadlineMs: Math.min(Date.now() + this.config.execution.deadline_seconds * 1000, request.deadlineMs),
@@ -240,7 +245,7 @@ export class ArdentRuntime {
    * profile, has only read tools, and its artifacts expire after 24 hours.
    */
   acceptPreview(input: PreviewSubmit, caller = 'management', execution: ExecutionAcceptance = { context: input.execution }): Task {
-    if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
+    if (this.#draining) throw notAcceptingWork('Gateway is draining and cannot accept new work');
     void this.artifactManifests.sweepExpired().catch(() => { /* A later sweep retries. */ });
     return acceptPreview(request => this.store.accept({ caller, context: 'preview', prompt: request.prompt,
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}), ...(request.sessionId ? { sessionId: request.sessionId } : {}),
@@ -275,7 +280,7 @@ export class ArdentRuntime {
    */
   async decideRecovery(taskId: string, input: RecoveryDecisionInput, env: NodeJS.ProcessEnv = this.#pluginEnvironment, by = 'operator'): Promise<{ recovery: RecoveryView; continuation?: Task }> {
     const task = this.store.get(taskId);
-    if (!task) throw new Error('Task not found');
+    if (!task) throw notFound('Task not found');
     const states = this.store.executionState;
     const row = states.recovery(taskId);
     if (!row) throw new RecoveryConflictError('Task has no recovery to decide');
@@ -289,17 +294,17 @@ export class ArdentRuntime {
     if (row.status !== 'awaiting_decision') throw new RecoveryConflictError(`Recovery is ${row.status}; no decision is valid`);
     const actions = validActions(this.store, task, row);
     if (!actions.includes(input.action)) throw new RecoveryConflictError(`${input.action} is not valid now; valid actions: ${actions.join(', ') || 'none'}`);
-    if (input.result !== undefined && input.action !== 'mark_applied') throw new Error('Invalid request: result is valid only with mark_applied');
-    if (input.deadline_seconds !== undefined && input.action !== 'retry_with_new_deadline') throw new Error('Invalid request: deadline_seconds is valid only with retry_with_new_deadline');
+    if (input.result !== undefined && input.action !== 'mark_applied') throw invalidRequest('Invalid request: result is valid only with mark_applied');
+    if (input.deadline_seconds !== undefined && input.action !== 'retry_with_new_deadline') throw invalidRequest('Invalid request: deadline_seconds is valid only with retry_with_new_deadline');
     const pending = states.invocations(taskId).filter(item => item.state === 'dispatched');
-    if (input.call_id && !pending.some(item => item.call_id === input.call_id)) throw new Error('Invalid request: call_id does not name a pending call');
+    if (input.call_id && !pending.some(item => item.call_id === input.call_id)) throw invalidRequest('Invalid request: call_id does not name a pending call');
     const target = input.call_id ? pending.find(item => item.call_id === input.call_id) : pending.length === 1 ? pending[0] : undefined;
     if (input.result !== undefined) {
-      if (!target) throw new Error('Invalid request: result needs call_id when several calls are pending');
-      if (Buffer.byteLength(JSON.stringify(input.result) ?? 'null') > MAX_OPERATOR_RESULT_BYTES) throw new Error('Invalid request: result exceeds 64 KiB');
+      if (!target) throw invalidRequest('Invalid request: result needs call_id when several calls are pending');
+      if (Buffer.byteLength(JSON.stringify(input.result) ?? 'null') > MAX_OPERATOR_RESULT_BYTES) throw invalidRequest('Invalid request: result exceeds 64 KiB');
       let tool: Tool | undefined;
       try { tool = (await this.#taskScope(task, env)).taskTools.get(target.name, task.context); } catch { tool = undefined; }
-      if (tool && !tool.output.safeParse(input.result).success) throw new Error(`Invalid request: result does not match the ${tool.name} output schema`);
+      if (tool && !tool.output.safeParse(input.result).success) throw invalidRequest(`Invalid request: result does not match the ${tool.name} output schema`);
     }
     const decided: RecoveryDecision = { action: input.action, by, at: new Date().toISOString(), ...(input.note ? { note: input.note } : {}) };
     if (input.action === 'abandon' || row.reason.code === 'CANCELLED_WITH_UNSETTLED_EFFECT') {
@@ -315,10 +320,10 @@ export class ArdentRuntime {
     let deadlineMs = task.deadline_ms;
     if (input.action === 'retry_with_new_deadline') {
       const seconds = input.deadline_seconds ?? Math.min(this.config.execution.deadline_seconds, max);
-      if (seconds > max) throw new Error(`Invalid request: deadline_seconds exceeds execution.recovery_max_new_deadline_seconds (${max})`);
+      if (seconds > max) throw invalidRequest(`Invalid request: deadline_seconds exceeds execution.recovery_max_new_deadline_seconds (${max})`);
       deadlineMs = Date.now() + seconds * 1000;
     }
-    if (this.#draining) throw new Error('Gateway is draining and cannot accept new work');
+    if (this.#draining) throw notAcceptingWork('Gateway is draining and cannot accept new work');
     const continuation = this.#acceptContinuation(task, row.attempt, row.reason, input.action, decided, deadlineMs, target, input.result);
     this.#notifySettled(taskId);
     return { recovery: view(), continuation };
@@ -364,7 +369,7 @@ export class ArdentRuntime {
   }
   cancel(id: string): Task {
     const task = this.store.get(id);
-    if (!task) throw new Error('Task not found');
+    if (!task) throw notFound('Task not found');
     const active = this.#active.get(id);
     const waitingResume = this.#waiting.get(id)?.resume === true ? this.#waiting.get(id) : undefined;
     if (active) { active.abort('cancelled'); this.store.append(id, 'cancel_requested', { active: true }); }

@@ -27,6 +27,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded. */
         get: operations["getReadiness"];
         put?: never;
         post?: never;
@@ -701,6 +702,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Configured providers. codex.auth_mode is the Codex account status (or the probe error) for a Codex profile, and not_selected for a llama.cpp profile unless probe=codex is given. The Codex probe is shared with readiness and cached for 30 seconds. */
         get: operations["getProviders"];
         put?: never;
         post?: never;
@@ -1005,12 +1007,20 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Process is running */
+            /** @description Process is running (HiveCommon liveness body) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "live";
+                        service: string;
+                        version: string;
+                        time: string;
+                    };
+                };
             };
         };
     };
@@ -1028,14 +1038,58 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ready" | "degraded";
+                        service: string;
+                        version: string;
+                        time: string;
+                        /** @description configuration, and codex or llamacpp when probed */
+                        checks: {
+                            [key: string]: {
+                                /** @enum {string} */
+                                status: "up" | "down";
+                                critical: boolean;
+                                latencyMs: number;
+                                error?: string;
+                                details?: {
+                                    [key: string]: unknown;
+                                };
+                            };
+                        };
+                        problems: string[];
+                    };
+                };
             };
             /** @description Runtime dependency unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ready" | "degraded";
+                        service: string;
+                        version: string;
+                        time: string;
+                        /** @description configuration, and codex or llamacpp when probed */
+                        checks: {
+                            [key: string]: {
+                                /** @enum {string} */
+                                status: "up" | "down";
+                                critical: boolean;
+                                latencyMs: number;
+                                error?: string;
+                                details?: {
+                                    [key: string]: unknown;
+                                };
+                            };
+                        };
+                        problems: string[];
+                    };
+                };
             };
         };
     };
@@ -3627,7 +3681,10 @@ export interface operations {
     };
     getProviders: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description codex: probe the Codex account although llama.cpp is selected */
+                probe?: "codex";
+            };
             header?: never;
             path?: never;
             cookie?: never;

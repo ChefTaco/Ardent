@@ -5,6 +5,7 @@ import type { JobEngine } from './job-engine.js';
 import { pluginContext } from './plugins.js';
 import type { ArdentRuntime } from './runtime.js';
 import { TokenBucketLimiter } from './a2a-rate-limit.js';
+import { legacyPluginError } from './errors.js';
 
 const capacity = z.object({ perMinute: z.number().int().min(1).max(6000), burst: z.number().int().min(1).max(1200) }).strict();
 
@@ -48,6 +49,9 @@ export function mountPluginHttp(app: Hono, runtime: ArdentRuntime, env: NodeJS.P
       if (!result.allowed) return c.json({ error: { code: 'RATE_LIMITED' } }, 429,
         { 'Retry-After': String(result.retryAfterSeconds), 'Cache-Control': 'no-store' });
       return next();
-    }, bodyLimit({ maxSize: 1_048_576, onError: c => c.json({ error: { code: 'BODY_TOO_LARGE' } }, 413) }), route.handler);
+    }, bodyLimit({ maxSize: 1_048_576, onError: c => c.json({ error: { code: 'BODY_TOO_LARGE' } }, 413) }), async (c, next) => {
+      // A plugin error without a type answers as it did before typed errors.
+      try { return await route.handler(c, next); } catch (error: unknown) { throw legacyPluginError(error); }
+    });
   }
 }

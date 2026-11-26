@@ -26,3 +26,5 @@ export { Database as SqliteDatabase } from './sqlite.js';
 export type SqliteStatement = ReturnType<import('./sqlite.js').Database['prepare']>;
 export * from './team-contract.js';
 export { ARDENT_VERSION } from './version.js';
+/** Typed errors: a plugin route that throws one answers with its status and code. */
+export { HiveError, isHiveError, ErrorCode, invalidRequest, notFound, conflict, dependencyUnavailable, notAcceptingWork } from './errors.js';

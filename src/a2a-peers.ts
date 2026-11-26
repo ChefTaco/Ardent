@@ -5,6 +5,8 @@ import YAML from 'yaml';
 import { z } from 'zod';
 import type { ArdentConfig } from './config.js';
 import { revision } from './config.js';
+import { conflict, invalidRequest } from './errors.js';
+import { readBearerToken } from '@hivemagnus/hive-common/secrets';
 
 const envName = z.string().regex(/^[A-Z][A-Z0-9_]*$/);
 const Peer = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), url: z.string().url(),
@@ -26,13 +28,13 @@ export function outboundTokenEnv(peer: PeerConfig): string { return peer.outboun
 
 export function parsePeersConfig(text: string): PeerConfig[] {
   const document = YAML.parseDocument(text, { uniqueKeys: true });
-  if (document.errors.length) throw new Error(`Invalid peer YAML: ${document.errors[0]?.message ?? 'unknown error'}`);
+  if (document.errors.length) throw invalidRequest(`Invalid peer YAML: ${document.errors[0]?.message ?? 'unknown error'}`);
   const peers = Peers.parse(document.toJS() as unknown).peers;
-  if (new Set(peers.map(peer => peer.id)).size !== peers.length) throw new Error('Duplicate A2A peer ID');
+  if (new Set(peers.map(peer => peer.id)).size !== peers.length) throw invalidRequest('Duplicate A2A peer ID');
   for (const peer of peers) {
     const url = new URL(peer.url);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash || url.search)
-      throw new Error(`Invalid A2A peer URL: ${peer.id}`);
+      throw invalidRequest(`Invalid A2A peer URL: ${peer.id}`);
   }
   return peers;
 }
@@ -44,17 +46,17 @@ export async function readPeersConfig(profileDir: string, config: ArdentConfig):
 }
 
 export async function savePeersConfig(profileDir: string, config: ArdentConfig, text: string, expectedRevision: string): Promise<string> {
-  if (Buffer.byteLength(text) > 200_000) throw new Error('Peer configuration exceeds size limit');
+  if (Buffer.byteLength(text) > 200_000) throw invalidRequest('Peer configuration exceeds size limit');
   parsePeersConfig(text);
   const lockPath = join(profileDir, '.peers.write.lock');
   const lock = await open(lockPath, 'wx', 0o600).catch((error: unknown) => {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw new Error('Peer configuration edit is already in progress');
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw conflict('Peer configuration edit is already in progress');
     throw error;
   });
   let temporary: string | undefined;
   try {
     const current = await readPeersConfig(profileDir, config);
-    if (current.revision !== expectedRevision) throw new Error('Peer configuration revision conflict');
+    if (current.revision !== expectedRevision) throw conflict('Peer configuration revision conflict');
     temporary = join(profileDir, `.peers.${randomUUID()}.tmp`);
     await writeFile(temporary, text, { flag: 'wx', mode: 0o600 });
     await rename(temporary, join(profileDir, config.a2a.peers_file));
@@ -80,7 +82,7 @@ export async function loadPeers(profileDir: string, config: ArdentConfig, env: N
     seen.add(peer.id);
     if (!peer.enabled) continue;
     const url = new URL(peer.url);
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error(`Invalid A2A peer URL: ${peer.id}`);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.hash) throw invalidRequest(`Invalid A2A peer URL: ${peer.id}`);
     const inbound = env[inboundTokenEnv(peer)];
     const outbound = env[outboundTokenEnv(peer)];
     if (!inbound || inbound.length < 16) throw new Error(`A2A inbound credential is missing or too short: ${inboundTokenEnv(peer)}`);
@@ -91,7 +93,8 @@ export async function loadPeers(profileDir: string, config: ArdentConfig, env: N
     credentials.push({ id: peer.id, token: Buffer.from(inbound) });
   }
   return { peers, authenticate: authorization => {
-    const bearer = /^Bearer (.+)$/.exec(authorization ?? '')?.[1];
+    // `Bearer <token>` with a case-insensitive scheme, as RFC 9110 allows; anything else is refused.
+    const bearer = readBearerToken(authorization);
     if (!bearer) return undefined;
     const candidate = Buffer.from(bearer);
     for (const entry of credentials) if (entry.token.length === candidate.length && timingSafeEqual(entry.token, candidate)) return entry.id;

@@ -6,6 +6,7 @@ import type { ArdentConfig } from './config.js';
 import { loadConfig, saveConfig } from './config.js';
 import { defineTool, type ToolRegistry } from './tools.js';
 import { z } from 'zod';
+import { conflict, invalidRequest, notFound } from './errors.js';
 
 export type SkillInfo = { name: string; description: string; hash: string; enabled: boolean; path: string };
 const safeName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -51,7 +52,7 @@ export async function listSkills(profileDir: string, config: ArdentConfig): Prom
 export async function readSkill(profileDir: string, config: ArdentConfig, name: string): Promise<string> {
   if (!safeName.test(name) || !config.skills.enabled.includes(name)) throw new Error('Skill is not enabled');
   const skill = (await listSkills(profileDir, config)).find(item => item.name === name);
-  if (!skill) throw new Error('Skill not found');
+  if (!skill) throw notFound('Skill not found');
   return readFile(skill.path, 'utf8');
 }
 
@@ -66,11 +67,11 @@ export async function registerSkillTool(registry: ToolRegistry, profileDir: stri
 }
 
 export async function setSkillEnabled(profileDir: string, name: string, enabled: boolean, expectedRevision: string): Promise<string> {
-  if (!safeName.test(name)) throw new Error('Invalid skill name');
+  if (!safeName.test(name)) throw invalidRequest('Invalid skill name');
   const loaded = await loadConfig(profileDir);
-  if (loaded.revision !== expectedRevision) throw new Error('Configuration revision conflict');
+  if (loaded.revision !== expectedRevision) throw conflict('Configuration revision conflict');
   const available = await listSkills(profileDir, loaded.config);
-  if (!available.some(item => item.name === name)) throw new Error('Skill not found');
+  if (!available.some(item => item.name === name)) throw notFound('Skill not found');
   const selected = new Set(loaded.config.skills.enabled);
   if (enabled) selected.add(name); else selected.delete(name);
   const doc = YAML.parseDocument(loaded.text);

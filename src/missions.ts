@@ -3,6 +3,7 @@ import { ExecutionInput } from './execution.js';
 import type { ChatMessage } from './llamacpp.js';
 import type { Task, TaskStore } from './store.js';
 import { TEAM_VERSION, CoreTeamAction, TeamMission, TeamResult, validateTeamResult, type TeamEnvelope } from './team-contract.js';
+import { invalidRequest } from './errors.js';
 
 /** Bound on the combined text of a mission's context items. */
 export const MAX_CONTEXT_ITEM_BYTES = 64 * 1024;
@@ -33,7 +34,7 @@ export type MissionRecord = z.infer<typeof MissionRecord>;
 /** Accept a mission as a durable `mission` task. The mission and its context are journaled atomically with the task. */
 export function acceptMission(accept: (input: { prompt: string; sessionId?: string; idempotencyKey: string; deadlineMs: number;
   content: unknown; onAccepted: (task: Task) => void }) => Task, store: TaskStore, input: MissionSubmit, nowMs = Date.now()): Task {
-  if (input.mission.deadline * 1000 <= nowMs) throw new Error('Mission deadline must be in the future');
+  if (input.mission.deadline * 1000 <= nowMs) throw invalidRequest('Mission deadline must be in the future');
   const record: MissionRecord = { mission: input.mission, context_items: input.context_items ?? [], labels: input.labels ?? {} };
   return accept({ prompt: input.objective, ...(input.session_id ? { sessionId: input.session_id } : {}), idempotencyKey: input.idempotency_key,
     deadlineMs: input.mission.deadline * 1000, content: record, onAccepted: task => store.append(task.id, MISSION_EVENT, record) });

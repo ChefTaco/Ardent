@@ -375,7 +375,37 @@
         "operationId": "getLiveness",
         "responses": {
           "200": {
-            "description": "Process is running"
+            "description": "Process is running (HiveCommon liveness body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "live"
+                      ]
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "time": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "service",
+                    "version",
+                    "time"
+                  ]
+                }
+              }
+            }
           }
         }
       }
@@ -383,12 +413,159 @@
     "/health/ready": {
       "get": {
         "operationId": "getReadiness",
+        "description": "HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded.",
         "responses": {
           "200": {
-            "description": "Configured runtime ready"
+            "description": "Configured runtime ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "degraded"
+                      ]
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "time": {
+                      "type": "string"
+                    },
+                    "checks": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "up",
+                              "down"
+                            ]
+                          },
+                          "critical": {
+                            "type": "boolean"
+                          },
+                          "latencyMs": {
+                            "type": "number"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "details": {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "critical",
+                          "latencyMs"
+                        ]
+                      },
+                      "description": "configuration, and codex or llamacpp when probed"
+                    },
+                    "problems": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "service",
+                    "version",
+                    "time",
+                    "checks",
+                    "problems"
+                  ]
+                }
+              }
+            }
           },
           "503": {
-            "description": "Runtime dependency unavailable"
+            "description": "Runtime dependency unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "degraded"
+                      ]
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "time": {
+                      "type": "string"
+                    },
+                    "checks": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "up",
+                              "down"
+                            ]
+                          },
+                          "critical": {
+                            "type": "boolean"
+                          },
+                          "latencyMs": {
+                            "type": "number"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "details": {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "critical",
+                          "latencyMs"
+                        ]
+                      },
+                      "description": "configuration, and codex or llamacpp when probed"
+                    },
+                    "problems": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "service",
+                    "version",
+                    "time",
+                    "checks",
+                    "problems"
+                  ]
+                }
+              }
+            }
           }
         }
       }
@@ -6220,9 +6397,24 @@
     "/api/v1/providers": {
       "get": {
         "operationId": "getProviders",
+        "description": "Configured providers. codex.auth_mode is the Codex account status (or the probe error) for a Codex profile, and not_selected for a llama.cpp profile unless probe=codex is given. The Codex probe is shared with readiness and cached for 30 seconds.",
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "probe",
+            "required": false,
+            "description": "codex: probe the Codex account although llama.cpp is selected",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "codex"
+              ]
+            }
           }
         ],
         "responses": {
