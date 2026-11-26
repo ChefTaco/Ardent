@@ -184,9 +184,54 @@ describe('bounded runtime scheduling', () => {
       expect(answers.map(item => item.answer)).toEqual(['DONE A', 'DONE B', 'DONE C', 'DONE D']);
       expect(maxConcurrent).toBe(3);
     } finally { runtime.close(); }
-    // The new key wins and silences the notice; the runtime still caps tasks at 4.
+    // The new key wins and silences the notice.
     const both = parseConfig((await readFile(path, 'utf8')).replace('  max_parallel_tools: 3', '  max_parallel_tasks: 1\n  max_parallel_tools: 3'));
     expect(maxParallelTasks(both)).toBe(1);
     expect(runtimeProblems(both, {}).some(isConfigNotice)).toBe(false);
+  });
+
+  it('runs as many tasks at once as max_parallel_tasks allows, above 4 too', async () => {
+    let active = 0, maxConcurrent = 0;
+    const server = createServer((request, response) => {
+      if (request.url !== '/v1/chat/completions') { response.writeHead(404).end(); return; }
+      request.resume();
+      request.on('end', () => {
+        active += 1; maxConcurrent = Math.max(maxConcurrent, active);
+        response.setHeader('Content-Type', 'text/event-stream');
+        setTimeout(() => { active -= 1; response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'DONE' } }] })}\n\ndata: [DONE]\n\n`); }, 120);
+      });
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No model port');
+    const dir = await mkdtemp(join(tmpdir(), 'ardent-parallel-'));
+    dirs.push(dir);
+    await initTestProfile(dir);
+    const config = (await loadConfig(dir)).config;
+    config.providers.llamacpp.base_url = `http://127.0.0.1:${address.port}/`;
+    config.providers.llamacpp.model = 'fixture';
+    config.execution.max_parallel_tasks = 6;
+    const runtime = new ArdentRuntime(dir, config);
+    try {
+      const tasks = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map(name => runtime.accept(name, name.toLowerCase()));
+      await Promise.all(tasks.map(task => runtime.run(task.id)));
+      // Ardent before 3.4 silently ran at most 4.
+      expect(maxConcurrent).toBe(6);
+    } finally { runtime.close(); }
+  });
+});
+
+describe('Agent Card provider', () => {
+  it('comes from a2a.provider and defaults to Ardent', async () => {
+    const { agentCardProvider } = await import('../src/a2a-server.js');
+    const dir = await mkdtemp(join(tmpdir(), 'ardent-provider-'));
+    dirs.push(dir);
+    await initTestProfile(dir);
+    const text = await readFile(join(dir, 'config.yaml'), 'utf8');
+    expect(agentCardProvider(parseConfig(text))).toEqual({ organization: 'Ardent', url: 'https://github.com/ChefTaco/Ardent' });
+    const configured = parseConfig(text.replace(/^a2a:\n/m, 'a2a:\n  provider: { organization: Example Org, url: "https://agents.example.com" }\n'));
+    expect(agentCardProvider(configured)).toEqual({ organization: 'Example Org', url: 'https://agents.example.com' });
+    expect(() => parseConfig(text.replace(/^a2a:\n/m, 'a2a:\n  provider: { organization: Example Org, url: "ftp://agents.example.com" }\n'))).toThrow(/provider/);
   });
 });

@@ -498,7 +498,7 @@ export class ArdentRuntime {
     this.#waiting.set(pending.task.id, pending);
   }
   #pump(): void {
-    const limit = Math.max(1, Math.min(maxParallelTasks(this.config), 4));
+    const limit = Math.max(1, maxParallelTasks(this.config));
     while (this.#runningCount < limit && this.#roundRobin.length) {
       let caller: string | undefined;
       for (let inspected = 0, count = this.#roundRobin.length; inspected < count; inspected++) {

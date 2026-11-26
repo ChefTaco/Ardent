@@ -23,6 +23,12 @@ import { pipeline } from 'node:stream/promises';
 import { ARTIFACT_TRANSFER_V2_URN, formatReprDigest, parseByteRange } from '@hivemagnus/hive-common/artifact';
 
 /** The transfer-v2 capability this runtime advertises on its Agent Card. */
+/** The Agent Card provider: `a2a.provider`, else Ardent itself. */
+export const DEFAULT_AGENT_CARD_PROVIDER = { organization: 'Ardent', url: 'https://github.com/ChefTaco/Ardent' } as const;
+export function agentCardProvider(config: ArdentConfig): { organization: string; url: string } {
+  return config.a2a.provider ?? { ...DEFAULT_AGENT_CARD_PROVIDER };
+}
+
 export function artifactTransferExtension(maxBytes: number) {
   return { uri: ARTIFACT_TRANSFER_V2_URN, description: 'Resumable artifact transfer over HTTP Range with SHA-256 verification and renditions',
     required: false, params: { max_bytes: maxBytes, range: true, renditions: true } };
@@ -77,7 +83,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     name: config.name,
     description: teamCard?.description ?? skill.description,
     supportedInterfaces: interfaces,
-    provider: { organization: 'Magnus', url: 'https://github.com/ChefTaco/magnus' },
+    provider: agentCardProvider(config),
     version: ARDENT_VERSION,
     capabilities: { streaming: true, pushNotifications: true, extendedAgentCard: true, extensions: [artifactTransferExtension(config.artifacts.max_bytes)] },
     securitySchemes: { Bearer: { scheme: { $case: 'httpAuthSecurityScheme', value: { description: 'Peer bearer token', scheme: 'bearer', bearerFormat: '' } } } },
