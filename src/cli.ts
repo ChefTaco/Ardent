@@ -39,12 +39,14 @@ import { developmentQuery, missionSubmitInput, previewInput } from './cli-comman
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
 import { ArtifactTransfers } from './artifact-transfer.js';
 import { inspectJournal, journalPolicy } from './journal.js';
+import { backupProfile, parseDuration, pruneJournal } from './retention.js';
+import { ArtifactStore } from './artifacts.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
 function args(argv: string[], extraValues: readonly string[] = []): Parsed {
   const words: string[] = [];
   const options = new Map<string, string | true>();
-  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model', 'peer', 'task', 'artifact', 'local-task', 'db']);
+  const valued = new Set([...extraValues, 'env-file', 'profile', 'profile-path', 'api-port', 'template', 'prompt', 'prompt-file', 'idempotency-key', 'session-id', 'login-id', 'source', 'schedule-id', 'window-key', 'release-id', 'caller', 'context', 'expected-head', 'expected-policy-revision', 'mission-file', 'after', 'limit', 'kind', 'soul-file', 'identity-file', 'skills', 'model', 'peer', 'task', 'artifact', 'local-task', 'db', 'older-than']);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg) continue;
@@ -114,6 +116,8 @@ Commands:
   admission status | close --release-id ID Inspect or close the admission fence
   journal status [--db FILE] [--json]      Report whether the journal holds active, unknown or unsupported work (read-only)
   journal policy                           Print the journal table classification
+  backup <dir> [--artifacts]               Copy the journal (online, consistent) and optionally the artifacts
+  prune --older-than 90d [--dry-run]       Delete finished tasks older than that and what belongs only to them
   a2a discover <peer> | call <peer>        Talk to a configured A2A peer
   a2a team-card                            Print the Hermes team card (a2a.hermes_compat)
   openapi export                           Print the management OpenAPI document
@@ -160,6 +164,23 @@ async function main(): Promise<void> {
       return;
     }
     throw new Error('Use journal status [--db FILE] or journal policy');
+  }
+  if (command === 'backup') {
+    // Needs no valid configuration: a backup is taken before risky changes too.
+    if (!subcommand) throw new Error('Use backup <new directory> [--artifacts]');
+    print(await backupProfile(dir, subcommand, { artifacts: parsed.options.has('artifacts') }));
+    return;
+  }
+  if (command === 'prune') {
+    const olderThan = value(parsed.options, 'older-than');
+    if (!olderThan) throw new Error('Use prune --older-than 90d [--dry-run]');
+    const loadedForPrune = await loadConfig(dir);
+    const store = new TaskStore(join(dir, 'state', 'ardent.sqlite'));
+    try {
+      print(await pruneJournal(store, new ArtifactStore(join(dir, 'artifacts'), loadedForPrune.config.artifacts.max_bytes),
+        { olderThanMs: parseDuration(olderThan), dryRun: parsed.options.has('dry-run') }));
+    } finally { store.close(); }
+    return;
   }
   const loaded = await loadConfig(dir);
   const env = await environment(dir, value(parsed.options, 'env-file'));
@@ -430,6 +451,20 @@ async function main(): Promise<void> {
         sweepArtifacts();
         const artifactSweep = setInterval(sweepArtifacts, 3_600_000);
         artifactSweep.unref();
+        // Scheduled retention (retention.enabled): once a day, first after ten minutes.
+        const retention = loaded.config.retention;
+        let retentionRun: Promise<unknown> | undefined;
+        const prune = () => {
+          if (!runtime || retentionRun) return;
+          retentionRun = pruneJournal(runtime.store, runtime.artifacts, { olderThanMs: retention.older_than_days * 86_400_000 })
+            .then(result => { if (result.tasks) logger.info('Journal retention pruned tasks', { tasks: result.tasks, rows: result.rows, artifacts: result.artifacts, cutoff: result.cutoff }); })
+            .catch((error: unknown) => { logger.error('Journal retention failed', { err: error }); })
+            .finally(() => { retentionRun = undefined; });
+        };
+        const retentionStart = retention.enabled ? setTimeout(prune, 600_000) : undefined;
+        const retentionTimer = retention.enabled ? setInterval(prune, 86_400_000) : undefined;
+        retentionStart?.unref();
+        retentionTimer?.unref();
         const jobPath = join(dir, 'jobs', 'active.json');
         const hasJobs = await lstat(jobPath).then(stat => {
           if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Active job definitions are not a regular file');
@@ -519,6 +554,9 @@ async function main(): Promise<void> {
         } finally {
           if (jobTimer) clearInterval(jobTimer);
           clearInterval(artifactSweep);
+          if (retentionStart) clearTimeout(retentionStart);
+          if (retentionTimer) clearInterval(retentionTimer);
+          await retentionRun;
           channelAbort.abort();
           shutdownUnsettled = !(await runtime.drain(30_000));
           // Replies and notices admitted before shutdown may still be sending.
