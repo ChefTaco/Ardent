@@ -115,6 +115,10 @@ checkout:
 npm run build:native-agent -- --product ardent --image PINNED_IMAGE --output NEW_DIRECTORY
 ```
 
+CI builds the same image on every change, executes its SQLite addon and CLI,
+checks that it carries no package manager and runs as a non-root user, and
+scans it with Trivy.
+
 The archive includes the exact Node binary, the public Ardent package, locked
 production dependencies and their licenses. It contains no inference runtime or
 models. The descriptor supplies literal launch arguments, an exact version

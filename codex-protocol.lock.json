@@ -8,5 +8,14 @@
   "verification": "2026-09-26 local ChatGPT OAuth wire probe: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. A production profile CLI remains separately unverified.",
   "thread_resume_verified": false,
   "thread_read_items_verified": false,
-  "thread_recovery": "Execution recovery resumes an interrupted durable thread (thread/read with includeTurns listing every dynamicToolCall item, then thread/resume) only when both flags are true and the installed CLI is observed_cli_version. Neither was verified against a real CLI; recovery restarts Codex tasks that never dispatched an effectful tool and holds the rest."
+  "thread_recovery": "Execution recovery resumes an interrupted durable thread (thread/read with includeTurns listing every dynamicToolCall item, then thread/resume) only when both flags are true and the installed CLI is observed_cli_version. Neither was verified against a real CLI; recovery restarts Codex tasks that never dispatched an effectful tool and holds the rest.",
+  "schema_check": {
+    "cli_version": "0.172.0",
+    "checked": "2026-11-26",
+    "command": "codex app-server generate-ts --out <directory>",
+    "thread_read_include_turns": true,
+    "thread_resume": true,
+    "dynamic_tool_call_item_id": true,
+    "note": "Schema only, no model turn: the 0.172.0 protocol still has thread/read with includeTurns (deprecated for paginated threads in favour of thread/items/list), thread/resume, and dynamicToolCall thread items with an id, which is what thread recovery reads. Resuming a thread with a real CLI and account is still unverified, so both flags stay false."
+  }
 }
