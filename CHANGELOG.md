@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+## 3.5.0 - 2026-11-26
+
 ### Upgrade notes
 
 - Codex thread recovery is now on for Codex CLI 0.172.0: `codex-protocol.lock.json` sets `observed_cli_version` to 0.172.0 and `thread_resume_verified` and `thread_read_items_verified` to `true` after a live probe. A Codex task interrupted after its tool calls settled resumes its durable thread instead of restarting (no effectful tool dispatched) or being held (`CODEX_THREAD_NOT_VERIFIABLE`). A profile on another Codex CLI version keeps the previous outcome, now decided when the thread is resumed: the task restarts on a fresh thread when it dispatched no effectful tool, and is held otherwise, with a `codex_thread_unverified` event naming the version. Profiles that should not resume Codex threads set `providers.codex.durable_threads: false`.
+- No journal migration and no new configuration: `JOURNAL_POLICY_VERSION` stays 1, and downgrading to 3.4.0 is safe (it holds or restarts interrupted Codex tasks as before).
 
 ### Added
 
