@@ -25,7 +25,7 @@ async function checkClient(version) {
   const allowed = [/^dist\/[A-Za-z0-9._-]+\.(?:js|d\.ts)$/, /^README\.md$/, /^LICENSE$/, /^NOTICE$/, /^package\.json$/];
   const unexpected = files.filter(path => !allowed.some(pattern => pattern.test(path)));
   if (unexpected.length) throw new Error(`Unexpected packed client files: ${unexpected.join(', ')}`);
-  for (const required of ['dist/index.js', 'dist/index.d.ts', 'dist/generated.d.ts', 'README.md', 'LICENSE', 'NOTICE'])
+  for (const required of ['dist/index.js', 'dist/index.d.ts', 'dist/generated.d.ts', 'dist/openapi.js', 'dist/openapi.d.ts', 'dist/routes.js', 'README.md', 'LICENSE', 'NOTICE'])
     if (!files.includes(required)) throw new Error(`Packed client file missing: ${required}`);
   const filename = (await run('npm', ['pack', '--pack-destination', temporary, '--silent'], { cwd: clientDir })).trim().split('\n').at(-1);
   if (!filename || !/^hivemagnus-ardent-client-[0-9][A-Za-z0-9.-]*\.tgz$/.test(filename)) throw new Error('Client pack did not produce the expected tarball');
@@ -51,12 +51,17 @@ async function checkClient(version) {
     "if ((await client.capabilities()).features.artifactContent !== true) throw Error('Installed client did not read capabilities');",
     "const error = await client.tasks.get('00000000-0000-4000-8000-000000000000').catch(e => e);",
     "if (!(error instanceof c.NotFoundError)) throw Error('Installed client did not map a 404');",
+    "const o = await import('@hivemagnus/ardent-client/openapi');",
+    "if (o.matchArdentRoute('GET', '/api/v1/tasks/x/events')?.operationId !== 'getTaskEvents' || o.matchArdentRoute('POST', '/api/v1/tasks')?.kind !== 'action') throw Error('Installed route manifest did not match');",
   ].join('\n')], { cwd: install });
   await writeFile(join(install, 'consumer.ts'), [
     "import { createArdentClient, viaMagnus, type Task, type Recovery } from '@hivemagnus/ardent-client';",
     "const client = createArdentClient({ transport: viaMagnus({ baseUrl: 'https://magnus.example.com', nodeId: 'node', profile: 'assistant', getToken: () => 'fixture-token' }) });",
     "export const task: Promise<Task> = client.tasks.follow('id', { onText: text => { void text.text; } });",
     "export const recovery: Promise<Recovery | null> = client.recovery.get('id');",
+    "import { ARDENT_ROUTES, type paths, type ArdentRoute } from '@hivemagnus/ardent-client/openapi';",
+    "export const route: ArdentRoute | undefined = ARDENT_ROUTES[0];",
+    "export type TaskList = paths['/api/v1/tasks']['get']['responses'][200]['content']['application/json'];",
   ].join('\n'));
   await writeFile(join(install, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true,
     exactOptionalPropertyTypes: true, noEmit: true, types: [], lib: ['ES2022', 'DOM', 'DOM.Iterable', 'DOM.AsyncIterable'] }, files: ['consumer.ts'] }));

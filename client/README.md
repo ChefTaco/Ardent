@@ -1,10 +1,11 @@
 # @hivemagnus/ardent-client
 
 The supported remote client for [Ardent](https://github.com/ChefTaco/Ardent)
-profiles. It submits and follows tasks, reconnects dropped or rotated task
-streams from their cursor, cancels, pauses and resumes tasks, drives execution
-recovery decisions, reads lineage, and downloads artifacts with resumable,
-digest-verified transfers.
+profiles. It submits and follows tasks, team missions and previews, pages
+through filtered task history, reconnects dropped or rotated task streams from
+their cursor, cancels, pauses and resumes tasks, drives execution recovery
+decisions, reads lineage and development history, and downloads artifacts with
+resumable, digest-verified transfers.
 
 It talks to a standalone Ardent management API directly, or to a
 Magnus-managed profile through the Magnus Control API. It runs in Node.js 24+
@@ -74,11 +75,17 @@ viaMagnus({ baseUrl | apiBase, nodeId, profile, getToken, headers?, fetch? }): A
 
 ardent.tasks.submit({ prompt, idempotencyKey?, sessionId?, execution?, signal? }): Promise<TaskAccepted>
 ardent.tasks.get(id, { signal? }): Promise<Task>
-ardent.tasks.list({ limit?, signal? }): Promise<Task[]>
+ardent.tasks.list({ limit?, state?, context?, caller?, since?, until?, signal? }): Promise<Task[]>
+ardent.tasks.page({ limit?, after?, state?, context?, caller?, since?, until?, signal? }): Promise<{ tasks, next }>
 ardent.tasks.events(id, { after?, signal? }): Promise<TaskEvent[]>
 ardent.tasks.cancel(id, { signal? }): Promise<Task>
 ardent.tasks.pause(id, { signal? }) / resume(id, { signal? }): Promise<TaskAdmission>
 ardent.tasks.follow(id, { after?, onEvent?, onText?, onConnect?, signal? }): Promise<Task>
+
+ardent.missions.submit({ objective, mission, contextItems?, labels?, sessionId?, idempotencyKey?, execution?, signal? }): Promise<TaskAccepted>
+ardent.previews.submit({ prompt, overrides?, sessionId?, idempotencyKey?, execution?, signal? }): Promise<TaskAccepted>
+ardent.development.list({ after?, limit?, kind?, signal? }): Promise<{ records, next }>
+ardent.development.note({ kind, title, body, sources?, author? }, { signal? }): Promise<DevelopmentRecord>
 
 ardent.sessions.list({ context?, signal? }): Promise<Session[]>
 ardent.sessions.open(key, { context?, reset?, signal? }): Promise<Session>
@@ -102,6 +109,33 @@ ardent.capabilities({ signal? }): Promise<ArdentCapabilities>
 Response types (`Task`, `Recovery`, `Lineage`, `ArtifactRecord` and the rest)
 are the documented response bodies, and `paths`, `operations` and
 `components` are exported for anything else in the API.
+
+Task filters (`state`, one or several; `context`; `caller`; `since` and
+`until` as epoch milliseconds, a `Date` or ISO 8601) need Ardent 3.4 or later;
+against an older profile, or through a Magnus that does not advertise
+`task_filters` (it would drop them), they raise `UnsupportedCapabilityError`
+instead of returning unfiltered tasks. `tasks.page` returns `next`, the cursor
+to pass as `after`; it is `null` on the last page.
+
+Missions and previews stream on `tasks.follow` like any task. A mission or
+preview submission is safe to repeat with the same `idempotencyKey` (one is
+generated when omitted); a development note is never repeated automatically.
+
+### OpenAPI types and the route manifest
+
+`@hivemagnus/ardent-client/openapi` exports the generated `paths`,
+`operations` and `components` types and `ARDENT_ROUTES`, one entry per
+management API operation (`operationId`, `method`, `path`, `kind: 'read' |
+'action'`, `auth: 'bearer' | 'none'`, `stream`), generated from the same
+OpenAPI document. `matchArdentRoute(method, path)` finds the entry for a
+request path. Code that proxies or allowlists Ardent routes, such as Magnus's
+node agent, can use them instead of regenerating its own copy.
+
+```ts
+import { ARDENT_ROUTES, matchArdentRoute, type paths } from '@hivemagnus/ardent-client/openapi';
+
+matchArdentRoute('GET', '/api/v1/tasks/1b9d…/events'); // { operationId: 'getTaskEvents', kind: 'read', … }
+```
 
 ### Following a task
 
@@ -237,6 +271,11 @@ report.
 | `tasks.follow` | `GET /api/v1/tasks/{id}/stream` | `GET …/tasks/{id}/stream` relay |
 | `sessions.list`, `messages` | `GET /api/v1/sessions[/{id}/messages]` | read `sessions[/{id}/messages]` |
 | `sessions.open` | `POST /api/v1/sessions` | action `session-open` |
+| `missions.submit` | `POST /api/v1/missions` | action `mission-submit` |
+| `previews.submit` | `POST /api/v1/preview/tasks` | action `preview-submit` |
+| `development.list` | `GET /api/v1/development` | read `development` |
+| `development.note` | `POST /api/v1/development` | action `development-note` |
+| `tasks.page`, `list` with filters | `GET /api/v1/tasks?state=…&context=…&caller=…&since=…&until=…` | read `tasks`; filters once Magnus advertises `task_filters` (`after` and `limit` always) |
 | `artifacts.list`, `manifest` | `GET /api/v1/tasks/{id}/artifacts`, `/api/v1/artifacts/{sha}/manifest` | reads |
 | `recovery.get`, `lineage` | `GET /api/v1/tasks/{id}/recovery\|lineage` | reads, from Magnus 3.3.0 |
 | `recovery.decide` | `POST /api/v1/tasks/{id}/recovery` | action `task-recovery` (target: task ID, body: the decision), from Magnus 3.3.0 |
@@ -258,8 +297,8 @@ become `UnsupportedCapabilityError`. A linked service identity may need an
 
 The A2A protocol (peer agents calling Ardent's A2A surface) is out of scope; use
 an A2A SDK such as `@a2a-js/sdk` for peer calls. Configuration, identity,
-skills, peers, missions and previews are management concerns that Magnus and
-the Ardent CLI handle; their routes are in the exported `paths` types.
+skills and peers are management concerns that Magnus and the Ardent CLI
+handle; their routes are in the exported `paths` types and `ARDENT_ROUTES`.
 
 ## License
 

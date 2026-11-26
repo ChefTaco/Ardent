@@ -5,7 +5,7 @@
  */
 export { createArdentClient } from './client.js';
 export type {
-  ArdentCapabilities, ArdentClient, ArdentClientOptions, CallOptions, FollowTaskOptions, RecoveryDecision, SubmitInput,
+  ArdentCapabilities, ArdentClient, ArdentClientOptions, CallOptions, FollowTaskOptions, MissionInput, PreviewInput, RecoveryDecision, SubmitInput, TaskFilter,
 } from './client.js';
 export { direct, viaMagnus } from './transport.js';
 export type { ArdentTransport, DirectTransportOptions, FetchLike, MagnusTransportOptions, ResolvedMagnusTransportOptions, TokenProvider } from './transport.js';
@@ -16,9 +16,10 @@ export {
 } from './errors.js';
 export { Sha256 } from './sha256.js';
 export type {
-  ArtifactImport, ArtifactImportAccepted, ArtifactImportRequest, ArtifactRecord, ArtifactRecordV2, ArtifactRendition, Lineage,
-  OperationalStatus, Recovery, RecoveryAction, RecoveryDecisionBody, Session, SessionContext, SessionMessage, Task, TaskAccepted,
-  TaskAdmission, TaskEvent, TaskState, TaskText,
+  ArtifactImport, ArtifactImportAccepted, ArtifactImportRequest, ArtifactRecord, ArtifactRecordV2, ArtifactRendition, DevelopmentNote, DevelopmentPage,
+  DevelopmentRecord, Lineage, MissionContextItem, MissionSubmitBody, OperationalStatus, PreviewOverrides, PreviewSubmitBody, Recovery, RecoveryAction,
+  RecoveryDecisionBody, Session, SessionContext, SessionMessage, Task, TaskAccepted, TaskAdmission, TaskContext, TaskEvent, TaskPage, TaskState, TaskText,
+  TeamMission,
 } from './types.js';
 export type { paths, operations, components } from './generated.js';
 export type { ExecutionContext } from '@hivemagnus/hive-common/execution';

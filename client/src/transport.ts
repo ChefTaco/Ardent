@@ -82,10 +82,10 @@ function checkedBase(value: unknown, name = 'baseUrl'): string {
 }
 
 /** Routes that need a capability Magnus or an older Ardent may lack. */
-export type Gate = 'recovery' | 'lineage' | 'artifact_transfer';
+export type Gate = 'recovery' | 'lineage' | 'artifact_transfer' | 'task_filters';
 /** The level each gate needs in a Magnus installation report (`capabilities`). */
-const GATE_LEVEL: Record<Gate, number> = { recovery: 1, lineage: 1, artifact_transfer: 2 };
-const GATE_CAPABILITY: Record<Gate, string> = { recovery: 'ardent.recovery.v1', lineage: 'ardent.lineage.v1', artifact_transfer: 'artifact-transfer.v2' };
+const GATE_LEVEL: Record<Gate, number> = { recovery: 1, lineage: 1, artifact_transfer: 2, task_filters: 1 };
+const GATE_CAPABILITY: Record<Gate, string> = { recovery: 'ardent.recovery.v1', lineage: 'ardent.lineage.v1', artifact_transfer: 'artifact-transfer.v2', task_filters: 'ardent.task-filters.v1' };
 
 export type Effect = 'none' | 'idempotent' | 'unknown';
 export type Query = Readonly<Record<string, string | number | undefined>>;

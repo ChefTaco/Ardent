@@ -64,6 +64,14 @@ async function profile(modelUrl: string): Promise<{ dir: string; loaded: LoadedC
   return { dir, loaded };
 }
 
+/** A standalone Ardent whose model answers every prompt with `answer` (no tool calls). */
+export async function plainArdent(answer = 'Plain answer.') {
+  const { dir, loaded } = await profile(await llama(() => ({ text: answer })));
+  const runtime = new ArdentRuntime(dir, loaded.config, {});
+  cleanups.push(() => runtime.close());
+  return { runtime, loaded, dir, url: await serveApi(runtime, loaded) };
+}
+
 /** Serve a runtime's management API on loopback. */
 export async function serveApi(runtime: ArdentRuntime, loaded: LoadedConfig): Promise<string> {
   const app = createArdentApi(runtime, loaded, { ARDENT_API_TOKEN: TOKEN });
@@ -205,7 +213,7 @@ export async function faultyProxy(upstream: string, faults: { streamDrops?: numb
 type Capabilities = Record<string, number>;
 const CURRENT_READ = /^(?:openapi|status|profile|config|config\/schema|providers|channels|peers|peers\/config|memory\/status|skills|sessions|tasks|tasks\/[0-9a-f-]{36}(?:\/events|\/artifacts)?|artifacts\/[a-f0-9]{64}\/manifest|development|sessions\/[0-9a-f-]{36}\/messages|identity\/(?:soul|identity)(?:\/history)?)$/;
 const NEXT_READ = /^(?:tasks\/[0-9a-f-]{36}\/(?:recovery|lineage)|artifacts\/[a-f0-9]{64}\/(?:renditions|manifest\/v2)|artifacts\/imports(?:\/[0-9a-f-]{36})?)$/;
-const CURRENT_ACTIONS = new Set(['session-open', 'task-submit', 'task-cancel', 'task-pause', 'task-resume']);
+const CURRENT_ACTIONS = new Set(['session-open', 'task-submit', 'task-cancel', 'task-pause', 'task-resume', 'mission-submit', 'preview-submit', 'development-note']);
 
 /**
  * A small Magnus Control API: its read allowlist, stream relay and action shapes as of
@@ -228,7 +236,7 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
   const ok = (res: ServerResponse, data: unknown) => { res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, data })); };
   /** Only fixed-shape Ardent API paths on the fixture's own origin are forwarded. */
   const ardentFetch = (path: string, init: RequestInit = {}) => {
-    if (!/^[a-z]+(?:\/[a-z0-9-]+)*(?:\?[a-z_]+=[A-Za-z0-9_-]+(?:&[a-z_]+=[A-Za-z0-9_-]+)*)?$/.test(path) || path.includes('..'))
+    if (!/^[a-z]+(?:\/[a-z0-9-]+)*(?:\?[a-z_]+=[A-Za-z0-9_%.-]+(?:&[a-z_]+=[A-Za-z0-9_%.-]+)*)?$/.test(path) || path.includes('..'))
       throw new Error('Refused fixture path');
     const target = new URL(`/api/v1/${path}`, ardentUrl);
     if (target.origin !== new URL(ardentUrl).origin) throw new Error('Refused fixture origin');
@@ -276,7 +284,8 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
         if (options.oldProfile && (action === 'task-recovery' || action === 'artifact-import'))
           return fail(res, 409, 'unsupported_capability', 'The profile runs Ardent 3.1.4', { capability: 'ardent.recovery.v1', required_version: '3.2.0', installed_version: '3.1.4' });
         const route: Record<string, string> = { 'task-submit': 'tasks', 'task-cancel': `tasks/${target}/cancel`, 'task-pause': `tasks/${target}/pause`,
-          'task-resume': `tasks/${target}/resume`, 'session-open': 'sessions', 'task-recovery': `tasks/${target}/recovery`, 'artifact-import': 'artifacts/imports' };
+          'task-resume': `tasks/${target}/resume`, 'session-open': 'sessions', 'task-recovery': `tasks/${target}/recovery`, 'artifact-import': 'artifacts/imports',
+          'mission-submit': 'missions', 'preview-submit': 'preview/tasks', 'development-note': 'development' };
         const sent = action === 'task-submit' && input['execution'] ? { ...payload, execution: input['execution'] } : payload;
         const upstream = await ardentFetch(route[action]!, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sent) });
         const answer = await upstream.json() as Record<string, unknown>;
@@ -299,7 +308,8 @@ export async function fakeMagnus(ardentUrl: string, options: { release: 'current
       if (options.oldProfile && NEXT_READ.test(resource))
         return fail(res, 409, 'unsupported_capability', 'The profile runs Ardent 3.1.4', { capability: 'ardent.recovery.v1', required_version: '3.2.0', installed_version: '3.1.4' });
       const query = new URLSearchParams();
-      for (const key of ['after', 'limit', 'kind', 'context']) { const value = url.searchParams.get(key); if (value !== null) query.set(key, value); }
+      // Like Magnus, only known query parameters reach the profile; task filters once it advertises task_filters.
+      for (const key of ['after', 'limit', 'kind', 'context', ...(capabilities['task_filters'] ? ['state', 'caller', 'since', 'until'] : [])]) { const value = url.searchParams.get(key); if (value !== null) query.set(key, value); }
       const upstream = await ardentFetch(`${resource}${query.size ? `?${query}` : ''}`);
       if (!upstream.ok) return fail(res, upstream.status === 404 ? 404 : 503, upstream.status === 404 ? 'NOT_FOUND' : 'DEPENDENCY_UNAVAILABLE', upstream.status === 404 ? 'Ardent resource not found' : 'Ardent node unavailable');
       return ok(res, await upstream.json());

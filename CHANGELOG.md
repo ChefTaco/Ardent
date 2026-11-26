@@ -14,9 +14,8 @@
 ### Added
 
 - `a2a.provider: { organization, url }` sets the Agent Card provider.
-
-### Added
-
+- `@hivemagnus/ardent-client` covers missions (`missions.submit`), previews (`previews.submit`), development history (`development.list`, `development.note`) and task pages (`tasks.page`, and filters on `tasks.list`), directly and through Magnus's `mission-submit`, `preview-submit` and `development-note` actions and `development` read. Task filters raise `UnsupportedCapabilityError` against an Ardent before 3.4, or through a Magnus that does not advertise `task_filters`, instead of returning unfiltered tasks.
+- `@hivemagnus/ardent-client/openapi` exports the generated OpenAPI `paths`/`operations`/`components` types and `ARDENT_ROUTES`, a route manifest marking each management operation as `read` or `action` (with `auth` and `stream`), plus `matchArdentRoute(method, path)`. `npm run openapi:write` generates it and `openapi:check` fails on drift.
 - `GET /api/v1/tasks` pages through every task: it returns `next`, a cursor to pass as `after`, and filters by `state` (comma-separated), `context`, `caller`, `since` and `until` (epoch milliseconds or ISO 8601). Without the new parameters it answers as before, plus `next`. `TaskStore.page()` backs it (new index `tasks_created_id`).
 - `TaskStore.onAppend(taskId, listener)` notifies after each journal event the store appends.
 
