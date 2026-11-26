@@ -87,6 +87,8 @@ const STREAM_ROTATION_MS = 60_000;
 const STREAM_KEEPALIVE_MS = 15_000;
 /** How often an idle stream looks for journal events written by another process. */
 const STREAM_FALLBACK_POLL_MS = 1_000;
+/** Task states after which a stream sends task.done. */
+const TERMINAL_TASK_STATES: ReadonlySet<string> = new Set(['completed', 'partial', 'failed', 'cancelled', 'unknown']);
 /** A time bound: epoch milliseconds or an ISO 8601 date-time. */
 const TimeBound = z.union([z.string().regex(/^\d{1,15}$/).transform(Number), z.string().datetime({ offset: true }).transform(value => Date.parse(value))]);
 const TaskListQuery = z.object({ limit: PageLimit.optional(), after: z.string().min(1).max(400).optional(),
@@ -648,6 +650,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
       const notify = () => { dirty = true; wake?.(); };
       const unsubscribe = runtime.liveText.subscribe(id, update => { live.push(update); notify(); });
       const unsubscribeJournal = runtime.store.onAppend(id, notify);
+      const unsubscribeSettled = runtime.onTaskSettled(settled => { if (settled === id) notify(); });
       stream.onAbort(notify);
       const snapshot = runtime.liveText.snapshot(id);
       if (snapshot) live.push({ kind: 'text', ...snapshot });
@@ -660,13 +663,21 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
           for (const update of live.splice(0)) {
             if (update.kind !== 'end') await write({ event: update.kind === 'text' ? 'task.text' : 'task.delta', data: JSON.stringify({ step: update.step, text: update.text }) });
           }
+          // Read the task, and whether this gateway is still running it, before its events:
+          // the final state is journaled with its event, so a task seen finished here has
+          // all its events up to then on this page or a later one. Reading the state after
+          // the writes could see a task that finished meanwhile and end the stream before
+          // its last events. A finished task can also journal events until its run settles
+          // (a direct research task records its method reflection and memory write after
+          // it completes), so task.done waits for that too.
+          const task = runtime.store.get(id);
+          const finished = !task || (TERMINAL_TASK_STATES.has(task.state) && !runtime.isExecuting(id));
           const events = runtime.store.events(id, after, 100);
           for (const event of events) {
             await write({ event: 'task.event', id: String(event.sequence), data: JSON.stringify(event) });
             after = event.sequence;
           }
-          const task = runtime.store.get(id);
-          if (!task || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(task.state)) {
+          if (finished && events.length < 100) {
             await write({ event: 'task.done', data: JSON.stringify(task ?? { id, state: 'missing' }) });
             break;
           }
@@ -680,7 +691,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
             wake = undefined;
           }
         }
-      } finally { unsubscribe(); unsubscribeJournal(); }
+      } finally { unsubscribe(); unsubscribeJournal(); unsubscribeSettled(); }
     });
   });
   app.post('/api/v1/tasks/:id/cancel', c => c.json(runtime.cancel(c.req.param('id'))));

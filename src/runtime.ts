@@ -105,6 +105,8 @@ export class ArdentRuntime {
   readonly #waiting = new Map<string, PendingRun>();
   /** Queued runs held back because their task is paused; resume puts them back in their caller's queue. */
   readonly #parked = new Map<string, PendingRun>();
+  /** Tasks this gateway is executing, from dispatch until their run settles (including work journaled after the final state). */
+  readonly #executing = new Set<string>();
   /** Startup recovery: queued tasks, tasks interrupted while running, and of those the ids left running to resume or held as `unknown`. */
   readonly recovered: { queued: Task[]; interrupted: number; resumed: string[]; held: string[] };
   #runningCount = 0;
@@ -264,6 +266,13 @@ export class ArdentRuntime {
       backend: this.config.execution.backend, deadlineMs: Date.now() + this.config.execution.deadline_seconds * 1000,
       content: request.content, onAccepted: request.onAccepted, execution: this.#execution(execution) }), this.store, input);
   }
+  /**
+   * Whether this gateway is still executing the task. A finished task can still
+   * journal events until its run settles: a direct research task records its
+   * method reflection and memory write after it completes.
+   * @internal For the task stream; not part of the semver-governed API.
+   */
+  isExecuting(taskId: string): boolean { return this.#executing.has(taskId); }
   /**
    * Be told when a task run by this runtime settles, or when an operator
    * decides a held task. Channel adapters and the A2A surface use it to deliver
@@ -551,9 +560,11 @@ export class ArdentRuntime {
       }
       this.#runningCount++;
       this.#activeCallers.add(caller);
+      this.#executing.add(pending.task.id);
       const settled = () => {
         this.#runningCount--;
         this.#activeCallers.delete(caller);
+        this.#executing.delete(pending.task.id);
         this.#jobs.delete(pending.task.id);
         this.#pump();
       };

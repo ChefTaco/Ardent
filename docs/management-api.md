@@ -110,7 +110,7 @@ A runtime embedded elsewhere is silent unless its host sets `runtime.logger`.
 | `task.event` | A journal event | The event `id` is the journal sequence. Resume with `Last-Event-ID` or `?after=` |
 | `task.text` | `{step, text}`: the visible reply text of the current model step | Sent on connect and when a new step starts showing text |
 | `task.delta` | `{step, text}`: text to append | |
-| `task.done` | The finished task | Its `result` is the authoritative answer |
+| `task.done` | The finished task | Its `result` is the authoritative answer. Sent last, after every event the task journals, including those a run records after its final state (a direct research task's `method_reflection` and `memory_stored`) |
 
 The stream wakes as soon as the gateway journals an event for the task (events
 another process writes arrive within a second), sends a `: keepalive` comment
