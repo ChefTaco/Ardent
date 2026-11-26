@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.5.1 - 2026-11-26
+
 ### Upgrade notes
 
 - A task stream (`GET /api/v1/tasks/{id}/stream`, and `tasks.follow` in `@hivemagnus/ardent-client`) now sends `task.done` only after the task's last journal event. It used to read the task state after writing a page of events, so a task that finished during those writes ended the stream before its final `state` event, and a full page of 100 events on a finished task ended it before the rest. A run that journals events after its final state (a direct research task records `method_reflection` and `memory_stored` after it completes) now keeps the stream open until it settles, so `task.done` can arrive up to the memory write's timeout (10 seconds) after the `state` event. Clients need no change; the event shapes are unchanged. No journal migration; downgrading is safe.
