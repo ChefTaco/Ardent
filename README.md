@@ -90,10 +90,11 @@ ardent gateway run                       # management API, A2A, channels, jobs
 ### Under Magnus and in the Hive suite
 
 Each [Magnus](https://github.com/ChefTaco/magnus) release is built and tested
-against one pinned Ardent version: Magnus 3.1.1 pins Ardent 3.1.3. Every Ardent
-release is followed by a Magnus release that moves the pin, regenerates its
-Ardent contract and updates the node agent; until then, managed nodes keep the
-pinned version.
+against one pinned Ardent version; Magnus's CHANGELOG names it, and
+`npm run ardent:latest:check` in a Magnus checkout fails while that pin is older
+than the latest Ardent release. Every Ardent release is followed by a Magnus
+release that moves the pin, regenerates its Ardent contract and updates the
+node agent; until then, managed nodes keep the pinned version.
 
 Magnus installs that pinned package on a node and creates profiles with its
 **New Agent** workflow, which always enables HiveMem. In a
@@ -135,6 +136,60 @@ The default target is the profile's loopback management listener; an optional
 `ARDENT_ACCEPTANCE_CA_FILE`. Redirects and nonlocal cleartext are refused.
 Acceptance executes no model generation or tools. Verify scoped inference,
 memory, skills and channel workflows separately before enabling consumers.
+
+### Journal quiescence
+
+Backup, snapshot and upgrade tools need to know whether a stopped profile's
+SQLite journal (`state/ardent.sqlite`) still holds work. Ardent owns that
+answer, because it owns the schema; a tool should ask Ardent instead of keeping
+its own list of tables.
+
+```bash
+ardent --profile-path DIR journal status --json   # or: journal status --db FILE
+ardent journal policy                             # the table classification
+```
+
+`journal status` is read-only and needs neither a valid configuration nor
+plugins. It copies the database and its WAL to a private temporary directory,
+verifies the copy by digest, and inspects it there, so committed but
+uncheckpointed work in the WAL is counted and no byte of the profile changes.
+It fails if the files change during inspection, which means a gateway is
+writing. It prints:
+
+```json
+{ "ardent_version": "3.2.1", "profile": "assistant", "policy_version": 1,
+  "idle": true, "active": 0, "unknown": 0, "unsupported": 0,
+  "tables": [{ "name": "tasks", "kind": "state", "active": 0, "unknown": 0, "unsupported": 0 }] }
+```
+
+| Count | Meaning |
+|---|---|
+| `active` | Work a gateway start would run, resume or send: queued or running tasks, deliveries and job windows, dispatched tool calls, recovery ready to resume, pending artifact imports, unbound A2A receipts, unsettled team-child claims. |
+| `unknown` | Work whose outcome is uncertain and needs reconciliation or an operator decision (`unknown` tasks, deliveries and job windows, `failed_unknown` tool calls, recovery `awaiting_decision` or `unsupported`). |
+| `unsupported` | Anything this Ardent version does not recognize: a table it does not classify, a virtual table, a missing or unexpected `state`/`status` column, an unrecognized state value, an empty file. The closed admission fence also counts here, because a temporary snapshot must never clear it. Tables with problems list them in `problems`. |
+
+`idle` is true only when all three are zero. It describes the journal, not
+whether a gateway is running: check that the service is stopped separately.
+An integrity or foreign-key check failure is an error, not a count.
+
+The same inspector is a library entry point that loads no runtime, store,
+plugin or job handler:
+
+```ts
+import { inspectJournal, inspectJournalFile, journalPolicy, JOURNAL_POLICY_VERSION } from '@hivemagnus/ardent/journal';
+
+const status = await inspectJournal('/path/to/profile/state/ardent.sqlite'); // private copy, as the CLI does
+const staged = inspectJournalFile('/private/copy/ardent.sqlite');             // a copy you already own
+```
+
+`journalPolicy()` (and `JOURNAL_TABLES`) classifies every table as `state`
+(with its `column` and its `active`, `uncertain` and `terminal` values),
+`passive`, `ledger` or `special` (with a rule described in `description`).
+`policy_version` changes only when the format or the counting rules change;
+adding a table or a state value does not change it. A release that adds a table
+classifies it in the same change (a test fails otherwise), so inspect a journal
+with the Ardent version that wrote it or a newer one. An older Ardent reports a
+newer table as `unsupported` rather than guessing.
 
 ## Configuration
 

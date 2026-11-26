@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added
+
+- **Journal quiescence is owned by Ardent.** `@hivemagnus/ardent/journal` exports `JOURNAL_TABLES` / `journalPolicy()`, a versioned (`JOURNAL_POLICY_VERSION` 1), JSON-serializable classification of every SQLite table and its idle rule, and `inspectJournal(path)` / `inspectJournalFile(path)`, which return `{ idle, active, unknown, unsupported, tables }` for a profile journal without loading a runtime, store or plugin. `ardent journal status [--db FILE] [--json]` prints the same result read-only (it inspects a digest-verified private copy of the database and its WAL, and needs no valid configuration); `ardent journal policy` prints the classification. Backup and upgrade tools such as Magnus's node agent can use it instead of their own table list. A test fails when a `CREATE TABLE` in `src/` has no classification. See "Journal quiescence" in the README.
+- `GET /api/v1/status` returns `task_states` (tasks per state) and `jobs.last_tick_error` (`{ message, at }` or `null`); `GET /api/v1/jobs/definitions/status` and `ardent jobs definitions status` return `last_tick_error`, and `ardent doctor` returns `last_job_tick_error`. Job engine tick failures were recorded but never reported.
+- The management API logs an unhandled error (a 500) as a JSON line on stderr with the method and path, using `@hivemagnus/hive-common/log` redaction; the gateway also logs job engine tick failures. Callers still see only "Internal request error".
+
+### Fixed
+
+- `POST /api/v1/providers/test` accepts a Codex account that matches `providers.codex.auth_mode`, as readiness does. It rejected every profile configured with `auth_mode: api_key`.
+- `GET /api/v1/status` `tasks` is the number of tasks in the journal; it never exceeded 10.
+- The gateway's unsettled-shutdown message describes execution recovery instead of saying interrupted tasks become `unknown`.
+- The npm package no longer ships a compiled test file that imports `vitest`; `npm run pack:check` rejects test files.
+- The README no longer names a fixed Magnus-to-Ardent pin; it points to Magnus's CHANGELOG and `ardent:latest:check`.
+
+### Changed
+
+- `ws` 8.23.0 and `@hono/node-server` 2.1.11 (lockfile and minimum ranges), so the native image built with `npm ci` carries them.
+
 ## 3.2.1 - 2026-11-24
 
 ### Fixed

@@ -3302,7 +3302,12 @@ export interface operations {
                         profile: string;
                         /** @enum {string} */
                         backend: "llamacpp" | "codex";
+                        /** @description Number of tasks in the journal */
                         tasks: number;
+                        /** @description Number of tasks in each state */
+                        task_states?: {
+                            [key: string]: number;
+                        };
                         channels: {
                             mattermost: {
                                 /** @description Latest missed-post catch-up walk per Mattermost channel */
@@ -3338,6 +3343,14 @@ export interface operations {
                             reconciling: number;
                             awaiting_decision: number;
                             unsupported: number;
+                        };
+                        jobs?: {
+                            /** @description Last scheduler tick failure the gateway recorded, or null */
+                            last_tick_error: {
+                                message: string;
+                                /** Format: date-time */
+                                at: string;
+                            } | null;
                         };
                     };
                 };

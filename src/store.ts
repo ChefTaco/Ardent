@@ -348,6 +348,13 @@ export class TaskStore {
     const row = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
     return row ? TaskSchema.parse(row) : undefined;
   }
+  /** Tasks by state: every task in the journal, not a page of them. */
+  taskCounts(): { total: number; by_state: Record<string, number> } {
+    const rows = z.array(z.object({ state: z.string(), count: z.number().int() })).parse(this.db.prepare('SELECT state,count(*) AS count FROM tasks GROUP BY state').all());
+    return { total: rows.reduce((sum, row) => sum + row.count, 0), by_state: Object.fromEntries(rows.map(row => [row.state, row.count])) };
+  }
+  /** The last scheduler tick failure the gateway recorded (cursor `jobs:last_error`), with when it happened. */
+  jobTickError(): JobTickError | null { return readJobTickError(this.db); }
   list(limit = 50): Task[] {
     return this.db.prepare('SELECT * FROM tasks ORDER BY created_ms DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))).map(row => TaskSchema.parse(row));
   }
@@ -410,4 +417,15 @@ export class TaskStore {
     return { queued: this.db.prepare("SELECT * FROM tasks WHERE state='queued' ORDER BY created_ms").all().map(row => TaskSchema.parse(row)), interrupted,
       resumed: planned.resumed, held: planned.held };
   }
+}
+
+export const JOB_TICK_ERROR_CURSOR = 'jobs:last_error';
+export type JobTickError = { message: string; at: string };
+/** Read the recorded job tick failure from an open journal; works on a read-only connection. */
+export function readJobTickError(db: Database): JobTickError | null {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_cursors'").get();
+  const row = table ? db.prepare('SELECT value,updated_ms FROM channel_cursors WHERE key=?').get(JOB_TICK_ERROR_CURSOR) : undefined;
+  if (!row) return null;
+  const parsed = z.object({ value: z.string(), updated_ms: z.number().int() }).parse(row);
+  return { message: parsed.value, at: new Date(parsed.updated_ms).toISOString() };
 }

@@ -107,11 +107,20 @@ try {
   assert.equal(soul, await readFile(join(profile, 'SOUL.md'), 'utf8'));
   const development = JSON.parse(await command('development', 'list', '--limit', '10'));
   assert(Array.isArray(development.records) && development.next === null);
+  assert.equal(JSON.parse(await command('doctor')).last_job_tick_error, null);
   const invalid = String(doc).replace('schema_version: 1', 'schema_version: 2');
   await writeFile(join(profile, 'config.yaml'), invalid, { mode: 0o600 });
   await assert.rejects(command('config', 'validate'));
   assert((await readFile(join(profile, 'config.yaml'), 'utf8')).includes('schema_version: 2'));
-  process.stdout.write(JSON.stringify({ cliProcess: true, profileComments: true, privateToken: true, invalidConfigRejected: true, researchSearchAndExtraction: true, exactArtifact: true, followupHistory: true, missionCli: true, previewCli: true, developmentCli: true, modelCalls: calls }) + '\n');
+  // The journal inspector is read-only and does not depend on a loadable configuration.
+  const journalFiles = async () => Promise.all(['', '-wal', '-shm'].map(suffix => readFile(join(profile, 'state', `ardent.sqlite${suffix}`)).then(bytes => createHash('sha256').update(bytes).digest('hex'), () => null)));
+  const journalBefore = await journalFiles();
+  const journal = JSON.parse(await command('journal', 'status', '--json'));
+  assert.deepEqual(await journalFiles(), journalBefore);
+  assert.equal(journal.policy_version, 1);
+  assert.equal(journal.idle, true, JSON.stringify(journal.tables.filter(table => table.active || table.unknown || table.unsupported)));
+  assert(journal.tables.some(table => table.name === 'tasks' && table.kind === 'state'));
+  process.stdout.write(JSON.stringify({ cliProcess: true, profileComments: true, privateToken: true, invalidConfigRejected: true, researchSearchAndExtraction: true, exactArtifact: true, followupHistory: true, missionCli: true, previewCli: true, developmentCli: true, journalIdle: true, modelCalls: calls }) + '\n');
 } finally {
   fixture.closeAllConnections();
   await new Promise((resolve, reject) => fixture.close(error => error ? reject(error) : resolve()));

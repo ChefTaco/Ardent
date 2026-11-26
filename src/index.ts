@@ -12,3 +12,4 @@ export { JobEngine, validateJobDefinitions, type JobContext, type JobDefinition,
 export { definePlugin, registerPlugin, registeredPlugins, clearRegisteredPlugins, loadPlugins, type ArdentPlugin, type ArdentPluginContext, type ArdentCliCommand, type ArdentCliInvocation, type ArdentPluginFactory, type ArdentPluginFactoryContext, type ArdentTaskPluginContext,
   type ArdentChannelMessage, type ArdentChannelDelivery, type ArdentDeliveryOutcome, type ArdentToolCall, type ArdentToolDenial, type ArdentToolCancellation } from './plugins.js';
 export type { TeamEnvelope, TeamMission, TeamResult } from './team-contract.js';
+export { inspectJournal, inspectJournalFile, journalPolicy, JOURNAL_POLICY_VERSION, JOURNAL_TABLES, type JournalStatus, type JournalTableStatus, type JournalTableRule } from './journal.js';
