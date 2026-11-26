@@ -236,7 +236,7 @@ Task concurrency and tool concurrency are separate settings:
 
 | Key | Default | Notes |
 |---|---|---|
-| `execution.max_parallel_tasks` | `3` | Tasks running at once, 1-16. The runtime runs at most 4. |
+| `execution.max_parallel_tasks` | `3` | Tasks running at once, 1-16. |
 | `execution.max_parallel_tool_calls` | `4` | Tool calls from one model turn in flight at once, 1-16. |
 | `execution.max_parallel_tools` | none | Deprecated. Despite its name it limits tasks. It is used only when `max_parallel_tasks` is absent, and `ardent config validate` and `ardent doctor` then report the notice `execution.max_parallel_tools is deprecated: it limits tasks; set max_parallel_tasks`. A notice never makes the profile unready. |
 
@@ -376,6 +376,7 @@ a2a:
   listen_port: 9900                      # gRPC listens on listen_port + 1
   peers_file: peers.yaml
   skill: { id: research, name: Research, description: Sourced answers, tags: [research] }
+  provider: { organization: Example Org, url: https://agents.example.com }   # Agent Card provider; default Ardent
   hermes_compat: false
   rate_limit:                            # all optional; these are the defaults
     enabled: true

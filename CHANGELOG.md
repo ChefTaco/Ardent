@@ -8,6 +8,12 @@
 - Management request bodies are limited to 1 MiB (`413 BODY_TOO_LARGE`), as plugin `httpRoutes` already were; plugin `routes` under `/api/v1/plugins/<name>/` now have the same limit.
 - An error's HTTP status now comes from its type, not its message. Some answers change: an internal error whose message happened to contain words such as "missing", "invalid" or "timeout" is a `500 INTERNAL_ERROR` (it was 400 or 503); a peer that is not configured is `404` (it was 500); a fenced or draining profile is `503 NOT_ACCEPTING_WORK` (it was 500); a validation message without those words, a session opened for another context and a duplicate peer ID are `400` (they were 500); a HiveMem URL that is not valid is `503` (it was 400). Plugin route errors without a type keep the old classification.
 - `GET /api/v1/providers` reports `codex.auth_mode: not_selected` for a llama.cpp profile instead of starting a Codex App Server on every call; pass `?probe=codex` for the previous answer.
+- `execution.max_parallel_tasks` (and the deprecated `max_parallel_tools`) is no longer capped at 4: a profile that sets 5 to 16 now runs that many tasks at once. Set 4 to keep the previous concurrency.
+- The Agent Card `provider` is `{ organization: 'Ardent', url: 'https://github.com/ChefTaco/Ardent' }` unless `a2a.provider` sets it; it was always Magnus. A Magnus-managed profile that should name Magnus sets `a2a.provider`.
+
+### Added
+
+- `a2a.provider: { organization, url }` sets the Agent Card provider.
 
 ### Added
 
@@ -20,6 +26,10 @@
 - Typed management API errors (`src/errors.ts`, HiveCommon `HiveError`): every core route maps statuses explicitly; dependency probes (providers, channels, peers, HiveMem search) answer `503 DEPENDENCY_UNAVAILABLE` with the probe's message. `@hivemagnus/ardent/plugin-sdk` exports `HiveError`, `ErrorCode`, `invalidRequest`, `notFound`, `conflict`, `dependencyUnavailable` and `notAcceptingWork` for plugin routes; `RecoveryConflictError` is a `HiveError` (409).
 - `/health/live` and `/health/ready` use `@hivemagnus/hive-common/health`: their bodies add `service`, `version`, `time` and (readiness) `checks`, the shape of the other suite services. Readiness keeps `problems` and its `degraded` status on 503.
 - Readiness and `GET /api/v1/providers` share one Codex account probe, cached for 30 seconds.
+
+### Fixed
+
+- `execution.max_parallel_tasks` is honoured as validated (1-16); the runtime silently ran at most 4.
 
 ## 3.3.0 - 2026-11-26
 

@@ -60,7 +60,7 @@ export const ConfigSchema = z.object({
   timezone: ianaTimezone.default(systemTimezone),
   identity: z.object({ soul_file: z.string().regex(pathName).default('SOUL.md'), identity_file: z.string().regex(pathName).default('IDENTITY.md') }).strict().default({ soul_file: 'SOUL.md', identity_file: 'IDENTITY.md' }),
   execution: z.object({ backend: z.enum(['llamacpp', 'codex']), max_model_steps: z.number().int().min(1).max(200), max_tool_calls: z.number().int().min(0).max(500),
-    /** Tasks running at once (the runtime caps it at 4). */
+    /** Tasks running at once. */
     max_parallel_tasks: z.number().int().min(1).max(16).optional(),
     /** Parallel-eligible tool calls in flight at once within one model turn. */
     max_parallel_tool_calls: z.number().int().min(1).max(16).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS),
@@ -83,6 +83,8 @@ export const ConfigSchema = z.object({
     hermes_compat: z.boolean().default(false),
     /** Request and task limits. `trusted_proxies` lists the reverse proxies whose X-Forwarded-For is believed; by default none is. */
     rate_limit: z.object({ enabled: z.boolean().default(true), ip_requests_per_minute: z.number().int().min(1).max(1_000_000).default(600), ip_burst: z.number().int().min(1).max(1_000_000).default(120), peer_requests_per_minute: z.number().int().min(1).max(1_000_000).default(300), peer_burst: z.number().int().min(1).max(1_000_000).default(60), max_concurrent_tasks_per_peer: z.number().int().min(1).max(100_000).default(16), trusted_proxies: z.array(z.string().min(1).max(64)).max(64).default([]) }).strict().default(a2aRateLimitDefault),
+    /** Agent Card provider: the organization that runs this agent. Defaults to Ardent and its repository. */
+    provider: z.object({ organization: z.string().trim().min(1).max(100), url: z.string().url().max(500).refine(value => /^https?:\/\//.test(value), 'must be an http(s) URL') }).strict().optional(),
     /** Agent Card skill advertised to peers. */
     skill: z.object({ id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().min(1).max(100), description: z.string().min(1).max(500), tags: z.array(z.string().min(1).max(40)).max(10).default([]), example: z.string().min(1).max(300).optional() }).strict().optional() }).strict().default(a2aDefault),
   channels: z.object({ telegram: TelegramChannel.default(TelegramChannel.parse({})), mattermost: MattermostChannel.default(MattermostChannel.parse({})) }).strict().default({ telegram: TelegramChannel.parse({}), mattermost: MattermostChannel.parse({}) }),
@@ -139,7 +141,7 @@ export function resolveReference(value: string, env: NodeJS.ProcessEnv = process
   return env[match[1] ?? ''];
 }
 
-/** The configured task concurrency, before the runtime's cap of 4. */
+/** The configured task concurrency: how many tasks the runtime runs at once. */
 export function maxParallelTasks(config: ArdentConfig): number {
   return config.execution.max_parallel_tasks ?? config.execution.max_parallel_tools ?? DEFAULT_MAX_PARALLEL_TASKS;
 }

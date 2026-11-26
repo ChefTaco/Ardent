@@ -360,8 +360,10 @@ describe('A2A server transport', () => {
       expect('id' in outbound && outbound.status?.state).toBe(A2ATaskState.TASK_STATE_COMPLETED);
       const extendedCard = await new ArdentA2AClient(dir, config, env).extendedCard('coordinator');
       expect(extendedCard.skills.some(skill => skill.id === 'assistant-team-result')).toBe(true);
-      const publicCard = await (await fetch(`http://127.0.0.1:${address.port}/.well-known/agent-card.json`, { headers: { 'A2A-Version': '1.0' } })).json() as { skills?: { id?: string }[]; capabilities?: { extendedAgentCard?: boolean } };
+      const publicCard = await (await fetch(`http://127.0.0.1:${address.port}/.well-known/agent-card.json`, { headers: { 'A2A-Version': '1.0' } })).json() as { skills?: { id?: string }[]; capabilities?: { extendedAgentCard?: boolean }; provider?: unknown };
       expect(publicCard.capabilities?.extendedAgentCard).toBe(true);
+      // Without a2a.provider the card names Ardent, not Magnus.
+      expect(publicCard.provider).toEqual({ organization: 'Ardent', url: 'https://github.com/ChefTaco/Ardent' });
       expect(publicCard.skills?.some(skill => skill.id === 'assistant-team-result')).toBe(false);
       const anonymousCard = await fetch(`http://127.0.0.1:${address.port}/a2a/rest/extendedAgentCard`, { headers: { 'A2A-Version': '1.0' } });
       expect(anonymousCard.status).toBe(401);
