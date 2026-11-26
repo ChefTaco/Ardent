@@ -35,6 +35,7 @@ import { acceptMission, contextItemMessages, missionEnvelope, missionRecord, mis
 import { compactToolArguments } from './tool-arguments.js';
 import { buildTaskExecution, executionInstance, taskRef, TaskPropagation, type ExecutionAcceptance, type ExecutionContext } from './execution.js';
 import { ErrorCode, HiveError, invalidRequest, notAcceptingWork, notFound } from './errors.js';
+import { silentLogger, type Logger } from './log.js';
 
 /** A finished task. A mission also carries its validated TeamResult, which is the task's stored result. */
 export type RunResult = { task: Task; answer: string; brief?: ResearchBrief; team_result?: TeamResult };
@@ -115,6 +116,12 @@ export class ArdentRuntime {
   #pluginsStarted = false;
   readonly #taskContexts = new Map<string, ArdentTaskPluginContext>();
   readonly #settledListeners = new Set<(taskId: string) => void>();
+  /**
+   * Operational log lines of this runtime and the components it owns (channels,
+   * A2A push, plugin hooks). Silent unless the host sets one; the gateway sets
+   * `ardentLogger({ requestContext: false })`.
+   */
+  logger: Logger = silentLogger;
   #pluginEnvironment: NodeJS.ProcessEnv = {};
   #closing = false;
   #closed = false;
@@ -262,7 +269,21 @@ export class ArdentRuntime {
     return () => { this.#settledListeners.delete(listener); };
   }
   #notifySettled(taskId: string): void {
+    this.#logSettled(taskId);
     for (const listener of [...this.#settledListeners]) { try { listener(taskId); } catch { /* a listener failure never affects the task */ } }
+  }
+  #logSettled(taskId: string): void {
+    try {
+      const task = this.store.get(taskId);
+      if (!task) return;
+      const execution = this.store.executions.get(taskId);
+      const requestId = execution?.context.request_id;
+      const traceId = execution?.traceparent.split('-')[1];
+      const fields = { task_id: task.id, state: task.state, caller: task.caller, context: task.context, backend: task.backend, duration_ms: task.updated_ms - task.created_ms,
+        ...(requestId ? { request_id: requestId } : {}), ...(traceId ? { trace_id: traceId } : {}),
+        ...(task.error ? { error: task.error.slice(0, 300) } : {}) };
+      if (['failed', 'unknown'].includes(task.state)) this.logger.warn('Task settled', fields); else this.logger.info('Task settled', fields);
+    } catch { /* logging never affects the task */ }
   }
   /** The recovery object (C3) of a task interrupted by a crash or restart; undefined for one never interrupted. */
   recoveryFor(taskId: string): RecoveryView | undefined {
@@ -711,6 +732,7 @@ export class ArdentRuntime {
       /** Journal a scheduler event with its boundary write, in one transaction. */
       const journal = (kind: string, detail: unknown, boundary?: ToolBoundary) => this.store.db.transaction(() => {
         this.store.append(task.id, kind, detail);
+        if (kind === 'plugin_hook_failed' || kind === 'tool_denied_by_plugin') this.logger.warn(kind === 'plugin_hook_failed' ? 'Plugin hook failed' : 'Plugin denied a tool call', { task_id: task.id, detail });
         if (!boundary) return;
         const row = { callId: boundary.call.id, attempt, step: backendName === 'llamacpp' ? currentStep : null, name: boundary.call.name, effect: boundary.effect ?? 'read',
           fullArgs: boundary.call.arguments, compactArgs: compactToolArguments(boundary.call.name, boundary.call.arguments), idempotencyKey: boundary.idempotencyKey };

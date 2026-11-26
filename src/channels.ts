@@ -63,8 +63,10 @@ export class ChannelCore {
   #pluginContext(): ArdentPluginContext { return pluginContext(this.runtime, this.env); }
 
   #hookFailure(event: ChannelEvent, taskId: string | null): PluginHookFailureSink {
-    return (plugin, hook) => this.runtime.store.recordPluginHookFailure(plugin, hook,
-      taskId ? { taskId } : { platform: event.platform, account: event.account, updateId: event.update_id });
+    return (plugin, hook) => {
+      this.runtime.logger.warn('Plugin hook failed', { plugin, hook, platform: event.platform, ...(taskId ? { task_id: taskId } : { update_id: event.update_id }) });
+      this.runtime.store.recordPluginHookFailure(plugin, hook, taskId ? { taskId } : { platform: event.platform, account: event.account, updateId: event.update_id });
+    };
   }
 
   async #send(event: ChannelEvent, reply: ChannelReply, deliver: ChannelDelivery, duplicate: boolean): Promise<{ duplicate: boolean; taskId: string | null; delivery: string | null }> {

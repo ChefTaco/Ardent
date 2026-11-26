@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type Database from './sqlite.js';
 import { z } from 'zod';
 import { backoffDelay, type RetryPolicy } from '@hivemagnus/hive-common/retry';
+import { silentLogger, type Logger } from './log.js';
 
 const identifier = z.string().regex(/^[a-z][a-z0-9._-]{0,79}$/);
 const jobId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/);
@@ -143,6 +144,8 @@ export function validateJobDefinitions(raw: unknown, registry: JobRegistry, expe
 
 /** A profile-local SQLite scheduler. No work is admitted without a fresh ownership check. */
 export class JobEngine {
+  /** Where failed, unknown and retried job windows are logged; the gateway sets it. */
+  logger: Logger = silentLogger;
   #lastValidationError: string | null = null;
   #lastActive: { revision: number; sha256: string } | null = null;
   #busy = false;
@@ -392,6 +395,7 @@ export class JobEngine {
                 settledMs, window.window_key);
           })();
           if (state === 'completed') completed++; else if (state === 'retry') retry++; else if (state === 'unknown') unknown++;
+          if (state !== 'completed') this.logger[state === 'retry' ? 'info' : 'warn'](`Job window ${state}`, { job_id: job.id, window_key: window.window_key, attempt });
         }
       }
       return { scanned, claimed, completed, retry, unknown };

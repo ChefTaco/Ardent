@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { readBearerToken } from '@hivemagnus/hive-common/secrets';
 import { liveness, readiness, type HealthCheck } from '@hivemagnus/hive-common/health';
+import { requestContext } from '@hivemagnus/hive-common/hono';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
 import { ardentLogger, type Logger } from './log.js';
@@ -278,6 +279,9 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const code = typed instanceof TaskTerminalError ? ErrorCode.conflict : typed.code;
     return new Response(JSON.stringify({ error: { code, message: typed.message.slice(0, 500) } }), { status: typed.status, headers: { ...typed.headers, 'Content-Type': 'application/json' } });
   });
+  // Every request runs in a HiveCommon request context: x-request-id is accepted or generated and
+  // echoed, traceparent is continued, and the API's log lines carry requestId and traceId.
+  app.use('*', requestContext());
   const health = { service: 'ardent', version: ARDENT_VERSION } as const;
   app.get('/health/live', c => c.json(liveness(health).body));
   app.get('/health/ready', async c => {

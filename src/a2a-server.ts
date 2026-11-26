@@ -94,7 +94,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     documentationUrl: '', signatures: []
   };
   const pushStore = new SqliteA2APushStore(runtime.store.db, peers);
-  const pushSender = new SafeA2APushSender(pushStore);
+  const pushSender = new SafeA2APushSender(pushStore, undefined, runtime.logger);
   const pushInbox = new A2APushInbox(runtime.store.db, peers, publicAddress);
   const artifactTransfers = new TeamArtifacts(runtime, config, env);
   const taskStore = new SqliteA2ATaskStore(runtime.store.db);
