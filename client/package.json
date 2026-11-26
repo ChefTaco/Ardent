@@ -1,6 +1,6 @@
 {
   "name": "@hivemagnus/ardent-client",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Typed client for the Ardent management API: tasks, live streams, recovery, lineage and resumable artifact downloads, direct or through Magnus",
   "keywords": [
     "ardent",

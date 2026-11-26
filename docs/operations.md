@@ -85,7 +85,7 @@ It fails if the files change during inspection, which means a gateway is
 writing. It prints:
 
 ```json
-{ "ardent_version": "3.4.0", "profile": "assistant", "policy_version": 1,
+{ "ardent_version": "3.5.0", "profile": "assistant", "policy_version": 1,
   "idle": true, "active": 0, "unknown": 0, "unsupported": 0,
   "tables": [{ "name": "tasks", "kind": "state", "active": 0, "unknown": 0, "unsupported": 0 }] }
 ```
