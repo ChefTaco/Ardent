@@ -143,6 +143,9 @@ jobs:
           done
           node -e "const fs=require('fs');const v=require('./node_modules/@hivemagnus/ardent/package.json').version;const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.devDependencies['@hivemagnus/ardent']=v;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
           npm run build -w @hivemagnus/magnus-contracts
+          # The agent's built journal module (dist/native-snapshot/journal.js) wraps this Ardent build;
+          # Magnus's native-snapshot tests import it, as in Magnus CI.
+          npm run build -w @hivemagnus/magnus-agent
       - name: Native snapshot and runtime contract tests
         working-directory: magnus/packages/agent
         run: npx vitest run src/native-snapshot src/executors/ardent-runtime-contracts.test.ts
