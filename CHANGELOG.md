@@ -55,6 +55,12 @@
 
 ### Fixed
 
+- Journal quiescence: a bound outbound A2A call (the peer accepted it; only its push callbacks remain) is finished, so a push-enabled profile can be idle; a `ready` or `reconciling` recovery row counts as active only while its task is running.
+- Mattermost history seeded on a channel's first sight is recorded as unanswered (`skipped_stale`) instead of admitted work, so every Mattermost profile no longer carries permanently active `channel_inbound` rows. Rows an earlier release seeded (Mattermost, no channel type, no task, no delivery) are migrated when the store opens and are not counted before that; the admission fence's `inbound_unbound` count excludes them too. `JOURNAL_POLICY_VERSION` stays 1.
+- A successful job engine tick clears the recorded tick failure (`last_tick_error` showed a failure long after the scheduler recovered).
+- Credential reload no longer replaces a token the service environment set (it wins over the profile environment file at startup): the management reload answers 409, and the peer reload leaves those variables alone and lists them in `service_environment`.
+- Mattermost catch-up metrics carry an `account` label, so two bots in one channel no longer produce duplicate series.
+- The bundled profile template no longer says the runtime runs at most 4 tasks; the README documents that an extension's own journal tables make a profile report `unsupported`, and `inspectJournal` documents that it does not check the gateway lock.
 - `execution.max_parallel_tasks` is honoured as validated (1-16); the runtime silently ran at most 4.
 - `execution.max_parallel_tasks` is honoured as validated (1-16); the runtime silently ran at most 4.
 

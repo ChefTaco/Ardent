@@ -203,6 +203,11 @@ writing. It prints:
 whether a gateway is running: check that the service is stopped separately.
 An integrity or foreign-key check failure is an error, not a count.
 
+A plugin or extension that creates its own tables in the journal makes the
+profile report `unsupported` for each of them, so it is never idle: Ardent
+cannot tell whether such a table holds work. Keep extension state outside
+`state/ardent.sqlite`, or have the backup tool treat that profile as busy.
+
 The same inspector is a library entry point that loads no runtime, store,
 plugin or job handler:
 
@@ -563,7 +568,7 @@ format: `ardent_build_info`, `ardent_tasks{state}`,
 `ardent_recovery_tasks{status}`, `ardent_job_windows{state}`,
 `ardent_channel_deliveries{state}`, `ardent_a2a_push_deliveries{state}`,
 `ardent_a2a_rate_limited_total{scope}` (A2A `429`s since the process started,
-by `ip`, `peer` or `tasks`), and per Mattermost channel
+by `ip`, `peer` or `tasks`), and per Mattermost bot `account` and `channel`
 `ardent_mattermost_catchup_boundary_age_seconds` (age of the newest post up to
 which every older post is settled), `ardent_mattermost_catchup_walk_age_seconds`
 and `ardent_mattermost_catchup_gaps`. Gauges are read from the journal when

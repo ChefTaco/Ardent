@@ -91,10 +91,10 @@ export function renderMetrics(source: MetricsSource): string {
   const boundaries = new Map((tables.has('channel_cursors') ? z.array(z.object({ key: z.string(), value: z.string() })).parse(db.prepare("SELECT key,value FROM channel_cursors WHERE key LIKE 'mattermost:%:%:last_ms'").all()) : [])
     .map(row => [row.key.split(':').slice(1, 3).join(':'), Number(row.value)]));
   family('ardent_mattermost_catchup_boundary_age_seconds', 'gauge', 'Seconds since the newest Mattermost post up to which every older post is settled, per channel',
-    catchup.flatMap(item => { const at = boundaries.get(`${item.account}:${item.channel}`); return at && Number.isFinite(at) ? [{ labels: { channel: item.channel }, value: Math.max(0, (now - at) / 1000) }] : []; }));
+    catchup.flatMap(item => { const at = boundaries.get(`${item.account}:${item.channel}`); return at && Number.isFinite(at) ? [{ labels: { account: item.account, channel: item.channel }, value: Math.max(0, (now - at) / 1000) }] : []; }));
   family('ardent_mattermost_catchup_walk_age_seconds', 'gauge', 'Seconds since the last finished Mattermost catch-up walk, per channel',
-    catchup.flatMap(item => item.finished_ms === null ? [] : [{ labels: { channel: item.channel, state: item.state }, value: Math.max(0, (now - item.finished_ms) / 1000) }]));
-  family('ardent_mattermost_catchup_gaps', 'gauge', 'Recorded Mattermost history gaps catch-up could not walk, per channel', catchup.map(item => ({ labels: { channel: item.channel }, value: item.gaps })));
+    catchup.flatMap(item => item.finished_ms === null ? [] : [{ labels: { account: item.account, channel: item.channel, state: item.state }, value: Math.max(0, (now - item.finished_ms) / 1000) }]));
+  family('ardent_mattermost_catchup_gaps', 'gauge', 'Recorded Mattermost history gaps catch-up could not walk, per channel', catchup.map(item => ({ labels: { account: item.account, channel: item.channel }, value: item.gaps })));
 
   lines.push('# EOF');
   return `${lines.join('\n')}\n`;

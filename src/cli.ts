@@ -485,7 +485,7 @@ async function main(): Promise<void> {
         const artifactTransfers = new ArtifactTransfers(runtime, env);
         let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
         const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger,
-          peerAuthenticator: () => a2aSurface?.peerAuthenticator });
+          peerAuthenticator: () => a2aSurface?.peerAuthenticator, serviceEnv: new Set(Object.keys(process.env)) });
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
         // Imports a previous process left unfinished resume from their retained bytes.
@@ -504,6 +504,8 @@ async function main(): Promise<void> {
           if (jobEngine) {
             const tickJobs = () => {
               const operation = jobEngine.tick(new Date(), deliveryAbort.signal, channelAbort.signal)
+                // A successful tick clears the reported failure, so status shows only a current one.
+                .then(() => { runtime?.store.clearJobTickError(); })
                 .catch((error: unknown) => {
                   // Reported by /api/v1/status, /api/v1/jobs/definitions/status and `ardent doctor`.
                   runtime?.store.setCursor(JOB_TICK_ERROR_CURSOR, error instanceof Error ? error.message.slice(0, 500) : 'unknown');

@@ -78,7 +78,7 @@ describe('A2A peer credential rotation', () => {
     await writeEnv('COORDINATOR_IN=fixture-inbound-token-2\nCOORDINATOR_OUT=fixture-outbound-token-2\n');
     const response = await call('/api/v1/credentials/peers/reload', OLD, post({ overlap_seconds: 30 }));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ reloaded: true, peers: 1, changed: ['coordinator'], previous_valid_until: new Date(now + 30_000).toISOString() });
+    expect(await response.json()).toEqual({ reloaded: true, peers: 1, changed: ['coordinator'], service_environment: [], previous_valid_until: new Date(now + 30_000).toISOString() });
     expect(env.COORDINATOR_OUT).toBe('fixture-outbound-token-2');
     expect(auth.authenticate('Bearer fixture-inbound-token-2')).toBe('coordinator');
     expect(auth.authenticate('Bearer fixture-inbound-token-1')).toBe('coordinator');
