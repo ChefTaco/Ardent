@@ -38,6 +38,7 @@
 
 ### Changed
 
+- The README is split: configuration, management API, missions and artifacts, execution recovery, plugins and operations are guides in `docs/`; the README keeps the overview, installation, security model and development notes, and links each guide.
 - `@hivemagnus/emberfold` 0.4.0 (was 0.1.0). Ardent uses only its `compat` context fitting, which is unchanged in behaviour (the `fitContext` tool-result truncation fix in 0.4.0 is in a path Ardent does not call).
 - The native image no longer installs python3, make and g++ or runs `npm rebuild better-sqlite3` (better-sqlite3 is not installed; `@photostructure/sqlite` ships prebuilt binaries). Its final stage executes the SQLite addon and the CLI before the image is accepted.
 - CI builds and smoke-tests the native image (version, journal policy, no package manager, non-root user) and scans it with Trivy for HIGH and CRITICAL findings that have a published fix. A new job runs Magnus main's native-snapshot and Ardent runtime contract tests against the PR build, and reports (without failing) when Magnus's generated Ardent API types need regenerating.

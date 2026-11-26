@@ -19,6 +19,7 @@ Magnus monorepo. Preserve LICENSE, NOTICE, `protocol/LICENSE-A2A.txt` and
 | `client/` | npm workspace `@hivemagnus/ardent-client`: the browser-safe remote client (`src/`, types generated into `src/generated.ts`), its tests (`test/`) and `examples/cli.mjs` |
 | `profiles/assistant/` | Bundled template that `ardent init` copies (config, persona, `grounded-answers` skill) |
 | `openapi/ardent.json` | Pinned management OpenAPI document |
+| `docs/` | Guides: configuration, management API, missions and artifacts, recovery, plugins, operations (the README links them) |
 | `protocol/` | Vendored A2A protobuf and its lock (see `protocol/README.md`) |
 | `scripts/` | Release, privacy, secret-scan, protocol, OpenAPI, package and end-to-end checks |
 | `Dockerfile` | Native-export image that Magnus turns into a native suite artifact |
@@ -96,7 +97,7 @@ messages:
 
 `src/plugins.ts` is a public, semver-governed surface. Keep it small and
 typed. A new hook needs a test in `test/plugins.test.ts` and documentation in
-`README.md`. Plugin routes stay behind management-API authentication; plugin
+`docs/plugins.md`. Plugin routes stay behind management-API authentication; plugin
 tools stay subject to the same context and mission scoping as built-in tools.
 
 ## Management API and OpenAPI
