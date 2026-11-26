@@ -2,9 +2,18 @@
 
 ## Unreleased
 
+### Upgrade notes
+
+- Codex thread recovery is now on for Codex CLI 0.172.0: `codex-protocol.lock.json` sets `observed_cli_version` to 0.172.0 and `thread_resume_verified` and `thread_read_items_verified` to `true` after a live probe. A Codex task interrupted after its tool calls settled resumes its durable thread instead of restarting (no effectful tool dispatched) or being held (`CODEX_THREAD_NOT_VERIFIABLE`). A profile on another Codex CLI version keeps the previous outcome, now decided when the thread is resumed: the task restarts on a fresh thread when it dispatched no effectful tool, and is held otherwise, with a `codex_thread_unverified` event naming the version. Profiles that should not resume Codex threads set `providers.codex.durable_threads: false`.
+
+### Added
+
+- `scripts/probe-codex-thread-recovery.mjs`: an opt-in live probe (`ARDENT_CODEX_LIVE_PROBE=1`) of Codex thread recovery against the installed CLI and its signed-in account. It kills the App Server after a dynamic tool call, checks `thread/read` lists the call, resumes the thread through Ardent's recovery path and checks the history, then archives the probe thread. It prints protocol evidence only, never credentials or account details.
+
 ### Changed
 
 - CI: the Magnus downstream contract job builds Magnus's agent package before its native-snapshot tests, which now import the agent's built journal module.
+- `codex-protocol.lock.json` records the live thread recovery probe against Codex CLI 0.172.0 (`thread_recovery_probe`, passed 2026-11-26).
 
 ## 3.4.0 - 2026-11-26
 

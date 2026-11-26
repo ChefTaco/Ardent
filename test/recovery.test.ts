@@ -691,46 +691,65 @@ describe('execution recovery: Codex', () => {
     expect(state?.backend).toBe('codex');
   });
 
-  it('(a) resumes a verified durable thread without dispatching the settled write again', async () => {
+  // The fixture reports Codex CLI 0.157.1 unless ARDENT_FIXTURE_CODEX_VERSION says otherwise.
+  const lockedCli = { ARDENT_FIXTURE_CODEX_VERSION: CODEX_PROTOCOL_LOCK.observed_cli_version };
+  async function withLock(patch: Partial<typeof CODEX_PROTOCOL_LOCK>, body: () => Promise<void>): Promise<void> {
     const saved = { ...CODEX_PROTOCOL_LOCK };
-    Object.assign(CODEX_PROTOCOL_LOCK, { thread_resume_verified: true, thread_read_items_verified: true });
-    try {
-      const run = await codexRun('fixture_write', afterWriteReceipt);
-      expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'ready', reason: { code: 'CODEX_THREAD_RESUME' } });
-      expect(await run.restarted.resumeRecovered(run.env)).toEqual([run.task.id]);
-      expect(await settle(run.restarted, run.task.id)).toBe('completed');
-      expect(run.restarted.store.get(run.task.id)?.result).toBe('Sourced fixture answer');
-      expect(await writes(run.side)).toHaveLength(1);
-      expect(run.restarted.store.events(run.task.id, 0, 500).find(event => event.kind === 'execution_resumed')?.detail).toMatchObject({ mode: 'codex_thread', reused_calls: 1 });
-    } finally { Object.assign(CODEX_PROTOCOL_LOCK, saved); }
-  });
+    Object.assign(CODEX_PROTOCOL_LOCK, patch);
+    try { await body(); } finally { Object.assign(CODEX_PROTOCOL_LOCK, saved); }
+  }
 
-  it('(a) is held when thread/read lists a tool call without a settled invocation', async () => {
-    const saved = { ...CODEX_PROTOCOL_LOCK };
-    Object.assign(CODEX_PROTOCOL_LOCK, { thread_resume_verified: true, thread_read_items_verified: true });
-    try {
-      const run = await codexRun('fixture_write', afterWriteReceipt, { ARDENT_FIXTURE_THREAD_ITEMS: JSON.stringify(['call-1', 'call-9']) });
-      await run.restarted.resumeRecovered(run.env);
-      expect(await settle(run.restarted, run.task.id)).toBe('unknown');
-      expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'unsupported', reason: { code: 'CODEX_THREAD_NOT_VERIFIABLE' } });
-      expect(await writes(run.side)).toHaveLength(1);
-    } finally { Object.assign(CODEX_PROTOCOL_LOCK, saved); }
-  });
+  it('(a) resumes a verified durable thread without dispatching the settled write again', () => withLock({ thread_resume_verified: true, thread_read_items_verified: true }, async () => {
+    const run = await codexRun('fixture_write', afterWriteReceipt, lockedCli);
+    expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'ready', reason: { code: 'CODEX_THREAD_RESUME' } });
+    expect(await run.restarted.resumeRecovered(run.env)).toEqual([run.task.id]);
+    expect(await settle(run.restarted, run.task.id)).toBe('completed');
+    expect(run.restarted.store.get(run.task.id)?.result).toBe('Sourced fixture answer');
+    expect(await writes(run.side)).toHaveLength(1);
+    expect(run.restarted.store.events(run.task.id, 0, 500).find(event => event.kind === 'execution_resumed')?.detail).toMatchObject({ mode: 'codex_thread', reused_calls: 1 });
+  }));
 
-  it('(b) restarts on a fresh thread when no effectful tool was dispatched', async () => {
+  it('(a) is held when thread/read lists a tool call without a settled invocation', () => withLock({ thread_resume_verified: true, thread_read_items_verified: true }, async () => {
+    const run = await codexRun('fixture_write', afterWriteReceipt, { ...lockedCli, ARDENT_FIXTURE_THREAD_ITEMS: JSON.stringify(['call-1', 'call-9']) });
+    await run.restarted.resumeRecovered(run.env);
+    expect(await settle(run.restarted, run.task.id)).toBe('unknown');
+    expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'unsupported', reason: { code: 'CODEX_THREAD_NOT_VERIFIABLE' } });
+    expect(await writes(run.side)).toHaveLength(1);
+  }));
+
+  it('(b) restarts on a fresh thread when no effectful tool was dispatched', () => withLock({ thread_resume_verified: false }, async () => {
     const run = await codexRun('fixture_read', runtime => crashAfter(runtime, (kind, detail) => kind === 'tool_attempt' && detail.name === 'fixture_read'));
     expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'ready', reason: { code: 'CODEX_RESTART_NO_EFFECT' } });
     await run.restarted.resumeRecovered(run.env);
     expect(await settle(run.restarted, run.task.id)).toBe('completed');
     expect(run.restarted.store.events(run.task.id, 0, 500).find(event => event.kind === 'execution_resumed')?.detail).toMatchObject({ mode: 'restart' });
+  }));
+
+  it('(b) restarts on a fresh thread when the lock is verified for another CLI and no effectful tool was dispatched', async () => {
+    const run = await codexRun('fixture_read', runtime => crashAfter(runtime, (kind, detail) => kind === 'tool_attempt' && detail.name === 'fixture_read'), { ARDENT_FIXTURE_CODEX_VERSION: '0.1.0' });
+    expect(run.restarted.recoveryFor(run.task.id)).toMatchObject({ status: 'ready', reason: { code: 'CODEX_THREAD_RESUME' } });
+    await run.restarted.resumeRecovered(run.env);
+    expect(await settle(run.restarted, run.task.id)).toBe('completed');
+    expect(run.restarted.store.events(run.task.id, 0, 500).find(event => event.kind === 'codex_thread_unverified')?.detail)
+      .toMatchObject({ restart: true, reason: expect.stringContaining(`verified for Codex CLI ${CODEX_PROTOCOL_LOCK.observed_cli_version}, not the installed 0.1.0`) });
   });
 
-  it('(c) holds a task that dispatched an effectful tool when thread recovery is not verified for the installed CLI', async () => {
+  it('(c) holds a task that dispatched an effectful tool when thread recovery is not verified in the lock', () => withLock({ thread_resume_verified: false }, async () => {
     const run = await codexRun('fixture_write', afterWriteReceipt);
     expect(run.restarted.store.get(run.task.id)?.state).toBe('unknown');
     const recovery = run.restarted.recoveryFor(run.task.id);
     expect(recovery).toMatchObject({ status: 'unsupported', reason: { code: 'CODEX_THREAD_NOT_VERIFIABLE' }, actions: [] });
     expect(recovery?.reason.message).toContain('not verified in the Codex protocol lock');
+    expect(await writes(run.side)).toHaveLength(1);
+  }));
+
+  it('(c) holds a task that dispatched an effectful tool when the lock is verified for another CLI', async () => {
+    const run = await codexRun('fixture_write', afterWriteReceipt, { ARDENT_FIXTURE_CODEX_VERSION: '0.1.0' });
+    await run.restarted.resumeRecovered(run.env);
+    expect(await settle(run.restarted, run.task.id)).toBe('unknown');
+    const recovery = run.restarted.recoveryFor(run.task.id);
+    expect(recovery).toMatchObject({ status: 'unsupported', reason: { code: 'CODEX_THREAD_NOT_VERIFIABLE' } });
+    expect(recovery?.reason.message).toContain('not the installed 0.1.0');
     expect(await writes(run.side)).toHaveLength(1);
   });
 });
