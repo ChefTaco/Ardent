@@ -34,6 +34,21 @@ export type ArtifactImport = Json<'getArtifactImport'>;
 export type ArtifactImportRequest = Body<'importArtifact'>;
 export type ArtifactImportAccepted = Json<'importArtifact', 202>;
 export type OperationalStatus = Json<'getOperationalStatus'>;
+/** One page of tasks, newest first; `next` is the cursor of the following page, or null. */
+export type TaskPage = Json<'listTasks'>;
+export type TaskContext = NonNullable<NonNullable<operations['listTasks']['parameters']['query']>['context']>;
+/** A team mission submission body (`POST /api/v1/missions`). */
+export type MissionSubmitBody = Body<'submitMission'>;
+export type TeamMission = MissionSubmitBody['mission'];
+export type MissionContextItem = NonNullable<MissionSubmitBody['context_items']>[number];
+/** A preview submission body (`POST /api/v1/preview/tasks`). */
+export type PreviewSubmitBody = Body<'submitPreviewTask'>;
+export type PreviewOverrides = NonNullable<PreviewSubmitBody['overrides']>;
+/** One page of the agent's development history, oldest first. */
+export type DevelopmentPage = Json<'listDevelopment'>;
+export type DevelopmentRecord = DevelopmentPage['records'][number];
+/** An operator (or relayed agent) development note. */
+export type DevelopmentNote = Body<'addDevelopmentNote'>;
 
 /** Live reply text, which is not journaled: `text` is a snapshot of the step so far, `delta` an addition. */
 export interface TaskText {

@@ -9,7 +9,8 @@ import {
   UnsupportedCapabilityError, viaMagnus, type ArdentClient, type TaskEvent,
 } from '../src/index.js';
 import { run as runExample } from '../examples/cli.mjs';
-import { ardent, cleanup, fakeMagnus, faultyProxy, heldTask, TOKEN } from './fixtures.js';
+import { ardent, cleanup, fakeMagnus, faultyProxy, heldTask, plainArdent, TOKEN } from './fixtures.js';
+import { ARDENT_ROUTES, matchArdentRoute } from '../src/openapi.js';
 
 afterEach(cleanup);
 
@@ -340,4 +341,69 @@ describe('through Magnus', () => {
     expect(() => viaMagnus({ apiBase: 'ftp://example.com/api/magnus', nodeId: 'node-1', profile: 'assistant', getToken })).toThrow(/apiBase must be an absolute/);
     expect(() => viaMagnus({ apiBase: 'https://user:secret@example.com/api/magnus', nodeId: 'node-1', profile: 'assistant', getToken })).toThrow(/apiBase must not carry credentials/);
   }, 20_000);
+});
+
+const teamMission = () => ({ id: 'adventure-1', revision: 1, parent_task: null, constraints: ['Keep it short'], allowed_actions: ['observe', 'analyze'] as Array<'observe' | 'analyze'>,
+  resources: ['tool:development_note'], deadline: Math.floor(Date.now() / 1000) + 600, acceptance_criteria: ['A map exists'], expected_artifacts: [] });
+
+describe('missions, previews, development history and task pages', () => {
+  it('submits missions and previews, reads and writes development history, and pages through filtered tasks', async () => {
+    const server = await plainArdent();
+    const ardentClient = client(server.url);
+    const preview = await ardentClient.previews.submit({ prompt: 'Try this soul', overrides: { soul: 'Be brief.' }, idempotencyKey: 'preview-1' });
+    expect((await ardentClient.previews.submit({ prompt: 'Try this soul', overrides: { soul: 'Be brief.' }, idempotencyKey: 'preview-1' })).task_id).toBe(preview.task_id);
+    expect(await ardentClient.tasks.follow(preview.task_id)).toMatchObject({ context: 'preview', state: 'completed' });
+    const mission = await ardentClient.missions.submit({ objective: 'Draw the map', mission: teamMission(), labels: { project: 'p1' } });
+    expect((await ardentClient.tasks.get(mission.task_id)).context).toBe('mission');
+    const note = await ardentClient.development.note({ kind: 'lesson', title: 'Ask early', body: 'Clarify scope first.' });
+    expect(note).toMatchObject({ kind: 'lesson', author: 'operator' });
+    const history = await ardentClient.development.list({ kind: 'lesson' });
+    expect(history.records.map(record => record.id)).toContain(note.id);
+    expect(history.next).toBeNull();
+    for (let index = 0; index < 3; index += 1) await ardentClient.tasks.submit({ prompt: `Task ${index}` });
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await ardentClient.tasks.page({ limit: 2, ...(after ? { after } : {}) });
+      seen.push(...page.tasks.map(task => task.id));
+      if (!page.next) break;
+      after = page.next;
+    }
+    expect(new Set(seen).size).toBe(5);
+    expect((await ardentClient.tasks.list({ context: 'preview' })).map(task => task.id)).toEqual([preview.task_id]);
+    expect((await ardentClient.tasks.page({ state: ['completed'], since: new Date(Date.now() - 60_000) })).tasks.map(task => task.id)).toContain(preview.task_id);
+  }, 20_000);
+
+  it('goes through Magnus actions, and refuses task filters a Magnus would drop', async () => {
+    const server = await plainArdent();
+    const current = await fakeMagnus(server.url, { release: 'current' });
+    const viaCurrent = createArdentClient({ transport: viaMagnus({ baseUrl: current.url, nodeId: 'node-1', profile: 'assistant', getToken: () => 'magnus-fixture-token' }), retryPolicy: fast });
+    const preview = await viaCurrent.previews.submit({ prompt: 'Try it', idempotencyKey: 'not-a-uuid' });
+    expect(current.actions.at(-1)).toMatchObject({ action: 'preview-submit', body: { prompt: 'Try it' } });
+    expect((current.actions.at(-1)?.['body'] as { idempotency_key: string }).idempotency_key).toMatch(/^[0-9a-f-]{36}$/);
+    await viaCurrent.missions.submit({ objective: 'Draw the map', mission: teamMission() });
+    expect(current.actions.at(-1)).toMatchObject({ action: 'mission-submit', body: { objective: 'Draw the map' } });
+    const note = await viaCurrent.development.note({ kind: 'lesson', title: 'Through Magnus', body: 'It relays notes.' });
+    expect((await viaCurrent.development.list()).records.map(record => record.id)).toContain(note.id);
+    expect((await viaCurrent.tasks.page()).tasks.map(task => task.id)).toContain(preview.task_id);
+    await expect(viaCurrent.tasks.list({ state: 'completed' })).rejects.toBeInstanceOf(UnsupportedCapabilityError);
+    const next = await fakeMagnus(server.url, { release: 'next', capabilities: { studio: 4, recovery: 1, lineage: 1, artifact_transfer: 2, task_filters: 1 } });
+    const viaNext = createArdentClient({ transport: viaMagnus({ baseUrl: next.url, nodeId: 'node-1', profile: 'assistant', getToken: () => 'magnus-fixture-token' }), retryPolicy: fast });
+    expect((await viaNext.tasks.list({ context: 'preview' })).map(task => task.id)).toEqual([preview.task_id]);
+  }, 20_000);
+});
+
+describe('@hivemagnus/ardent-client/openapi', () => {
+  it('lists every management operation as a read or an action and matches request paths', () => {
+    expect(ARDENT_ROUTES.length).toBeGreaterThan(40);
+    expect(ARDENT_ROUTES.every(route => (route.method === 'GET') === (route.kind === 'read'))).toBe(true);
+    expect(ARDENT_ROUTES.some(route => route.path.startsWith('/a2a/'))).toBe(false);
+    expect(matchArdentRoute('get', '/api/v1/tasks/11111111-1111-4111-8111-111111111111/events')).toMatchObject({ operationId: 'getTaskEvents', kind: 'read', auth: 'bearer' });
+    expect(matchArdentRoute('GET', '/api/v1/tasks/11111111-1111-4111-8111-111111111111/stream')).toMatchObject({ stream: true });
+    expect(matchArdentRoute('POST', '/api/v1/missions')).toMatchObject({ operationId: 'submitMission', kind: 'action' });
+    // A literal segment wins over a parameter, as the server routes it.
+    expect(matchArdentRoute('GET', '/api/v1/artifacts/imports')?.operationId).toBe('listArtifactImports');
+    expect(matchArdentRoute('GET', '/health/ready')).toMatchObject({ auth: 'none' });
+    expect(matchArdentRoute('DELETE', '/api/v1/tasks')).toBeUndefined();
+  });
 });

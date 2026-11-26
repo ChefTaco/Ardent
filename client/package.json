@@ -29,6 +29,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./openapi": {
+      "types": "./dist/openapi.d.ts",
+      "default": "./dist/openapi.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {

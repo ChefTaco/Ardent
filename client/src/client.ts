@@ -4,11 +4,12 @@ import type { RetryPolicy } from '@hivemagnus/hive-common/retry';
 import { Connection, type ArdentTransport } from './transport.js';
 import { followTask, type FollowOptions } from './follow.js';
 import { downloadArtifact, type ArtifactDownload, type DownloadOptions } from './download.js';
-import { NotFoundError } from './errors.js';
+import { NotFoundError, UnsupportedCapabilityError } from './errors.js';
 import { uuidFromKey } from './sha256.js';
 import type {
-  ArtifactImport, ArtifactImportAccepted, ArtifactImportRequest, ArtifactRecord, ArtifactRecordV2, ArtifactRendition, Lineage, OperationalStatus,
-  Recovery, RecoveryAction, Session, SessionContext, SessionMessage, Task, TaskAccepted, TaskAdmission, TaskEvent,
+  ArtifactImport, ArtifactImportAccepted, ArtifactImportRequest, ArtifactRecord, ArtifactRecordV2, ArtifactRendition, DevelopmentNote, DevelopmentPage,
+  DevelopmentRecord, Lineage, MissionContextItem, OperationalStatus, PreviewOverrides, Recovery, RecoveryAction, Session, SessionContext, SessionMessage, Task,
+  TaskAccepted, TaskAdmission, TaskContext, TaskEvent, TaskPage, TaskState, TeamMission,
 } from './types.js';
 
 export interface ArdentClientOptions {
@@ -34,6 +35,43 @@ export interface SubmitInput {
   readonly idempotencyKey?: string;
   readonly sessionId?: string;
   /** Overrides the client's execution context for this task. */
+  readonly execution?: ExecutionContext;
+  readonly signal?: AbortSignal;
+}
+
+/** Filters of `tasks.list` and `tasks.page`; they combine. Ardent 3.4 or later (through Magnus: when it advertises `task_filters`). */
+export interface TaskFilter {
+  /** One state or several. */
+  readonly state?: TaskState | readonly TaskState[];
+  readonly context?: TaskContext;
+  /** The exact caller, for example `management` or a peer ID. */
+  readonly caller?: string;
+  /** Tasks created at or after this time (epoch milliseconds, a Date or ISO 8601). */
+  readonly since?: number | Date | string;
+  /** Tasks created before this time. */
+  readonly until?: number | Date | string;
+}
+
+export interface MissionInput {
+  readonly objective: string;
+  readonly mission: TeamMission;
+  readonly contextItems?: readonly MissionContextItem[];
+  readonly labels?: Readonly<Record<string, string>>;
+  /** A session opened with context `mission`. */
+  readonly sessionId?: string;
+  /** Makes the submission safe to repeat; one is generated when omitted (a UUID through Magnus, as for `tasks.submit`). */
+  readonly idempotencyKey?: string;
+  readonly execution?: ExecutionContext;
+  readonly signal?: AbortSignal;
+}
+
+export interface PreviewInput {
+  readonly prompt: string;
+  /** Unsaved soul, identity, skill selection or model to try. */
+  readonly overrides?: PreviewOverrides;
+  /** A session opened with context `preview`. */
+  readonly sessionId?: string;
+  readonly idempotencyKey?: string;
   readonly execution?: ExecutionContext;
   readonly signal?: AbortSignal;
 }
@@ -77,13 +115,30 @@ export interface ArdentClient {
   readonly tasks: {
     submit(input: SubmitInput): Promise<TaskAccepted>;
     get(id: string, options?: CallOptions): Promise<Task>;
-    list(options?: CallOptions & { readonly limit?: number }): Promise<Task[]>;
+    /** The newest tasks, at most `limit` (default 50, at most 100). */
+    list(options?: CallOptions & TaskFilter & { readonly limit?: number }): Promise<Task[]>;
+    /** One page of tasks, newest first. Pass `next` as `after` for the following page; it is null on the last one. */
+    page(options?: CallOptions & TaskFilter & { readonly limit?: number; readonly after?: string }): Promise<TaskPage>;
     events(id: string, options?: CallOptions & { readonly after?: number }): Promise<TaskEvent[]>;
     cancel(id: string, options?: CallOptions): Promise<Task>;
     pause(id: string, options?: CallOptions): Promise<TaskAdmission>;
     resume(id: string, options?: CallOptions): Promise<TaskAdmission>;
     /** Follow the task's events until it finishes, across the 60 s stream rotation and dropped connections, and return the final task. */
     follow(id: string, options?: FollowTaskOptions): Promise<Task>;
+  };
+  readonly missions: {
+    /** Submit a team mission as a durable task in context `mission`; follow it with `tasks.follow`. */
+    submit(input: MissionInput): Promise<TaskAccepted>;
+  };
+  readonly previews: {
+    /** Run a prompt with unsaved overrides as a read-only task in context `preview`; follow it with `tasks.follow`. */
+    submit(input: PreviewInput): Promise<TaskAccepted>;
+  };
+  readonly development: {
+    /** One page of the agent's development history, oldest first; `next` is null on the last page. */
+    list(options?: CallOptions & { readonly after?: string; readonly limit?: number; readonly kind?: string }): Promise<DevelopmentPage>;
+    /** Record an operator note (or, with `author: 'agent'`, a relayed agent note). */
+    note(note: DevelopmentNote, options?: CallOptions): Promise<DevelopmentRecord>;
   };
   readonly sessions: {
     list(options?: CallOptions & { readonly context?: SessionContext }): Promise<Session[]>;
@@ -122,6 +177,14 @@ const digest = (value: string) => {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new NotFoundError('NOT_FOUND', 'Invalid artifact digest', { status: 404 });
   return value;
 };
+/** The query of a task filter; times become epoch milliseconds. */
+function taskFilterQuery(filter: TaskFilter): Record<string, string | number> {
+  const time = (value: number | Date | string) => typeof value === 'number' ? value : value instanceof Date ? value.getTime() : value;
+  const states = filter.state === undefined ? [] : typeof filter.state === 'string' ? [filter.state] : [...filter.state];
+  return { ...(states.length ? { state: states.join(',') } : {}), ...(filter.context !== undefined ? { context: filter.context } : {}),
+    ...(filter.caller !== undefined ? { caller: filter.caller } : {}), ...(filter.since !== undefined ? { since: time(filter.since) } : {}),
+    ...(filter.until !== undefined ? { until: time(filter.until) } : {}) };
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A random UUID; `randomUUID` exists only in secure browser contexts, so fall back to random bytes. */
 const randomKey = (): string => {
@@ -141,16 +204,30 @@ export function createArdentClient(options: ArdentClientOptions): ArdentClient {
   const read = <T>(path: string, call: CallOptions | undefined, extra: Omit<Parameters<Connection['read']>[0], 'path'> = {}) =>
     connection.read<T>({ path, ...extra }, call?.signal);
 
+  /** An idempotency key: the caller's, else a new one; through Magnus always a UUID. */
+  const keyFor = (key: string | undefined) => { const value = key ?? randomKey(); return magnus && !UUID.test(value) ? uuidFromKey(value) : value; };
+  const executionFor = (execution: ExecutionContext | undefined) => execution === undefined ? defaultExecution : parseExecutionContext(execution);
+  const page = async (call: CallOptions & TaskFilter & { readonly limit?: number; readonly after?: string } = {}): Promise<TaskPage> => {
+    const filter = taskFilterQuery(call);
+    const filtered = Object.keys(filter).length > 0;
+    // Magnus passes on only the query parameters it knows, so a filter it does not advertise would be dropped silently.
+    if (filtered && magnus && !await connection.advertises('task_filters'))
+      throw new UnsupportedCapabilityError('ardent.task-filters.v1', 'Magnus does not pass task list filters on yet (task_filters)');
+    const result = await read<Partial<TaskPage> & { tasks: Task[] }>('tasks', call, { query: { limit: call.limit, after: call.after, ...filter } });
+    // An Ardent before 3.4 answers without next and ignores the filters.
+    if (filtered && !('next' in result)) throw new UnsupportedCapabilityError('ardent.task-filters.v1', 'The profile runs an Ardent without task list filters (3.4 or later)');
+    return { tasks: result.tasks, next: typeof result.next === 'string' ? result.next : null };
+  };
   const tasks: ArdentClient['tasks'] = {
     async submit(input) {
-      const key = input.idempotencyKey ?? randomKey();
-      const execution = input.execution === undefined ? defaultExecution : parseExecutionContext(input.execution);
-      const body = { prompt: input.prompt, idempotency_key: magnus && !UUID.test(key) ? uuidFromKey(key) : key, ...(input.sessionId !== undefined ? { session_id: input.sessionId } : {}) };
+      const execution = executionFor(input.execution);
+      const body = { prompt: input.prompt, idempotency_key: keyFor(input.idempotencyKey), ...(input.sessionId !== undefined ? { session_id: input.sessionId } : {}) };
       return connection.action<TaskAccepted>({ path: 'tasks', body, magnus: { action: 'task-submit', body }, execution, effect: 'idempotent',
         headers: executionHeaders(execution) }, input.signal);
     },
+    page,
     get: async (id, call) => read<Task>(`tasks/${segment(id, 'task ID')}`, call),
-    list: async (call = {}) => (await read<{ tasks: Task[] }>('tasks', call, { query: { limit: call.limit } })).tasks,
+    list: async (call = {}) => (await page(call)).tasks,
     events: async (id, call = {}) => (await read<{ events: TaskEvent[] }>(`tasks/${segment(id, 'task ID')}/events`, call, { query: { after: call.after } })).events,
     cancel: async (id, call) => connection.action<Task>({ path: `tasks/${segment(id, 'task ID')}/cancel`, magnus: { action: 'task-cancel', target: id }, effect: 'idempotent' }, call?.signal),
     pause: async (id, call) => connection.action<TaskAdmission>({ path: `tasks/${segment(id, 'task ID')}/pause`, magnus: { action: 'task-pause', target: id }, effect: 'idempotent' }, call?.signal),
@@ -160,6 +237,31 @@ export function createArdentClient(options: ArdentClientOptions): ArdentClient {
       await followTask(connection, id, follow);
       return tasks.get(id, follow.signal ? { signal: follow.signal } : {});
     },
+  };
+
+  const missions: ArdentClient['missions'] = {
+    async submit(input) {
+      const execution = executionFor(input.execution);
+      const body = { objective: input.objective, mission: input.mission, idempotency_key: keyFor(input.idempotencyKey),
+        ...(input.contextItems !== undefined ? { context_items: [...input.contextItems] } : {}), ...(input.labels !== undefined ? { labels: { ...input.labels } } : {}),
+        ...(input.sessionId !== undefined ? { session_id: input.sessionId } : {}) };
+      return connection.action<TaskAccepted>({ path: 'missions', body, magnus: { action: 'mission-submit', body }, execution, effect: 'idempotent',
+        headers: executionHeaders(execution) }, input.signal);
+    },
+  };
+  const previews: ArdentClient['previews'] = {
+    async submit(input) {
+      const execution = executionFor(input.execution);
+      const body = { prompt: input.prompt, idempotency_key: keyFor(input.idempotencyKey), ...(input.overrides !== undefined ? { overrides: input.overrides } : {}),
+        ...(input.sessionId !== undefined ? { session_id: input.sessionId } : {}) };
+      return connection.action<TaskAccepted>({ path: 'preview/tasks', body, magnus: { action: 'preview-submit', body }, execution, effect: 'idempotent',
+        headers: executionHeaders(execution) }, input.signal);
+    },
+  };
+  const development: ArdentClient['development'] = {
+    list: async (call = {}) => read<DevelopmentPage>('development', call, { query: { after: call.after, limit: call.limit, kind: call.kind } }),
+    // A note is not idempotent: it is never repeated automatically.
+    note: async (note, call) => connection.action<DevelopmentRecord>({ path: 'development', body: note, magnus: { action: 'development-note', body: note }, effect: 'unknown' }, call?.signal),
   };
 
   const sessions: ArdentClient['sessions'] = {
@@ -211,7 +313,7 @@ export function createArdentClient(options: ArdentClientOptions): ArdentClient {
 
   const status = (call?: CallOptions) => read<OperationalStatus>('status', call);
   return {
-    tasks, sessions, recovery, artifacts, status,
+    tasks, missions, previews, development, sessions, recovery, artifacts, status,
     lineage: async (id, call) => read<Lineage>(`tasks/${segment(id, 'task ID')}/lineage`, call, { gate: 'lineage' }),
     async capabilities(call) {
       const current = await status(call);
