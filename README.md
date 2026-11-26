@@ -137,6 +137,33 @@ The default target is the profile's loopback management listener; an optional
 Acceptance executes no model generation or tools. Verify scoped inference,
 memory, skills and channel workflows separately before enabling consumers.
 
+### Backup and retention
+
+`ardent backup <new directory> [--artifacts]` copies the journal with SQLite's
+online backup API, so the gateway can keep running: the copy is consistent,
+checked with `PRAGMA integrity_check`, private (`0700` directory, `0600`
+files) and described by `backup.json` (size, SHA-256, whether the journal was
+idle). `--artifacts` also copies the content-addressed artifact files.
+Configuration, identity files and `.env` are not copied. The directory must be
+new or empty.
+
+The journal keeps every task unless you prune it. `ardent prune --older-than
+90d [--dry-run]` deletes finished tasks (`completed`, `partial`, `failed`,
+`cancelled`) last changed before then, with their events, execution state,
+settled tool invocations and recovery, settled channel deliveries and their
+inbound updates, and artifact manifests; artifact bytes go once no manifest or
+remaining journal event names them. It keeps queued, running, paused,
+`unknown` and held tasks, tasks whose channel reply is not settled, tasks with
+session messages (transcripts are immutable and context checkpoints rest on
+them), tasks another task's lineage names, and any task another record refers
+to (A2A, team, job or plugin tables). The shortest retention is one day.
+
+```yaml
+retention:
+  enabled: false        # default; the gateway then prunes once a day
+  older_than_days: 90
+```
+
 ### Journal quiescence
 
 Backup, snapshot and upgrade tools need to know whether a stopped profile's
