@@ -5,7 +5,8 @@
  *
  * `thread_resume_verified` and `thread_read_items_verified` say whether
  * `thread/resume` of a durable thread, and `thread/read` listing every dynamic
- * tool call item of its turns, were verified against `observed_cli_version`.
+ * tool call item of its turns, were verified against `observed_cli_version`
+ * (by `scripts/probe-codex-thread-recovery.mjs`, a live probe).
  * Execution recovery resumes an interrupted Codex thread only when both are
  * true and the installed CLI is that version; otherwise it restarts a task that
  * never dispatched an effectful tool, and holds the rest.
@@ -17,9 +18,9 @@ export type CodexProtocolLock = {
 };
 
 export const CODEX_PROTOCOL_LOCK: CodexProtocolLock = {
-  observed_cli_version: '0.157.1',
-  thread_resume_verified: false,
-  thread_read_items_verified: false
+  observed_cli_version: '0.172.0',
+  thread_resume_verified: true,
+  thread_read_items_verified: true
 };
 
 /** Whether the lock verifies thread recovery at all (any CLI version). */

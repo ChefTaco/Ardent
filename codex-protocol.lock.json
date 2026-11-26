@@ -1,14 +1,33 @@
 {
-  "observed_cli_version": "0.157.1",
+  "observed_cli_version": "0.172.0",
   "installed_profile_cli_version": "0.156.1",
   "generated_command": "codex app-server generate-ts --out <directory>",
   "source": "https://developers.openai.com/codex/app-server/",
   "dynamic_tools_in_observed_thread_start_schema": false,
   "required_capability": "capabilities.experimentalApi",
-  "verification": "2026-09-26 local ChatGPT OAuth wire probe: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. A production profile CLI remains separately unverified.",
-  "thread_resume_verified": false,
-  "thread_read_items_verified": false,
-  "thread_recovery": "Execution recovery resumes an interrupted durable thread (thread/read with includeTurns listing every dynamicToolCall item, then thread/resume) only when both flags are true and the installed CLI is observed_cli_version. Neither was verified against a real CLI; recovery restarts Codex tasks that never dispatched an effectful tool and holds the rest.",
+  "verification": "2026-09-26 local ChatGPT OAuth wire probe against Codex CLI 0.157.1: dynamic tool call and completed item carried the result, but same-turn model final said output was invisible. Ardent's verified-result follow-up turn returned ARDENT_WIRE_OK with one registry call. Thread recovery was probed live against 0.172.0 on 2026-11-26 (thread_recovery_probe). A production profile CLI remains separately unverified.",
+  "thread_resume_verified": true,
+  "thread_read_items_verified": true,
+  "thread_recovery_probe": {
+    "cli_version": "0.172.0",
+    "checked": "2026-11-26",
+    "command": "ARDENT_CODEX_LIVE_PROBE=1 node scripts/probe-codex-thread-recovery.mjs",
+    "auth_mode": "chatgpt",
+    "passed": true,
+    "thread_id_sha256_12": "554a85daaea8",
+    "client_requests": [
+      "initialize",
+      "account/read",
+      "model/list",
+      "thread/start",
+      "turn/start",
+      "thread/read",
+      "thread/resume",
+      "thread/archive"
+    ],
+    "note": "Live probe on a signed-in local CLI (one durable thread, read-only dynamic tool). The App Server was killed (SIGKILL) right after the dynamicToolCall item completed. A new App Server's thread/read with includeTurns listed the interrupted turn (userMessage, dynamicToolCall) and the item id equalled the item/tool/call callId. Ardent's CodexHarnessBackend resume path (thread/read, thread/resume, turn/start) completed a turn on the same thread id that recalled a code word from the first turn, and a final thread/read showed both turns with the tool call item unchanged. The resumed model did not repeat the dynamic tool output (tool output visibility to the model is unchanged and not relied on)."
+  },
+  "thread_recovery": "Execution recovery resumes an interrupted durable thread (thread/read with includeTurns listing every dynamicToolCall item, then thread/resume) only when both flags are true and the installed CLI is observed_cli_version (0.172.0, verified by thread_recovery_probe). With any other installed CLI, recovery restarts Codex tasks that never dispatched an effectful tool and holds the rest.",
   "schema_check": {
     "cli_version": "0.172.0",
     "checked": "2026-11-26",
