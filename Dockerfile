@@ -2,13 +2,12 @@
 # Build a reviewed runtime image, then export its native artifact. No model
 # runtime or weights are installed. Repository root context; only public package inputs.
 ARG NODE_IMAGE=node:24.22.3-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+# No compiler toolchain: the only native addon, @photostructure/sqlite, ships
+# prebuilt binaries, and install scripts stay off.
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /opt/ardent-build
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
-    && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN npm ci --no-audit --no-fund --ignore-scripts \
-    && npm rebuild better-sqlite3 \
     && npm run build \
     && mkdir -p /packages \
     && npm pack --ignore-scripts --pack-destination /packages \
@@ -31,6 +30,9 @@ LABEL org.opencontainers.image.title="ardent" \
       org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /opt/ardent
 COPY --from=builder /opt/ardent/ ./
+# Execute the native SQLite addon and the CLI against the final image's Node and glibc.
+RUN node -e "const { DatabaseSync } = require('@photostructure/sqlite'); const db = new DatabaseSync(':memory:'); db.exec('CREATE TABLE proof (value TEXT)'); db.prepare('INSERT INTO proof VALUES (?)').run('synthetic'); if (db.prepare('SELECT value FROM proof').get().value !== 'synthetic') process.exit(1); db.close();" \
+    && node /opt/ardent/node_modules/@hivemagnus/ardent/dist/cli.js --version
 ENV NODE_ENV=production
 USER node
 ENTRYPOINT ["node", "/opt/ardent/node_modules/@hivemagnus/ardent/dist/cli.js"]

@@ -78,3 +78,82 @@ jobs:
       - run: npm ci
       - name: Pinned Python SDK, Hermes wire and standalone team reference peers
         run: npm run interop
+
+  image:
+    name: Native image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build -t ardent-native:ci .
+      - name: Smoke test
+        # The build already executed the SQLite addon and the CLI in the final stage.
+        run: |
+          test "$(docker run --rm ardent-native:ci --version)" = "$(node -p "require('./package.json').version")"
+          docker run --rm ardent-native:ci journal policy | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{if(JSON.parse(s).policy_version!==1)process.exit(1)})"
+          if docker run --rm --entrypoint sh ardent-native:ci -c 'command -v npm || command -v npx || command -v corepack'; then
+            echo "The runtime image must not contain a package manager" >&2; exit 1
+          fi
+          test "$(docker run --rm --entrypoint id ardent-native:ci -u)" != "0"
+      - name: Vulnerability scan (HIGH and CRITICAL with a published fix)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e image \
+            --image-src docker --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 ardent-native:ci
+
+  magnus:
+    name: Magnus downstream contract
+    # Magnus pins Ardent and proxies its management API. Run Magnus main's Ardent checks against
+    # this build, so a lockstep break shows up here instead of in a follow-up Magnus release.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: ardent
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+      - name: Pack this Ardent build
+        working-directory: ardent
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          mkdir -p "$RUNNER_TEMP/ardent-pack"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/ardent-pack"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ChefTaco/magnus
+          ref: main
+          persist-credentials: false
+          path: magnus
+      - name: Install Magnus main with this Ardent build
+        working-directory: magnus
+        # Every installed copy is replaced, and the root pin follows the build's version so a release
+        # PR's version bump is not itself a failure. A new Ardent dependency would need a Magnus install.
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          archive=$(ls "$RUNNER_TEMP"/ardent-pack/hivemagnus-ardent-*.tgz)
+          find . -path '*/node_modules/@hivemagnus/ardent' -type d -prune | while read -r installed; do
+            rm -rf "$installed" && mkdir -p "$installed" && tar -xzf "$archive" --strip-components=1 -C "$installed"
+          done
+          node -e "const fs=require('fs');const v=require('./node_modules/@hivemagnus/ardent/package.json').version;const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.devDependencies['@hivemagnus/ardent']=v;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          npm run build -w @hivemagnus/magnus-contracts
+      - name: Native snapshot and runtime contract tests
+        working-directory: magnus/packages/agent
+        run: npx vitest run src/native-snapshot src/executors/ardent-runtime-contracts.test.ts
+      - name: Generated Ardent API types (reported, not enforced)
+        working-directory: magnus
+        # Any management API change drifts here until Magnus regenerates its contract, which the
+        # lockstep release does; the warning tells the reviewer what Magnus has to adopt.
+        run: |
+          if npm run --silent ardent:openapi:check; then
+            echo "Magnus main's generated Ardent API types match this build." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Magnus lockstep::This build changes the management API: Magnus must run npm run ardent:openapi:write (and allow any new routes) when it adopts it."
+            echo "This build changes the management API. Magnus must regenerate its Ardent contract (npm run ardent:openapi:write) and allow any new routes or actions when it adopts it." >> "$GITHUB_STEP_SUMMARY"
+          fi
