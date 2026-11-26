@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- CI: the Magnus downstream contract job builds Magnus's agent package before its native-snapshot tests, which now import the agent's built journal module.
+
 ## 3.4.0 - 2026-11-26
 
 ### Upgrade notes
