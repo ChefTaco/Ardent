@@ -10,7 +10,7 @@ import { loadConfig } from '../src/config.js';
 import { ContextCheckpoints } from '../src/context-checkpoints.js';
 import { InvocationState, RecoveryStatus } from '../src/execution-state.js';
 import { JobEngine } from '../src/job-engine.js';
-import { inspectJournal, inspectJournalFile, journalPolicy, JOURNAL_TABLES, type JournalTableRule } from '../src/journal.js';
+import { inspectJournal, inspectJournalFile, journalPolicy, JOURNAL_TABLES, TASK_RECOVERY_STATUSES, type JournalTableRule } from '../src/journal.js';
 import { ArdentRuntime } from '../src/runtime.js';
 import Database from '../src/sqlite.js';
 import { TaskState } from '../src/store.js';
@@ -64,9 +64,11 @@ describe('journal table classification', () => {
   it('classifies every value of the state enums the stores write', () => {
     const cases: Array<[string, readonly string[]]> = [
       ['tasks', TaskState.options], ['tool_invocations', InvocationState.options],
-      ['task_recovery', RecoveryStatus.options], ['artifact_transfers', ArtifactImportStateSchema.options],
+      ['artifact_transfers', ArtifactImportStateSchema.options],
     ];
     for (const [table, values] of cases) expect(values.filter(value => !classified(stateRule(table)).has(value)), table).toEqual([]);
+    const recovery = new Set<string>([...TASK_RECOVERY_STATUSES.active, ...TASK_RECOVERY_STATUSES.uncertain, ...TASK_RECOVERY_STATUSES.terminal]);
+    expect(RecoveryStatus.options.filter(value => !recovery.has(value)), 'task_recovery').toEqual([]);
     for (const [name, rule] of Object.entries(JOURNAL_TABLES)) {
       if (rule.kind !== 'state') continue;
       const all = [...rule.active, ...rule.uncertain, ...rule.terminal];

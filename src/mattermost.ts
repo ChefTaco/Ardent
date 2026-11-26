@@ -242,7 +242,8 @@ export class MattermostAdapter {
       // First sight of a channel: claim its recent history without answering it.
       const posts = await this.#page(channelId, undefined, readSignal);
       if (signal?.aborted) return 0;
-      for (const post of posts) store.claimInbound('mattermost', me.id, post.id);
+      // Not admitted work: nothing will answer these posts.
+      for (const post of posts) store.claimInbound('mattermost', me.id, post.id, 'unknown', 'skipped_stale');
       const newest = posts[0];
       // An empty channel starts at 0: every later post is new, whatever the clocks say.
       this.#saveBoundary(channelId, newest ? { last_ms: newest.create_at, last_post_id: newest.id } : { last_ms: 0, last_post_id: null });

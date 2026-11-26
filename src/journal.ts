@@ -26,6 +26,13 @@ import Database from './sqlite.js';
  * when a consumer would need to read the policy or status differently; adding
  * a table or a state value does not change it.
  */
+/**
+ * Mattermost history claimed on a channel's first sight, never to be answered (it has no channel
+ * type: live and catch-up posts always record one). Such a row is finished, not admitted work.
+ */
+/** task_recovery statuses: `active` ones count only while their task is running. */
+export const TASK_RECOVERY_STATUSES = Object.freeze({ active: ['ready', 'reconciling'], uncertain: ['awaiting_decision', 'unsupported', 'unknown'], terminal: ['resumed', 'resolved'] } as const);
+export const SEEDED_INBOUND = "(inbound.platform='mattermost' AND inbound.channel_type='unknown')";
 export const JOURNAL_POLICY_VERSION = 1;
 
 /** A table whose `state` or `status` column says whether a row is still work. */
@@ -46,7 +53,7 @@ export type JournalLedgerRule = { readonly kind: 'ledger' };
 /** A table with its own rule, described in `description`. */
 export type JournalSpecialRule = {
   readonly kind: 'special';
-  readonly rule: 'a2a_tasks' | 'a2a_team_child_claims' | 'a2a_request_receipts' | 'channel_inbound' | 'admission_fence';
+  readonly rule: 'a2a_tasks' | 'a2a_team_child_claims' | 'a2a_request_receipts' | 'channel_inbound' | 'admission_fence' | 'task_recovery';
 };
 export type JournalTableRule = (JournalStateRule | JournalPassiveRule | JournalLedgerRule | JournalSpecialRule) & { readonly description: string };
 
@@ -74,8 +81,8 @@ export const JOURNAL_TABLES: Readonly<Record<string, JournalTableRule>> = Object
   tool_invocations: state('state', ['dispatched'], ['failed_unknown', 'unknown'],
     ['succeeded', 'failed_no_effect', 'reconciled_applied', 'reconciled_not_applied', 'operator_applied', 'operator_not_applied', 'not_dispatched'],
     'Tool calls with a possible effect. A dispatched call is in flight; an uncertain one needs reconciliation.'),
-  task_recovery: state('status', ['ready', 'reconciling'], ['awaiting_decision', 'unsupported', 'unknown'], ['resumed', 'resolved'],
-    'Execution recovery decisions for interrupted tasks.'),
+  task_recovery: { kind: 'special', rule: 'task_recovery',
+    description: 'Execution recovery decisions for interrupted tasks. A ready or reconciling row is active only while its task is running; awaiting_decision, unsupported and unknown rows are uncertain; resumed and resolved rows are finished.' },
   artifact_transfers: state('state', ['queued', 'transferring', 'verifying'], ['unknown'], ['completed', 'failed'],
     'Resumable peer artifact imports.'),
   // A2A.
@@ -85,8 +92,9 @@ export const JOURNAL_TABLES: Readonly<Record<string, JournalTableRule>> = Object
     description: 'A2A request idempotency receipts. A receipt not yet bound to a task is active.' },
   a2a_push_deliveries: state('state', ['queued'], ['unknown'], ['sent', 'failed'],
     'A2A push notifications recorded before they are sent.'),
-  a2a_outbound_calls: state('state', ['pending', 'bound'], ['unknown'], ['failed'],
-    'Outbound A2A calls awaiting the peer\'s push callbacks.'),
+  // A bound call was accepted by the peer; its push callbacks are received whenever they come.
+  a2a_outbound_calls: state('state', ['pending'], ['unknown'], ['bound', 'failed'],
+    'Outbound A2A calls. A pending call is being sent; a bound call has its peer task and only receives callbacks.'),
   a2a_team_artifacts: state('status', [], ['unknown'], ['available', 'revoked'],
     'Artifacts this profile exports to team peers.'),
   a2a_team_artifact_transfers: state('status', [], ['unknown'], ['complete'],
@@ -265,7 +273,25 @@ function inspectOpen(db: Database): JournalStatus {
           result.active += count(`SELECT count(*) AS count FROM channel_inbound AS inbound
             LEFT JOIN channel_deliveries AS delivery ON delivery.platform=inbound.platform
               AND delivery.account=inbound.account AND delivery.update_id=inbound.update_id
-            WHERE inbound.task_id IS NULL${columns.has('disposition') ? " AND inbound.disposition='admitted'" : ''} AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`);
+            WHERE inbound.task_id IS NULL${columns.has('disposition') ? " AND inbound.disposition='admitted'" : ''}${columns.has('channel_type') ? ` AND NOT ${SEEDED_INBOUND}` : ''}
+              AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`);
+          break;
+        }
+        case 'task_recovery': {
+          if (columns.has('state')) { unsupported('unexpected state column'); break; }
+          if (missing('status', 'task_id')) break;
+          if (!names.has('tasks')) { unsupported('tasks table is missing'); break; }
+          for (const entry of db.prepare(`SELECT r.status AS value, t.state AS task_state, count(*) AS count FROM task_recovery r
+            LEFT JOIN tasks t ON t.id=r.task_id GROUP BY r.status, t.state`).all()) {
+            const group = z.object({ value: z.unknown(), task_state: z.unknown(), count: z.number().int() }).parse(entry);
+            const value = typeof group.value === 'string' ? group.value : null;
+            const is = (list: readonly string[]) => value !== null && list.includes(value);
+            if (is(TASK_RECOVERY_STATUSES.terminal)) continue;
+            if (is(TASK_RECOVERY_STATUSES.uncertain)) result.unknown += group.count;
+            // A ready or reconciling plan whose task no longer runs was settled another way: nothing resumes it.
+            else if (is(TASK_RECOVERY_STATUSES.active)) { if (group.task_state === 'running') result.active += group.count; }
+            else unsupported(`unrecognized status ${JSON.stringify(group.value)}`, group.count || 1);
+          }
           break;
         }
       }
@@ -310,7 +336,11 @@ async function regularFile(path: string, optional = false): Promise<boolean> {
  * of it. The database and its WAL are copied to a private directory, verified
  * by digest, and inspected there, so committed but uncheckpointed work in the
  * WAL is counted. Throws when the files change during inspection, which means
- * a gateway is writing: a running profile is never idle.
+ * a gateway is writing. It does not check the gateway lock: an idle gateway
+ * that writes nothing during the copy can be reported idle, so stop the
+ * profile (or hold its gateway lock) before relying on `idle` for a snapshot.
+ * Tables an extension created and this policy does not classify count as
+ * `unsupported`, so such a profile is never reported idle.
  */
 export async function inspectJournal(path: string): Promise<JournalStatus> {
   await regularFile(path);

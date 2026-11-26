@@ -8,6 +8,7 @@ import { TaskExecutions, type ExecutionContext, type TaskExecution } from './exe
 import { ExecutionStates } from './execution-state.js';
 import { planRecovery, type RecoveryPlanOptions } from './recovery.js';
 import { SessionMismatchError, TaskTerminalError, conflict, invalidRequest, notAcceptingWork, notFound } from './errors.js';
+import { SEEDED_INBOUND } from './journal.js';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
@@ -26,6 +27,7 @@ export type TaskEvent = z.infer<typeof EventSchema>;
 export type InboundChannelType = 'unknown' | 'telegram_private' | 'telegram_group' | 'telegram_supergroup' |
   'mattermost_dm' | 'mattermost_channel' | 'chattermost_dm' | 'chattermost_channel';
 /** How a claimed inbound post was settled: admitted to the normal channel path, or claimed by catch-up as too old to answer. */
+/** `skipped_stale`: claimed but never answered (a post too old on catch-up, or history seeded on a channel's first sight). */
 export type InboundDisposition = 'admitted' | 'skipped_stale';
 
 /** Filters and cursor of `TaskStore.page()`. `since` and `until` bound `created_ms` (since inclusive, until exclusive). */
@@ -133,6 +135,11 @@ export class TaskStore {
          'mattermost_dm','mattermost_channel','chattermost_dm','chattermost_channel'))`);
     if (!inboundColumns.some(column => column.name === 'disposition')) this.db.exec(`ALTER TABLE channel_inbound ADD COLUMN
       disposition TEXT NOT NULL DEFAULT 'admitted' CHECK(disposition IN ('admitted','skipped_stale'))`);
+    // Mattermost history seeded on a channel's first sight (before 3.4 it was recorded as admitted):
+    // claimed so it is never answered, which is what skipped_stale means.
+    this.db.prepare(`UPDATE channel_inbound SET disposition='skipped_stale' WHERE disposition='admitted' AND task_id IS NULL
+      AND platform='mattermost' AND channel_type='unknown' AND NOT EXISTS (SELECT 1 FROM channel_deliveries d
+        WHERE d.platform=channel_inbound.platform AND d.account=channel_inbound.account AND d.update_id=channel_inbound.update_id)`).run();
     // Where a reply goes (conversation, thread, the message replied to), so a
     // task that execution recovery resumes or continues can still answer it.
     if (!inboundColumns.some(column => column.name === 'reply_target_json')) this.db.exec('ALTER TABLE channel_inbound ADD COLUMN reply_target_json TEXT');
@@ -172,7 +179,7 @@ export class TaskStore {
         inbound_unbound: count(`SELECT count(*) AS count FROM channel_inbound AS inbound
           LEFT JOIN channel_deliveries AS delivery ON delivery.platform=inbound.platform
             AND delivery.account=inbound.account AND delivery.update_id=inbound.update_id
-          WHERE inbound.task_id IS NULL AND inbound.disposition='admitted' AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`) };
+          WHERE inbound.task_id IS NULL AND inbound.disposition='admitted' AND NOT ${SEEDED_INBOUND} AND (delivery.id IS NULL OR delivery.state IN ('queued','unknown'))`) };
     })();
   }
   session(caller: string, context: TaskContext, key: string): Session {
@@ -373,6 +380,8 @@ export class TaskStore {
   }
   /** The last scheduler tick failure the gateway recorded (cursor `jobs:last_error`), with when it happened. */
   jobTickError(): JobTickError | null { return readJobTickError(this.db); }
+  /** Forget the recorded job tick failure: a later tick succeeded. */
+  clearJobTickError(): void { this.db.prepare('DELETE FROM channel_cursors WHERE key=?').run(JOB_TICK_ERROR_CURSOR); }
   list(limit = 50): Task[] {
     return this.db.prepare('SELECT * FROM tasks ORDER BY created_ms DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))).map(row => TaskSchema.parse(row));
   }

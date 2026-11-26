@@ -915,7 +915,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Re-read the management token named by api.token_env from the profile environment file the gateway started from and require it for every later request, without a restart. The replaced token is still accepted for overlap_seconds (default 300, at most 3600; 0 ends it now), so a caller can switch over. Authenticate this request with the token in use. The token is never returned. */
+        /** @description Re-read the management token named by api.token_env from the profile environment file the gateway started from and require it for every later request, without a restart. A token the service environment set cannot be rotated this way (409). The replaced token is still accepted for overlap_seconds (default 300, at most 3600; 0 ends it now), so a caller can switch over. Authenticate this request with the token in use. The token is never returned. */
         post: operations["reloadManagementCredential"];
         delete?: never;
         options?: never;
@@ -4169,6 +4169,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The service environment sets the token */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Token missing, too short or malformed, or the environment file is unreadable; the token in use stays */
             422: {
                 headers: {
@@ -4206,6 +4213,8 @@ export interface operations {
                         peers: number;
                         /** @description Peers whose inbound token changed */
                         changed: string[];
+                        /** @description Token variables the service environment sets; they are not read from the file */
+                        service_environment: string[];
                         /**
                          * Format: date-time
                          * @description Until when the replaced inbound tokens are still accepted, or null
