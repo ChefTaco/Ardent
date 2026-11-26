@@ -9,8 +9,14 @@
 - An error's HTTP status now comes from its type, not its message. Some answers change: an internal error whose message happened to contain words such as "missing", "invalid" or "timeout" is a `500 INTERNAL_ERROR` (it was 400 or 503); a peer that is not configured is `404` (it was 500); a fenced or draining profile is `503 NOT_ACCEPTING_WORK` (it was 500); a validation message without those words, a session opened for another context and a duplicate peer ID are `400` (they were 500); a HiveMem URL that is not valid is `503` (it was 400). Plugin route errors without a type keep the old classification.
 - `GET /api/v1/providers` reports `codex.auth_mode: not_selected` for a llama.cpp profile instead of starting a Codex App Server on every call; pass `?probe=codex` for the previous answer.
 
+### Added
+
+- `GET /api/v1/tasks` pages through every task: it returns `next`, a cursor to pass as `after`, and filters by `state` (comma-separated), `context`, `caller`, `since` and `until` (epoch milliseconds or ISO 8601). Without the new parameters it answers as before, plus `next`. `TaskStore.page()` backs it (new index `tasks_created_id`).
+- `TaskStore.onAppend(taskId, listener)` notifies after each journal event the store appends.
+
 ### Changed
 
+- The task SSE stream (`/api/v1/tasks/{id}/stream`) wakes on journal appends instead of polling SQLite every 250 ms per stream; a one-second poll still picks up events written by another process. An idle stream sends a `: keepalive` comment every 15 seconds, so proxies keep it open.
 - Typed management API errors (`src/errors.ts`, HiveCommon `HiveError`): every core route maps statuses explicitly; dependency probes (providers, channels, peers, HiveMem search) answer `503 DEPENDENCY_UNAVAILABLE` with the probe's message. `@hivemagnus/ardent/plugin-sdk` exports `HiveError`, `ErrorCode`, `invalidRequest`, `notFound`, `conflict`, `dependencyUnavailable` and `notAcceptingWork` for plugin routes; `RecoveryConflictError` is a `HiveError` (409).
 - `/health/live` and `/health/ready` use `@hivemagnus/hive-common/health`: their bodies add `service`, `version`, `time` and (readiness) `checks`, the shape of the other suite services. Readiness keeps `problems` and its `degraded` status on 503.
 - Readiness and `GET /api/v1/providers` share one Codex account probe, cached for 30 seconds.

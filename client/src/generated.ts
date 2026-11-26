@@ -191,6 +191,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Tasks newest first (by created_ms, then id), one page at a time. Pass next as after for the following page; filters combine with AND. */
         get: operations["listTasks"];
         put?: never;
         post: operations["submitTask"];
@@ -1700,8 +1701,19 @@ export interface operations {
     listTasks: {
         parameters: {
             query?: {
-                /** @description Maximum number of recent tasks */
+                /** @description Maximum number of tasks in the page */
                 limit?: number;
+                /** @description Cursor from a previous page (next) */
+                after?: string;
+                /** @description Comma-separated task states */
+                state?: string;
+                context?: "direct" | "peer" | "scheduled" | "mission" | "preview";
+                /** @description Exact caller, for example management or a peer ID */
+                caller?: string;
+                /** @description Tasks created at or after this time: epoch milliseconds or ISO 8601 */
+                since?: string;
+                /** @description Tasks created before this time: epoch milliseconds or ISO 8601 */
+                until?: string;
             };
             header?: never;
             path?: never;
@@ -1709,7 +1721,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Recent tasks */
+            /** @description One page of tasks; next is null on the last page */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1734,7 +1746,8 @@ export interface operations {
                      *           "created_ms": 1790431200000,
                      *           "updated_ms": 1790431200000
                      *         }
-                     *       ]
+                     *       ],
+                     *       "next": null
                      *     }
                      */
                     "application/json": {
@@ -1805,8 +1818,16 @@ export interface operations {
                                 };
                             };
                         }[];
+                        next: string | null;
                     };
                 };
+            };
+            /** @description Invalid filter or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -2710,7 +2731,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative. */
+            /** @description SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. An idle stream sends a `: keepalive` comment every 15 seconds. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative. */
             200: {
                 headers: {
                     [name: string]: unknown;

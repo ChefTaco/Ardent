@@ -508,6 +508,13 @@ Plugins throw `HiveError`s (`invalidRequest`, `notFound`, `conflict`,
 status. A plugin route error without a type is still classified by its message,
 as before 3.4, so existing plugins answer as they did.
 
+`GET /api/v1/tasks` lists tasks newest first, `limit` (1-100, default 50) at a
+time, with `next`, a cursor to pass as `after` for the following page (`null`
+on the last one). Filters combine: `state` (comma-separated, for example
+`queued,running`), `context` (`direct`, `peer`, `scheduled`, `mission`,
+`preview`), `caller` (exact, for example `management`), and `since` / `until`
+(creation time, epoch milliseconds or ISO 8601; `until` is exclusive).
+
 `/health/live` and `/health/ready` need no token and answer with the HiveCommon
 health bodies (`status`, `service`, `version`, `time`, and for readiness
 `checks`). Readiness also lists `problems`, and its status stays `degraded` when
@@ -528,7 +535,10 @@ probe for 30 seconds.
 | `task.delta` | `{step, text}`: text to append | |
 | `task.done` | The finished task | Its `result` is the authoritative answer |
 
-The stream closes after 60 seconds; reconnect to continue.
+The stream wakes as soon as the gateway journals an event for the task (events
+another process writes arrive within a second), sends a `: keepalive` comment
+when it has been idle for 15 seconds, and closes after 60 seconds; reconnect to
+continue.
 [`@hivemagnus/ardent-client`](client/README.md) does this for you
 (`tasks.follow`).
 

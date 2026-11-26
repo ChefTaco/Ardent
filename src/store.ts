@@ -28,7 +28,23 @@ export type InboundChannelType = 'unknown' | 'telegram_private' | 'telegram_grou
 /** How a claimed inbound post was settled: admitted to the normal channel path, or claimed by catch-up as too old to answer. */
 export type InboundDisposition = 'admitted' | 'skipped_stale';
 
+/** Filters and cursor of `TaskStore.page()`. `since` and `until` bound `created_ms` (since inclusive, until exclusive). */
+export type TaskPageQuery = { limit?: number; after?: string; states?: readonly TaskState[]; context?: TaskContext; caller?: string; since?: number; until?: number };
+
+const TaskCursor = z.object({ created_ms: z.number().int().min(0), id: z.string().min(1).max(128) });
+function encodeTaskCursor(task: Task): string {
+  return Buffer.from(JSON.stringify([task.created_ms, task.id])).toString('base64url');
+}
+function decodeTaskCursor(cursor: string): z.infer<typeof TaskCursor> {
+  try {
+    const value = z.tuple([z.unknown(), z.unknown()]).safeParse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
+    if (value.success) return TaskCursor.parse({ created_ms: value.data[0], id: value.data[1] });
+  } catch { /* reported below */ }
+  throw invalidRequest('Invalid task cursor');
+}
+
 export class TaskStore {
+  readonly #appendListeners = new Map<string, Set<() => void>>();
   readonly db: Database;
   readonly catchup: CatchupJournal;
   /** Execution ancestry (attribution only; never read for tool, memory or mission scope). */
@@ -106,7 +122,8 @@ export class TaskStore {
     // Created after the column migration so an older database gains session_id first.
     this.db.exec(`CREATE INDEX IF NOT EXISTS tasks_caller_created ON tasks(caller, created_ms);
       CREATE INDEX IF NOT EXISTS tasks_session_created ON tasks(session_id, created_ms);
-      CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state);`);
+      CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state);
+      CREATE INDEX IF NOT EXISTS tasks_created_id ON tasks(created_ms, id);`);
     const deliveryColumns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(channel_deliveries)'));
     if (!deliveryColumns.some(column => column.name === 'attempts')) this.db.exec('ALTER TABLE channel_deliveries ADD COLUMN attempts INTEGER');
     const inboundColumns = z.array(z.object({ name: z.string() })).parse(this.db.pragma('table_info(channel_inbound)'));
@@ -359,6 +376,30 @@ export class TaskStore {
   list(limit = 50): Task[] {
     return this.db.prepare('SELECT * FROM tasks ORDER BY created_ms DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))).map(row => TaskSchema.parse(row));
   }
+  /**
+   * One page of tasks, newest first, with optional filters. `next` is an opaque
+   * cursor for the following page (pass it as `after`), or null on the last one.
+   */
+  page(query: TaskPageQuery = {}): { tasks: Task[]; next: string | null } {
+    const limit = Math.max(1, Math.min(query.limit ?? 50, 100));
+    const where: string[] = [];
+    const values: Array<string | number> = [];
+    if (query.after !== undefined) {
+      const cursor = decodeTaskCursor(query.after);
+      where.push('(created_ms < ? OR (created_ms = ? AND id < ?))');
+      values.push(cursor.created_ms, cursor.created_ms, cursor.id);
+    }
+    if (query.states?.length) { where.push(`state IN (${query.states.map(() => '?').join(',')})`); values.push(...query.states); }
+    if (query.context !== undefined) { where.push('context = ?'); values.push(query.context); }
+    if (query.caller !== undefined) { where.push('caller = ?'); values.push(query.caller); }
+    if (query.since !== undefined) { where.push('created_ms >= ?'); values.push(query.since); }
+    if (query.until !== undefined) { where.push('created_ms < ?'); values.push(query.until); }
+    const sql = `SELECT * FROM tasks ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_ms DESC, id DESC LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...values, limit + 1).map(row => TaskSchema.parse(row));
+    const tasks = rows.slice(0, limit);
+    const last = tasks.at(-1);
+    return { tasks, next: rows.length > limit && last ? encodeTaskCursor(last) : null };
+  }
   listByCaller(caller: string, limit = 50): Task[] {
     return this.db.prepare('SELECT * FROM tasks WHERE caller=? ORDER BY created_ms DESC LIMIT ?').all(caller, Math.max(1, Math.min(limit, 100))).map(row => TaskSchema.parse(row));
   }
@@ -397,6 +438,23 @@ export class TaskStore {
   }
   append(id: string, kind: string, detail: unknown): void {
     this.db.prepare('INSERT INTO events(task_id,kind,detail_json,created_ms) VALUES (?,?,?,?)').run(id, kind, JSON.stringify(detail), Date.now());
+    const listeners = this.#appendListeners.get(id);
+    // After the current synchronous work, so a transaction that appended has committed.
+    if (listeners?.size) queueMicrotask(() => { for (const listener of listeners) listener(); });
+  }
+  /**
+   * Call `listener` after each journal event this store appends for the task.
+   * Events written by another process (or another store on the same file) do
+   * not notify; poll for those. Returns the unsubscribe function.
+   */
+  onAppend(taskId: string, listener: () => void): () => void {
+    const listeners = this.#appendListeners.get(taskId) ?? new Set<() => void>();
+    listeners.add(listener);
+    this.#appendListeners.set(taskId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size && this.#appendListeners.get(taskId) === listeners) this.#appendListeners.delete(taskId);
+    };
   }
   events(id: string, after = 0, limit = 100): TaskEvent[] {
     const rows = this.db.prepare('SELECT * FROM events WHERE task_id=? AND sequence>? ORDER BY sequence LIMIT ?').all(id, after, Math.max(1, Math.min(limit, 500)));

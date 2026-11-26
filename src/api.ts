@@ -21,7 +21,7 @@ import { ArdentA2AClient } from './a2a-client.js';
 import { TelegramAdapter } from './telegram.js';
 import { MattermostAdapter } from './mattermost.js';
 import { CatchupStatusSchema } from './channel-catchup.js';
-import { EventSchema, SessionMessageSchema, SessionSchema, TaskSchema, TaskState } from './store.js';
+import { EventSchema, SessionMessageSchema, SessionSchema, TaskContext, TaskSchema, TaskState } from './store.js';
 import type { JobEngine } from './job-engine.js';
 import { mountPluginHttp } from './plugin-http.js';
 import { pluginContext } from './plugins.js';
@@ -70,6 +70,17 @@ const ReadyBody = z.object({ status: z.enum(['ready', 'degraded']), service: z.s
   checks: z.record(z.string(), HealthCheckReport).describe('configuration, and codex or llamacpp when probed'), problems: z.array(z.string()) });
 const CredentialReload = z.object({ reloaded: z.literal(true), token_env: z.string(), changed: z.boolean() });
 const EventCursor = z.coerce.number().int().min(0);
+/** A task stream ends after this long; clients reconnect from their cursor. */
+const STREAM_ROTATION_MS = 60_000;
+/** An idle task stream sends a `: keepalive` comment this often. */
+const STREAM_KEEPALIVE_MS = 15_000;
+/** How often an idle stream looks for journal events written by another process. */
+const STREAM_FALLBACK_POLL_MS = 1_000;
+/** A time bound: epoch milliseconds or an ISO 8601 date-time. */
+const TimeBound = z.union([z.string().regex(/^\d{1,15}$/).transform(Number), z.string().datetime({ offset: true }).transform(value => Date.parse(value))]);
+const TaskListQuery = z.object({ limit: PageLimit.optional(), after: z.string().min(1).max(400).optional(),
+  state: z.string().max(200).transform(value => value.split(',')).pipe(z.array(TaskState).min(1)).optional(),
+  context: TaskContext.optional(), caller: z.string().min(1).max(128).optional(), since: TimeBound.optional(), until: TimeBound.optional() }).strict();
 function authEqual(actual: string, expected: string): boolean {
   const a = Buffer.from(actual);
   const b = Buffer.from(expected);
@@ -147,7 +158,15 @@ export function ardentOpenApi(): object {
       '/a2a/rest/tasks/{taskId}/pushNotificationConfigs/{configId}': { get: { operationId: 'a2aGetPushConfig', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion, a2aTaskId, a2aConfigId], responses: a2aResult }, delete: { operationId: 'a2aDeletePushConfig', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion, a2aTaskId, a2aConfigId], responses: { '204': { description: 'Push configuration deleted' }, '401': { description: 'Peer authentication failed' }, '404': { description: 'Configuration absent' } } } },
       '/api/v1/tasks': {
         post: { operationId: 'submitTask', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(documented(Submit)), example: { prompt: 'Research today\'s topic', idempotency_key: 'topic-2026-09-26' } } } }, responses: { '202': { ...jsonResponse('Accepted durable task', z.object({ task_id: z.string().guid(), state: TaskState })), content: { 'application/json': { schema: jsonSchema(z.object({ task_id: z.string().guid(), state: TaskState })), example: { task_id: taskExample.id, state: 'queued' } } } }, '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Conflicting idempotency key' } } },
-        get: { operationId: 'listTasks', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'limit', description: 'Maximum number of recent tasks', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }], responses: { '200': { description: 'Recent tasks', content: { 'application/json': { schema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array', items: { $ref: '#/components/schemas/Task' } } } }, example: { tasks: [taskExample] } } } } } }
+        get: { operationId: 'listTasks', description: 'Tasks newest first (by created_ms, then id), one page at a time. Pass next as after for the following page; filters combine with AND.', security: [{ bearerAuth: [] }], parameters: [
+          { in: 'query', name: 'limit', description: 'Maximum number of tasks in the page', schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+          { in: 'query', name: 'after', description: 'Cursor from a previous page (next)', schema: { type: 'string', maxLength: 400 } },
+          { in: 'query', name: 'state', description: 'Comma-separated task states', schema: { type: 'string', example: 'queued,running' } },
+          { in: 'query', name: 'context', schema: { type: 'string', enum: TaskContext.options } },
+          { in: 'query', name: 'caller', description: 'Exact caller, for example management or a peer ID', schema: { type: 'string', maxLength: 128 } },
+          { in: 'query', name: 'since', description: 'Tasks created at or after this time: epoch milliseconds or ISO 8601', schema: { type: 'string' } },
+          { in: 'query', name: 'until', description: 'Tasks created before this time: epoch milliseconds or ISO 8601', schema: { type: 'string' } }],
+          responses: { '200': { description: 'One page of tasks; next is null on the last page', content: { 'application/json': { schema: { type: 'object', required: ['tasks', 'next'], properties: { tasks: { type: 'array', items: { $ref: '#/components/schemas/Task' } }, next: { type: ['string', 'null'] } } }, example: { tasks: [taskExample], next: null } } } }, '400': { description: 'Invalid filter or cursor' } } }
       },
       '/api/v1/missions': { post: { operationId: 'submitMission', description: 'Accept a team mission as a durable task in context mission. Tools come from mission.resources with the peer mission rule; mission tools (team_handoff, team_ask_user, team_propose_decision, artifact_write, development_note, document_render) need a tool:<name> resource. Memory reads use private scope plus one project:<id> grant. The task result is a TeamResult JSON document. The task streams on /api/v1/tasks/{id}/stream like any task.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(documented(MissionSubmit)) } } }, responses: { '202': jsonResponse('Accepted durable mission task', Accepted), '400': { description: 'Invalid mission, context items over 64 KiB, or deadline passed' }, '401': { description: 'Unauthorized' }, '404': { description: 'Session absent' }, '409': { description: 'Conflicting idempotency key' } } } },
       '/api/v1/preview/tasks': { post: { operationId: 'submitPreviewTask', description: 'Run a prompt with unsaved soul, identity, skill selection or model overrides in context preview. A preview has read-only direct tools and no mission tools, never writes memory, development records, identity or configuration, and its artifacts expire after 24 hours. It streams on /api/v1/tasks/{id}/stream like any task.', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: jsonSchema(documented(PreviewSubmit)) } } }, responses: { '202': jsonResponse('Accepted preview task', Accepted), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Conflicting idempotency key' } } } },
@@ -162,7 +181,7 @@ export function ardentOpenApi(): object {
       },
       '/api/v1/tasks/{id}/lineage': { get: { operationId: 'getTaskLineage', description: 'What this profile knows about the task\'s causal tree: its execution context and parent, local child and continuation tasks, model attempts with their request ids, tool calls and artifacts. Rebuilt from SQLite, so it survives a restart. Attribution only.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task lineage', TaskLineageSchema), '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/events': { get: { operationId: 'getTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', description: 'Return events with sequence greater than this cursor', schema: { type: 'integer', minimum: 0, default: 0 } }], responses: { '200': { description: 'Journal events after the supplied sequence cursor', content: { 'application/json': { schema: { type: 'object', required: ['events'], properties: { events: { type: 'array', items: { $ref: '#/components/schemas/TaskEvent' } } } }, example: { events: [eventExample] } } } } } } },
-      '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
+      '/api/v1/tasks/{id}/stream': { get: { operationId: 'streamTaskEvents', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }, { in: 'query', name: 'after', schema: { type: 'integer', minimum: 0 } }, { in: 'header', name: 'Last-Event-ID', description: 'Resume after a journal sequence', schema: { type: 'integer', minimum: 0 } }], responses: { '200': { description: 'SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. An idle stream sends a `: keepalive` comment every 15 seconds. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.', content: { 'text/event-stream': { schema: { type: 'string' }, example: sseExample } } }, '404': { description: 'Task absent' } } } },
       '/api/v1/tasks/{id}/cancel': { post: { operationId: 'cancelTask', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Cancellation requested' } } } },
       '/api/v1/tasks/{id}/pause': { post: { operationId: 'pauseTask', description: 'Pause a queued or running task. A queued task does not start; a running task waits at its next step boundary (before a model call, a tool call or settling) and journals paused. Its deadline keeps running. Idempotent.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task admission', Admission), '404': { description: 'Task absent' }, '409': { description: 'Task already finished' } } } },
       '/api/v1/tasks/{id}/resume': { post: { operationId: 'resumeTask', description: 'Resume a paused task. Idempotent; resuming a task that is not paused changes nothing.', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }], responses: { '200': jsonResponse('Task admission', Admission), '404': { description: 'Task absent' } } } },
@@ -482,10 +501,14 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     return c.json({ task_id: task.id, state: task.state }, 202);
   });
   app.get('/api/v1/tasks', c => {
-    const tasks = runtime.store.list(PageLimit.parse(c.req.query('limit') ?? 50));
+    const query = parseInput(Object.fromEntries(['limit', 'after', 'state', 'context', 'caller', 'since', 'until']
+      .flatMap(name => { const value = c.req.query(name); return value === undefined ? [] : [[name, value]]; })), TaskListQuery);
+    const { tasks, next } = runtime.store.page({ limit: query.limit ?? 50, ...(query.after !== undefined ? { after: query.after } : {}),
+      ...(query.state ? { states: query.state } : {}), ...(query.context ? { context: query.context } : {}), ...(query.caller !== undefined ? { caller: query.caller } : {}),
+      ...(query.since !== undefined ? { since: query.since } : {}), ...(query.until !== undefined ? { until: query.until } : {}) });
     const executions = runtime.store.executions.many(tasks.map(task => task.id));
     const recoveries = runtime.store.executionState.recoveries(tasks.map(task => task.id));
-    return c.json({ tasks: tasks.map(task => view(task, executions.get(task.id)?.context, recoveryView(runtime.store, task, recoveries.get(task.id)))) });
+    return c.json({ tasks: tasks.map(task => view(task, executions.get(task.id)?.context, recoveryView(runtime.store, task, recoveries.get(task.id)))), next });
   });
   app.get('/api/v1/tasks/:id', c => {
     const task = runtime.store.get(c.req.param('id'));
@@ -526,35 +549,46 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
       // Live reply text is not journaled, so its events carry no id and a reconnect
       // starts from a task.text snapshot of the current step instead of a replay.
       const live: LiveTextUpdate[] = [];
+      // The stream wakes when this gateway appends to the task's journal or has
+      // live text; a slow poll still finds events another process wrote.
+      let dirty = false;
       let wake: (() => void) | undefined;
-      const unsubscribe = runtime.liveText.subscribe(id, update => { live.push(update); wake?.(); });
+      const notify = () => { dirty = true; wake?.(); };
+      const unsubscribe = runtime.liveText.subscribe(id, update => { live.push(update); notify(); });
+      const unsubscribeJournal = runtime.store.onAppend(id, notify);
+      stream.onAbort(notify);
       const snapshot = runtime.liveText.snapshot(id);
       if (snapshot) live.push({ kind: 'text', ...snapshot });
+      let lastWrite = Date.now();
+      const write = async (message: Parameters<typeof stream.writeSSE>[0]) => { await stream.writeSSE(message); lastWrite = Date.now(); };
       try {
-        const until = Date.now() + 60_000;
+        const until = Date.now() + STREAM_ROTATION_MS;
         while (!stream.aborted && Date.now() < until) {
+          dirty = false;
           for (const update of live.splice(0)) {
-            if (update.kind !== 'end') await stream.writeSSE({ event: update.kind === 'text' ? 'task.text' : 'task.delta', data: JSON.stringify({ step: update.step, text: update.text }) });
+            if (update.kind !== 'end') await write({ event: update.kind === 'text' ? 'task.text' : 'task.delta', data: JSON.stringify({ step: update.step, text: update.text }) });
           }
           const events = runtime.store.events(id, after, 100);
           for (const event of events) {
-            await stream.writeSSE({ event: 'task.event', id: String(event.sequence), data: JSON.stringify(event) });
+            await write({ event: 'task.event', id: String(event.sequence), data: JSON.stringify(event) });
             after = event.sequence;
           }
           const task = runtime.store.get(id);
           if (!task || ['completed', 'partial', 'failed', 'cancelled', 'unknown'].includes(task.state)) {
-            await stream.writeSSE({ event: 'task.done', data: JSON.stringify(task ?? { id, state: 'missing' }) });
+            await write({ event: 'task.done', data: JSON.stringify(task ?? { id, state: 'missing' }) });
             break;
           }
-          if (events.length < 100 && !live.length) {
+          // A comment keeps idle proxies from closing the stream; clients ignore it.
+          if (Date.now() - lastWrite >= STREAM_KEEPALIVE_MS) { await stream.write(': keepalive\n\n'); lastWrite = Date.now(); }
+          if (events.length < 100 && !live.length && !dirty) {
             await new Promise<void>(resolve => {
-              const timer = setTimeout(resolve, 250);
+              const timer = setTimeout(resolve, Math.min(STREAM_FALLBACK_POLL_MS, Math.max(0, until - Date.now()), Math.max(0, lastWrite + STREAM_KEEPALIVE_MS - Date.now())));
               wake = () => { clearTimeout(timer); resolve(); };
             });
             wake = undefined;
           }
         }
-      } finally { unsubscribe(); }
+      } finally { unsubscribe(); unsubscribeJournal(); }
     });
   });
   app.post('/api/v1/tasks/:id/cancel', c => c.json(runtime.cancel(c.req.param('id'))));

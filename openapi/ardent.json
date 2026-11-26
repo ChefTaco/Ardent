@@ -1492,6 +1492,7 @@
       },
       "get": {
         "operationId": "listTasks",
+        "description": "Tasks newest first (by created_ms, then id), one page at a time. Pass next as after for the following page; filters combine with AND.",
         "security": [
           {
             "bearerAuth": []
@@ -1501,24 +1502,82 @@
           {
             "in": "query",
             "name": "limit",
-            "description": "Maximum number of recent tasks",
+            "description": "Maximum number of tasks in the page",
             "schema": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
               "default": 50
             }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "description": "Cursor from a previous page (next)",
+            "schema": {
+              "type": "string",
+              "maxLength": 400
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "description": "Comma-separated task states",
+            "schema": {
+              "type": "string",
+              "example": "queued,running"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "direct",
+                "peer",
+                "scheduled",
+                "mission",
+                "preview"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "caller",
+            "description": "Exact caller, for example management or a peer ID",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "description": "Tasks created at or after this time: epoch milliseconds or ISO 8601",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "description": "Tasks created before this time: epoch milliseconds or ISO 8601",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Recent tasks",
+            "description": "One page of tasks; next is null on the last page",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "required": [
-                    "tasks"
+                    "tasks",
+                    "next"
                   ],
                   "properties": {
                     "tasks": {
@@ -1822,6 +1881,12 @@
                           "updated_ms"
                         ]
                       }
+                    },
+                    "next": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   }
                 },
@@ -1843,10 +1908,14 @@
                       "created_ms": 1790431200000,
                       "updated_ms": 1790431200000
                     }
-                  ]
+                  ],
+                  "next": null
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid filter or cursor"
           }
         }
       }
@@ -4151,7 +4220,7 @@
         ],
         "responses": {
           "200": {
-            "description": "SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.",
+            "description": "SSE task.event carries TaskEvent JSON with the journal sequence as its id; task.done carries Task JSON. An idle stream sends a `: keepalive` comment every 15 seconds. While the task runs, task.text carries the visible reply text of the current model step ({step, text}, sent on connect and when a step starts) and task.delta appends to it. Live text has no event id, is not journaled and is not replayed; the completed task result is authoritative.",
             "content": {
               "text/event-stream": {
                 "schema": {
