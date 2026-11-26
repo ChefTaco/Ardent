@@ -56,10 +56,11 @@ export function tooManyRequests(res: Response, retryAfterSeconds: number, error 
   res.status(429).set({ 'Retry-After': String(retryAfterSeconds), 'Cache-Control': 'no-store' }).json({ error });
 }
 
-export function limitRequests(limiter: TokenBucketLimiter, key: (req: Request, res: Response) => string): RequestHandler {
+export function limitRequests(limiter: TokenBucketLimiter, key: (req: Request, res: Response) => string, onRefuse?: () => void): RequestHandler {
   return (req, res, next) => {
     const result = limiter.take(key(req, res));
     if (result.allowed) { next(); return; }
+    onRefuse?.();
     tooManyRequests(res, result.retryAfterSeconds);
   };
 }
@@ -107,10 +108,11 @@ export const TASK_CAP_RETRY_SECONDS = 5;
  * application error. The handler still enforces the cap atomically and for gRPC.
  * Team control messages stay allowed so a peer at its cap can still cancel work.
  */
-export function jsonRpcTaskCap(gate: PeerTaskGate, peerOf: (res: Response) => string): RequestHandler {
+export function jsonRpcTaskCap(gate: PeerTaskGate, peerOf: (res: Response) => string, onRefuse?: () => void): RequestHandler {
   return (req, res, next) => {
     const rpc = SendRpc.safeParse(req.body as unknown);
     if (rpc.success && SEND_METHODS.has(rpc.data.method) && !('hermesTeamControl' in (rpc.data.params?.message?.metadata ?? {})) && gate.isFull(peerOf(res))) {
+      onRefuse?.();
       tooManyRequests(res, TASK_CAP_RETRY_SECONDS, 'Peer task limit reached');
       return;
     }
@@ -119,9 +121,10 @@ export function jsonRpcTaskCap(gate: PeerTaskGate, peerOf: (res: Response) => st
 }
 
 /** The REST body is not parsed yet here; cancel has its own route and stays available. */
-export function restTaskCap(gate: PeerTaskGate, peerOf: (res: Response) => string): RequestHandler {
+export function restTaskCap(gate: PeerTaskGate, peerOf: (res: Response) => string, onRefuse?: () => void): RequestHandler {
   return (req, res, next) => {
     if (req.method === 'POST' && /\/message:(?:send|stream)$/.test(req.path) && gate.isFull(peerOf(res))) {
+      onRefuse?.();
       tooManyRequests(res, TASK_CAP_RETRY_SECONDS, 'Peer task limit reached');
       return;
     }

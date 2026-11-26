@@ -525,6 +525,61 @@ profile (`?probe=codex` asks a llama.cpp profile too; `auth_mode` is
 `not_selected` otherwise); readiness and `/providers` share one Codex account
 probe for 30 seconds.
 
+### Metrics
+
+`GET /api/v1/metrics` (management token) answers in the OpenMetrics text
+format: `ardent_build_info`, `ardent_tasks{state}`,
+`ardent_recovery_tasks{status}`, `ardent_job_windows{state}`,
+`ardent_channel_deliveries{state}`, `ardent_a2a_push_deliveries{state}`,
+`ardent_a2a_rate_limited_total{scope}` (A2A `429`s since the process started,
+by `ip`, `peer` or `tasks`), and per Mattermost channel
+`ardent_mattermost_catchup_boundary_age_seconds` (age of the newest post up to
+which every older post is settled), `ardent_mattermost_catchup_walk_age_seconds`
+and `ardent_mattermost_catchup_gaps`. Gauges are read from the journal when
+scraped. A Prometheus job sets `metrics_path: /api/v1/metrics` and the bearer
+token.
+
+### Rotating credentials
+
+The management token and the A2A peer tokens can change without a restart.
+Write the new values into the profile environment file the gateway started
+from (`--env-file`, default `<profile>/.env`), then call, with the token in use:
+
+- `POST /api/v1/credentials/management/reload`: the gateway requires the new
+  `api.token_env` value from then on; the replaced token is still accepted for
+  `overlap_seconds` (body `{ "overlap_seconds": 300 }` is the default, 0 to
+  3600), so callers can switch over.
+- `POST /api/v1/credentials/peers/reload`: every configured peer's inbound and
+  outbound token is re-read and validated as at startup; a replaced inbound
+  token is still accepted for the overlap. When a value is not valid nothing
+  changes (`422`). Adding or removing peers still needs a restart.
+
+Neither returns a token. `POST /api/v1/memory/credential/reload` does the same
+for the HiveMem credential.
+
+### Operational logs
+
+`ardent gateway run` writes JSON lines to stderr (stdout stays the CLI's
+output) through `@hivemagnus/hive-common/log`, which redacts secrets.
+`LOG_LEVEL` (`trace` … `fatal`, or `silent`; default `info`) sets the minimum
+level. Every line has `time`, `level`, `msg`, `service: "ardent"` and
+`profile`; management API lines add the request's `requestId` and `traceId`
+(an inbound `x-request-id` and `traceparent` are kept, and `x-request-id` is
+echoed on every response). The gateway logs:
+
+| Message | Level | Fields |
+|---|---|---|
+| `Task settled` | `info`, `warn` when `failed` or `unknown` | `task_id`, `state`, `caller`, `context`, `backend`, `duration_ms`, `request_id`, `trace_id`, `error` |
+| `Unhandled management API error` | `error` | `method`, `path`, `err` (the caller sees only "Internal request error") |
+| `Plugin hook failed`, `Plugin denied a tool call` | `warn` | `plugin`, `hook` or `detail`, `task_id` |
+| `Telegram update failed`, `Telegram poll failed; retrying`, `Telegram polling stopped` | `warn` / `error` | `account`, `update_id`, `failures`, `err` |
+| `Mattermost post failed`, `Mattermost connection failed; reconnecting`, `Mattermost connection stopped after 10 failures` | `warn` / `error` | `post_id`, `channel_id`, `failures`, `err` |
+| `A2A push delivery failed` | `warn` | `task_id`, `delivery_id`, `attempts`, `http_status`, `err` |
+| `Job window retry`, `Job window failed`, `Job window unknown` | `info` / `warn` | `job_id`, `window_key`, `attempt` |
+| `Job engine tick failed` | `error` | `err` |
+
+A runtime embedded elsewhere is silent unless its host sets `runtime.logger`.
+
 ### Live task streams
 
 `GET /api/v1/tasks/{id}/stream` is a server-sent event stream. It sends:

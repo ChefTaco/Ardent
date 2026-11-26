@@ -135,6 +135,7 @@ export class TelegramAdapter {
       const ready = new Promise<void>((resolve, reject) => { readyResolve = () => { entry.accepted = true; resolve(); }; readyReject = reject; });
       const operation = this.#handleUpdate(update, readyResolve, deliverySignal).catch(error => {
         readyReject(error);
+        this.runtime.logger.warn('Telegram update failed', { account, update_id: update.update_id, err: error });
         this.runtime.store.setCursor(`telegram:${account}:last_error`, error instanceof Error ? error.message.slice(0, 500) : 'unknown');
       }).finally(() => {
         if (!entry.accepted) {
@@ -171,8 +172,9 @@ export class TelegramAdapter {
         try { await this.pollOnce(signal, deliverySignal); failures = 0; }
         catch (error: unknown) {
           if (signal.aborted) break;
-          if (error instanceof TelegramConflictError) throw error;
+          if (error instanceof TelegramConflictError) { this.runtime.logger.error('Telegram polling stopped', { err: error }); throw error; }
           failures++;
+          this.runtime.logger.warn('Telegram poll failed; retrying', { failures, err: error });
           // Abort-aware so shutdown does not wait out the reconnect backoff.
           await sleep(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)), undefined, { signal }).catch(() => {});
         }

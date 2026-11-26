@@ -417,6 +417,7 @@ async function main(): Promise<void> {
       let shutdownUnsettled = false;
       try {
         runtime = new ArdentRuntime(dir, loaded.config, env);
+        runtime.logger = ardentLogger({ requestContext: false }).child({ profile: loaded.config.profile });
         await runtime.usePlugins(plugins, env);
         await runtime.prepareGateway(env);
         // Interrupted tasks that recovery left running resume first, ahead of queued work.
@@ -441,19 +442,21 @@ async function main(): Promise<void> {
         const jobRegistry = pluginJobHandlers(plugins, ctx, builtinJobHandlers(runtime, env));
         const ownership = composeOwnershipChecks(plugins.flatMap((plugin: ArdentPlugin) => plugin.jobOwnership ? [plugin.jobOwnership(ctx)] : []));
         const jobEngine = hasJobs ? new JobEngine(runtime.store.db, dir, loaded.config.profile, jobRegistry, ownership) : undefined;
+        if (jobEngine) jobEngine.logger = runtime.logger;
         if (jobEngine) await jobEngine.load();
         if (jobEngine) await jobEngine.recoverAfterRestart();
         // The API reloads rotated credentials from the same file the gateway started from.
         const envFile = value(parsed.options, 'env-file');
         const artifactTransfers = new ArtifactTransfers(runtime, env);
-        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger });
+        let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
+        const api = createArdentApi(runtime, loaded, env, jobEngine, { ...(envFile ? { envFile: resolvePath(envFile) } : {}), artifactTransfers, logger,
+          peerAuthenticator: () => a2aSurface?.peerAuthenticator });
         const server = serve({ fetch: api.fetch, hostname: loaded.config.api.host, port: loaded.config.api.port });
         await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
         // Imports a previous process left unfinished resume from their retained bytes.
         artifactTransfers.resumePending();
         let a2aHttp: HttpServer | undefined;
         let a2aGrpc: Awaited<ReturnType<typeof createA2ASurface>>['grpcServer'] | undefined;
-        let a2aSurface: Awaited<ReturnType<typeof createA2ASurface>> | undefined;
         // Shutdown first stops intake (polling, listening, new job windows and
         // outbox claims), then drains, and only then aborts in-flight delivery.
         const channelAbort = new AbortController();

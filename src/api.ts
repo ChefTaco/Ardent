@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { readBearerToken } from '@hivemagnus/hive-common/secrets';
 import { liveness, readiness, type HealthCheck } from '@hivemagnus/hive-common/health';
+import { requestContext } from '@hivemagnus/hive-common/hono';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
 import { ardentLogger, type Logger } from './log.js';
@@ -16,7 +17,8 @@ import { llamaEndpoint, LlamaCppBackend } from './llamacpp.js';
 import { assertCodexProtocol, CodexAppServer } from './codex.js';
 import { toJsonSchema } from './json-schema.js';
 import { readIdentity, writeIdentity, identityHistory, restoreIdentity } from './identity.js';
-import { inboundTokenEnv, listPeers, outboundTokenEnv, parsePeersConfig, readPeersConfig, savePeersConfig } from './a2a-peers.js';
+import { inboundTokenEnv, listPeers, outboundTokenEnv, parsePeersConfig, readPeersConfig, savePeersConfig, type PeerAuthenticator } from './a2a-peers.js';
+import { OPENMETRICS_CONTENT_TYPE, renderMetrics } from './metrics.js';
 import { ArdentA2AClient } from './a2a-client.js';
 import { TelegramAdapter } from './telegram.js';
 import { MattermostAdapter } from './mattermost.js';
@@ -68,6 +70,14 @@ const HealthCheckReport = z.object({ status: z.enum(['up', 'down']), critical: z
 const LiveBody = z.object({ status: z.literal('live'), service: z.string(), version: z.string(), time: z.string() });
 const ReadyBody = z.object({ status: z.enum(['ready', 'degraded']), service: z.string(), version: z.string(), time: z.string(),
   checks: z.record(z.string(), HealthCheckReport).describe('configuration, and codex or llamacpp when probed'), problems: z.array(z.string()) });
+/** How long a replaced inbound credential stays valid after a rotation, unless the request says otherwise. */
+const DEFAULT_CREDENTIAL_OVERLAP_SECONDS = 300;
+const CredentialRotation = z.object({ overlap_seconds: z.number().int().min(0).max(3600).optional() }).strict();
+const ManagementToken = z.string().min(16).max(4096).regex(/^\S+$/);
+const ManagementCredentialRotated = z.object({ reloaded: z.literal(true), token_env: z.string(), changed: z.boolean(),
+  previous_valid_until: z.string().datetime().nullable().describe('Until when the replaced token is still accepted, or null') });
+const PeerCredentialsRotated = z.object({ reloaded: z.literal(true), peers: z.number().int().describe('Enabled peers'), changed: z.array(z.string()).describe('Peers whose inbound token changed'),
+  previous_valid_until: z.string().datetime().nullable().describe('Until when the replaced inbound tokens are still accepted, or null') });
 const CredentialReload = z.object({ reloaded: z.literal(true), token_env: z.string(), changed: z.boolean() });
 const EventCursor = z.coerce.number().int().min(0);
 /** A task stream ends after this long; clients reconnect from their cursor. */
@@ -220,6 +230,9 @@ export function ardentOpenApi(): object {
       '/api/v1/skills/{name}': { put: { operationId: 'setSkillEnabled', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'name', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: toJsonSchema(SkillEdit, 'openapi-3.0') } } }, responses: { '200': { description: 'Saved skill selection revision' }, '409': { description: 'Revision conflict' } } } },
       '/api/v1/memory/search': { post: { operationId: 'searchMemory', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } } }, responses: { '200': { description: 'Permitted memories' }, '503': { description: 'HiveMem unavailable' } } } },
       '/api/v1/memory/status': { get: { operationId: 'getMemoryStatus', security: [{ bearerAuth: [] }], responses: { '200': jsonResponse('HiveMem readiness and capability summary', z.object({ status: z.enum(['ready', 'degraded']), agent_id: z.string(), workspace_id: z.string(), retrieval: z.string().nullable(), storage: z.string().nullable(), reason: z.string().nullable() })) } } },
+      '/api/v1/metrics': { get: { operationId: 'getMetrics', description: 'Profile metrics in the OpenMetrics text format: tasks by state, open recovery statuses, job windows, channel and A2A push deliveries by state, A2A rate-limit refusals since the process started (ardent_a2a_rate_limited_total by scope ip, peer or tasks) and Mattermost catch-up boundary and walk ages and gaps per channel. Gauges are read from the journal when scraped.', security: [{ bearerAuth: [] }], responses: { '200': { description: 'OpenMetrics text, ending with # EOF', content: { 'application/openmetrics-text': { schema: { type: 'string' } } } }, '401': { description: 'Unauthorized' } } } },
+      '/api/v1/credentials/management/reload': { post: { operationId: 'reloadManagementCredential', description: 'Re-read the management token named by api.token_env from the profile environment file the gateway started from and require it for every later request, without a restart. The replaced token is still accepted for overlap_seconds (default 300, at most 3600; 0 ends it now), so a caller can switch over. Authenticate this request with the token in use. The token is never returned.', security: [{ bearerAuth: [] }], requestBody: { required: false, content: { 'application/json': { schema: jsonSchema(CredentialRotation) } } }, responses: { '200': jsonResponse('Credential reloaded; changed is false when the file holds the token already in use', ManagementCredentialRotated), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '422': { description: 'Token missing, too short or malformed, or the environment file is unreadable; the token in use stays' } } } },
+      '/api/v1/credentials/peers/reload': { post: { operationId: 'reloadPeerCredentials', description: 'Re-read the inbound and outbound tokens of every configured A2A peer from the profile environment file and use them without a restart (the peer list itself still needs a restart). A replaced inbound token is still accepted for overlap_seconds (default 300, at most 3600). The new set is validated as at startup; when it is not valid nothing changes. Tokens are never returned.', security: [{ bearerAuth: [] }], requestBody: { required: false, content: { 'application/json': { schema: jsonSchema(CredentialRotation) } } }, responses: { '200': jsonResponse('Peer credentials reloaded', PeerCredentialsRotated), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'The A2A surface is not running' }, '422': { description: 'A peer credential is missing, too short, reused or not directional, or the environment file is unreadable; the credentials in use stay' } } } },
       '/api/v1/memory/credential/reload': { post: { operationId: 'reloadMemoryCredential', description: 'Re-read the HiveMem agent credential named by memory.token_env from the profile environment file the gateway started from, and use it for every later HiveMem request without a restart. No other variable changes; requests in flight finish with the previous credential. The credential is never returned.', security: [{ bearerAuth: [] }], requestBody: { required: false, content: { 'application/json': { schema: jsonSchema(z.object({}).strict()) } } }, responses: { '200': jsonResponse('Credential reloaded; changed is false when the file holds the credential already in use', CredentialReload), '400': { description: 'Invalid request' }, '401': { description: 'Unauthorized' }, '409': { description: 'Memory provider is not hivemem' }, '422': { description: 'Credential missing, empty or malformed, or the environment file is unreadable; the previous credential stays in use' } } } }
     }
   };
@@ -231,7 +244,9 @@ export function ardentOpenApi(): object {
  * environment file the gateway started from, if any (default `<profile>/.env`).
  */
 export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, env: NodeJS.ProcessEnv = process.env,
-  jobEngine?: JobEngine, options: { envFile?: string; artifactTransfers?: ArtifactTransfers; logger?: Logger } = {}): Hono {
+  jobEngine?: JobEngine, options: { envFile?: string; artifactTransfers?: ArtifactTransfers; logger?: Logger;
+    /** The running A2A surface's peer authentication, for POST /api/v1/credentials/peers/reload. */
+    peerAuthenticator?: () => PeerAuthenticator | undefined } = {}): Hono {
   const app = new Hono();
   const logger = options.logger ?? ardentLogger();
   const transfers = options.artifactTransfers ?? new ArtifactTransfers(runtime, env);
@@ -278,6 +293,9 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const code = typed instanceof TaskTerminalError ? ErrorCode.conflict : typed.code;
     return new Response(JSON.stringify({ error: { code, message: typed.message.slice(0, 500) } }), { status: typed.status, headers: { ...typed.headers, 'Content-Type': 'application/json' } });
   });
+  // Every request runs in a HiveCommon request context: x-request-id is accepted or generated and
+  // echoed, traceparent is continued, and the API's log lines carry requestId and traceId.
+  app.use('*', requestContext());
   const health = { service: 'ardent', version: ARDENT_VERSION } as const;
   app.get('/health/live', c => c.json(liveness(health).body));
   app.get('/health/ready', async c => {
@@ -306,11 +324,15 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     return c.json({ ...result.body, status: problems.length ? 'degraded' : 'ready', problems }, problems.length ? 503 : 200);
   });
   app.get('/openapi.json', c => c.json(ardentOpenApi()));
+  // After POST /api/v1/credentials/management/reload the replaced token stays valid until its overlap ends.
+  let previousApiToken: { value: string; until: number } | undefined;
   app.use('/api/v1/*', async (c, next) => {
     const expected = env[apiTokenEnv];
     // Only `Authorization: Bearer <token>` (scheme case-insensitive) authenticates; a bare token does not.
     const supplied = readBearerToken(c.req.header('Authorization')) ?? '';
-    if (!expected || !authEqual(supplied, expected)) return c.json({ error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } }, 401);
+    const previous = previousApiToken && Date.now() < previousApiToken.until ? previousApiToken.value : undefined;
+    if (!((expected && authEqual(supplied, expected)) || (previous && supplied && authEqual(supplied, previous))))
+      return c.json({ error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } }, 401);
     return next();
   });
   // Plugin routes have their own limit of the same size (src/plugin-http.ts).
@@ -469,6 +491,65 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const result = await outcome;
     if ('problem' in result) return c.json({ error: { code: 'INVALID_CREDENTIAL', message: result.problem } }, 422);
     return c.json({ reloaded: true, token_env: memory.token_env, changed: result.changed });
+  });
+  app.get('/api/v1/metrics', c => c.body(renderMetrics({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend,
+    store: runtime.store, counters: runtime.counters, startedMs: runtime.startedMs }), 200, { 'Content-Type': OPENMETRICS_CONTENT_TYPE, 'Cache-Control': 'no-store' }));
+  // Management and peer credential rotation without a restart: re-read the profile environment
+  // file, switch to the new values, and keep accepting the replaced inbound ones for an overlap.
+  let rotations: Promise<unknown> = Promise.resolve();
+  const serialized = <T>(work: () => Promise<T>): Promise<T> => { const run = rotations.then(work); rotations = run.catch(() => {}); return run; };
+  const overlapOf = async (c: Context): Promise<number> => {
+    const text = await c.req.text();
+    if (!text.trim()) return DEFAULT_CREDENTIAL_OVERLAP_SECONDS;
+    let body: unknown;
+    try { body = JSON.parse(text) as unknown; } catch { throw invalidRequest('Invalid request: body must be empty or a JSON object'); }
+    return parseInput(body, CredentialRotation).overlap_seconds ?? DEFAULT_CREDENTIAL_OVERLAP_SECONDS;
+  };
+  const profileEnv = async (): Promise<Record<string, string> | undefined> => {
+    try { return await readProfileEnv(runtime.profileDir, options.envFile); } catch { return undefined; }
+  };
+  const unreadable = (c: Context) => c.json({ error: { code: 'INVALID_CREDENTIAL', message: 'Profile environment file is unreadable or not an owned private file' } }, 422);
+  app.post('/api/v1/credentials/management/reload', async c => {
+    const overlap = await overlapOf(c);
+    return serialized(async () => {
+      const file = await profileEnv();
+      if (!file) return unreadable(c);
+      const value = file[apiTokenEnv];
+      if (!value || !ManagementToken.safeParse(value).success)
+        return c.json({ error: { code: 'INVALID_CREDENTIAL', message: `${apiTokenEnv} is missing, shorter than 16 characters or not a single token in the profile environment file` } }, 422);
+      const prior = env[apiTokenEnv];
+      const changed = prior !== value;
+      if (changed) {
+        previousApiToken = prior && overlap > 0 ? { value: prior, until: Date.now() + overlap * 1000 } : undefined;
+        env[apiTokenEnv] = value;
+        logger.info('Management credential rotated', { token_env: apiTokenEnv, overlap_seconds: overlap });
+      }
+      return c.json({ reloaded: true, token_env: apiTokenEnv, changed,
+        previous_valid_until: changed && previousApiToken ? new Date(previousApiToken.until).toISOString() : null });
+    });
+  });
+  app.post('/api/v1/credentials/peers/reload', async c => {
+    const overlap = await overlapOf(c);
+    const authenticator = options.peerAuthenticator?.();
+    if (!authenticator) return c.json({ error: { code: 'CONFLICT', message: 'The A2A surface is not running' } }, 409);
+    return serialized(async () => {
+      const file = await profileEnv();
+      if (!file) return unreadable(c);
+      const names = new Set(authenticator.peers.flatMap(peer => [inboundTokenEnv(peer), outboundTokenEnv(peer)]).filter(Boolean));
+      const candidate: NodeJS.ProcessEnv = { ...env };
+      for (const name of names) if (file[name] !== undefined) candidate[name] = file[name];
+      let changed: string[];
+      try { ({ changed } = authenticator.reload(candidate, overlap * 1000)); }
+      catch (error: unknown) {
+        // Nothing changed: the previous credentials stay in use.
+        return c.json({ error: { code: 'INVALID_CREDENTIAL', message: error instanceof Error ? error.message.slice(0, 300) : 'Peer credentials are invalid' } }, 422);
+      }
+      // Outbound tokens are read from the shared environment on every call.
+      for (const name of names) if (candidate[name] !== undefined) env[name] = candidate[name];
+      if (changed.length) logger.info('Peer credentials rotated', { peers: changed, overlap_seconds: overlap });
+      return c.json({ reloaded: true, peers: authenticator.peers.filter(peer => peer.enabled).length, changed,
+        previous_valid_until: changed.length && overlap > 0 ? new Date(Date.now() + overlap * 1000).toISOString() : null });
+    });
   });
   app.get('/api/v1/sessions', c => c.json({ sessions: runtime.store.listSessions('management', SessionContext.parse(c.req.query('context') ?? 'direct')) }));
   app.post('/api/v1/sessions', async c => {

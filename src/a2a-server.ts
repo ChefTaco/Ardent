@@ -7,7 +7,7 @@ import { legacyAgentCardRouter } from '@a2a-js/sdk/compat/v0_3/server/express';
 import { A2AService, grpcService } from '@a2a-js/sdk/server/grpc';
 import type { ArdentConfig } from './config.js';
 import { resolveReference } from './config.js';
-import { loadPeers } from './a2a-peers.js';
+import { loadPeers, type PeerAuthenticator } from './a2a-peers.js';
 import { ArdentA2AExecutor } from './a2a.js';
 import { SqliteA2ATaskStore } from './a2a-store.js';
 import { SafeA2APushSender, SqliteA2APushStore } from './a2a-push.js';
@@ -37,7 +37,9 @@ export function artifactTransferExtension(maxBytes: number) {
 /** Publishes the outcome of A2A tasks whose operation execution recovery resumed, held or continued (see `ArdentA2AExecutor.publishRecovered`). */
 export type A2ARecoveryPublisher = { /** Resolves once no publication pass is running. */ idle(): Promise<void>; /** Stop listening for settled tasks. */ close(): void };
 export type A2ASurface = { app: Express; grpcServer: GrpcServer; card: AgentCard; grpcAddress: string; grpcListenPort: number; pushSender: SafeA2APushSender; pushInbox: A2APushInbox; handler: IdempotentA2AHandler; taskGate: PeerTaskGate;
-  recovery: A2ARecoveryPublisher };
+  recovery: A2ARecoveryPublisher;
+  /** Inbound peer authentication; `POST /api/v1/credentials/peers/reload` replaces its credentials. */
+  peerAuthenticator: PeerAuthenticator };
 
 /** Refresh only discovery freshness; the reviewed runtime identity and digests stay pinned to this process. */
 export function freshHermesTeamCard(source: Awaited<ReturnType<typeof hermesTeamCard>>, now = Date.now()) {
@@ -50,8 +52,8 @@ export function freshHermesTeamCard(source: Awaited<ReturnType<typeof hermesTeam
 }
 
 /** gRPC bypasses Express, so its authenticated calls spend the same per-peer tokens here. */
-export function limitedGrpcUser(peer: string | undefined, bucket: TokenBucketLimiter | undefined): { isAuthenticated: boolean; userName: string } {
-  if (peer && bucket && !bucket.take(peer).allowed) throw new Error('Too many A2A requests');
+export function limitedGrpcUser(peer: string | undefined, bucket: TokenBucketLimiter | undefined, onRefuse?: () => void): { isAuthenticated: boolean; userName: string } {
+  if (peer && bucket && !bucket.take(peer).allowed) { onRefuse?.(); throw new Error('Too many A2A requests'); }
   return { isAuthenticated: Boolean(peer), userName: peer ?? '' };
 }
 
@@ -60,7 +62,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   if (!publicAddress) throw new Error('A2A public URL is unconfigured');
   const publicUrl = new URL(publicAddress);
   if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password) throw new Error('Invalid A2A public URL');
-  const { authenticate, peers } = await loadPeers(runtime.profileDir, config, env);
+  const { authenticate, peers, authenticator: peerAuthenticator } = await loadPeers(runtime.profileDir, config, env);
   const teamCard = config.a2a.hermes_compat ? await hermesTeamCard(runtime, config, env) : undefined;
   const grpcPort = Number(publicUrl.port || (publicUrl.protocol === 'https:' ? 443 : 80)) + 1;
   if (grpcPort > 65535) throw new Error('A2A gRPC port is unavailable');
@@ -94,7 +96,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     documentationUrl: '', signatures: []
   };
   const pushStore = new SqliteA2APushStore(runtime.store.db, peers);
-  const pushSender = new SafeA2APushSender(pushStore);
+  const pushSender = new SafeA2APushSender(pushStore, undefined, runtime.logger);
   const pushInbox = new A2APushInbox(runtime.store.db, peers, publicAddress);
   const artifactTransfers = new TeamArtifacts(runtime, config, env);
   const taskStore = new SqliteA2ATaskStore(runtime.store.db);
@@ -131,7 +133,9 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   const pass: RequestHandler = (_req, _res, next) => next();
   const peerOf = (res: express.Response) => String(res.locals.peer);
   const peerBucket = new TokenBucketLimiter({ perMinute: limits.peer_requests_per_minute, burst: limits.peer_burst });
-  const peerLimit = limits.enabled ? limitRequests(peerBucket, (_req, res) => peerOf(res)) : pass;
+  // Refusals are counted for GET /api/v1/metrics (ardent_a2a_rate_limited_total).
+  const refused = (scope: 'ip' | 'peer' | 'tasks') => () => runtime.counters.increment('a2a_rate_limited', { scope });
+  const peerLimit = limits.enabled ? limitRequests(peerBucket, (_req, res) => peerOf(res), refused('peer')) : pass;
   const requirePeer = (message: string): RequestHandler => (req, res, next) => {
     const peer = authenticate(req.header('Authorization'));
     if (!peer) { res.status(401).json({ error: message }); return; }
@@ -139,7 +143,7 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     next();
   };
   // First in the chain: every route below, authenticated or not, is limited by client address.
-  if (limits.enabled) app.use(limitRequests(new TokenBucketLimiter({ perMinute: limits.ip_requests_per_minute, burst: limits.ip_burst }), req => clientKey(req.ip)));
+  if (limits.enabled) app.use(limitRequests(new TokenBucketLimiter({ perMinute: limits.ip_requests_per_minute, burst: limits.ip_burst }), req => clientKey(req.ip), refused('ip')));
   const unavailable = (status: number) => ({ error: status === 410 ? 'Artifact export revoked or expired' : 'Artifact unavailable' });
   /** Resolve the export for the authenticated peer, or answer the refusal. */
   const exportFor = async (req: express.Request, res: express.Response): Promise<ResolvedTeamArtifact | undefined> => {
@@ -221,14 +225,14 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
     res.set('Cache-Control', 'private, no-store').json({ ...encoded, ...freshHermesTeamCard(teamCard) });
   });
   const auth = requirePeer('Authenticated A2A peer required');
-  const jsonRpcCap = jsonRpcTaskCap(taskGate, peerOf);
+  const jsonRpcCap = jsonRpcTaskCap(taskGate, peerOf, refused('tasks'));
   const userBuilder = async (req: express.Request) => {
     const id = authenticate(req.header('Authorization'));
     return { isAuthenticated: Boolean(id), userName: id ?? '' };
   };
   const aliases: RequestHandler = config.a2a.hermes_compat ? hermesAlias : (_req, _res, next) => next();
   if (config.a2a.bindings.includes('jsonrpc')) app.use('/a2a/jsonrpc', auth, peerLimit, express.json({ limit: '1mb' }), aliases, jsonRpcCap, jsonRpcHandler({ requestHandler: handler, userBuilder, legacyCompat: { enabled: true } }));
-  if (config.a2a.bindings.includes('http-json')) app.use('/a2a/rest', auth, peerLimit, restTaskCap(taskGate, peerOf), restHandler({ requestHandler: handler, userBuilder }));
+  if (config.a2a.bindings.includes('http-json')) app.use('/a2a/rest', auth, peerLimit, restTaskCap(taskGate, peerOf, refused('tasks')), restHandler({ requestHandler: handler, userBuilder }));
   // Hermes Agent's team router posts to the peer origin itself. Keep that
   // optional compatibility route separate from the advertised v1 interface.
   if (config.a2a.hermes_compat && config.a2a.bindings.includes('jsonrpc')) {
@@ -240,10 +244,10 @@ export async function createA2ASurface(runtime: ArdentRuntime, config: ArdentCon
   const grpcServer = new GrpcServer();
   if (config.a2a.bindings.includes('grpc')) grpcServer.addService(A2AService, grpcService({ requestHandler: handler, userBuilder: async call => {
     const raw = call.metadata.get('authorization')[0];
-    return limitedGrpcUser(authenticate(typeof raw === 'string' ? raw : undefined), limits.enabled ? peerBucket : undefined);
+    return limitedGrpcUser(authenticate(typeof raw === 'string' ? raw : undefined), limits.enabled ? peerBucket : undefined, refused('peer'));
   } }));
   publish();
-  return { app, grpcServer, card, grpcAddress, grpcListenPort: listenPort + 1, pushSender, pushInbox, handler, taskGate, recovery };
+  return { app, grpcServer, card, grpcAddress, grpcListenPort: listenPort + 1, pushSender, pushInbox, handler, taskGate, recovery, peerAuthenticator };
 }
 
 export async function startA2AGrpc(surface: A2ASurface, host = '127.0.0.1'): Promise<void> {

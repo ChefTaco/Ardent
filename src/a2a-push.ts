@@ -7,6 +7,7 @@ import type { PushNotificationSender, PushNotificationStore, ServerCallContext, 
 import { z } from 'zod';
 import type { PeerConfig } from './a2a-peers.js';
 import { AttemptError, lastAttemptError, responseFailure, retryWithPolicy } from './retry.js';
+import { silentLogger, type Logger } from './log.js';
 
 const Row = z.object({ config_json: z.string(), wire_version: z.string() });
 const Delivery = z.object({ state: z.enum(['queued', 'sent', 'failed', 'unknown']) });
@@ -103,7 +104,7 @@ export class DeliveryVetoError extends Error {}
 
 export class SafeA2APushSender implements PushNotificationSender {
   readonly #chains = new Map<string, Promise<void>>();
-  constructor(readonly store: SqliteA2APushStore, readonly beforeDelivery?: (taskId: string) => void) {}
+  constructor(readonly store: SqliteA2APushStore, readonly beforeDelivery?: (taskId: string) => void, readonly logger: Logger = silentLogger) {}
   async drain(): Promise<void> {
     for (let pass = 0; pass < 3; pass++) {
       await Promise.allSettled([...this.#chains.values()]);
@@ -147,6 +148,7 @@ export class SafeA2APushSender implements PushNotificationSender {
           this.store.setDelivery(id, 'sent', response.status, undefined, attempts);
         } catch (raw: unknown) {
           const error = lastAttemptError(raw);
+          this.logger.warn('A2A push delivery failed', { task_id: taskId, delivery_id: id, attempts, ...(error instanceof AttemptError && error.failure.status !== undefined ? { http_status: error.failure.status } : {}), err: error });
           if (error instanceof AttemptError && error.failure.status !== undefined)
             this.store.setDelivery(id, error.failure.status >= 500 ? 'unknown' : 'failed', error.failure.status, undefined, attempts);
           else this.store.setDelivery(id, error instanceof DeliveryVetoError ? 'failed' : 'unknown', undefined, error instanceof Error ? error.message : 'Callback outcome unknown', attempts);

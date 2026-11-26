@@ -114,6 +114,22 @@ export const ARDENT_ROUTES = [
     stream: false
   },
   {
+    operationId: 'reloadManagementCredential',
+    method: 'POST',
+    path: '/api/v1/credentials/management/reload',
+    kind: 'action',
+    auth: 'bearer',
+    stream: false
+  },
+  {
+    operationId: 'reloadPeerCredentials',
+    method: 'POST',
+    path: '/api/v1/credentials/peers/reload',
+    kind: 'action',
+    auth: 'bearer',
+    stream: false
+  },
+  {
     operationId: 'listDevelopment',
     method: 'GET',
     path: '/api/v1/development',
@@ -189,6 +205,14 @@ export const ARDENT_ROUTES = [
     operationId: 'getMemoryStatus',
     method: 'GET',
     path: '/api/v1/memory/status',
+    kind: 'read',
+    auth: 'bearer',
+    stream: false
+  },
+  {
+    operationId: 'getMetrics',
+    method: 'GET',
+    path: '/api/v1/metrics',
     kind: 'read',
     auth: 'bearer',
     stream: false
