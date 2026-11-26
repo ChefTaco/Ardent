@@ -525,6 +525,29 @@ profile (`?probe=codex` asks a llama.cpp profile too; `auth_mode` is
 `not_selected` otherwise); readiness and `/providers` share one Codex account
 probe for 30 seconds.
 
+### Operational logs
+
+`ardent gateway run` writes JSON lines to stderr (stdout stays the CLI's
+output) through `@hivemagnus/hive-common/log`, which redacts secrets.
+`LOG_LEVEL` (`trace` … `fatal`, or `silent`; default `info`) sets the minimum
+level. Every line has `time`, `level`, `msg`, `service: "ardent"` and
+`profile`; management API lines add the request's `requestId` and `traceId`
+(an inbound `x-request-id` and `traceparent` are kept, and `x-request-id` is
+echoed on every response). The gateway logs:
+
+| Message | Level | Fields |
+|---|---|---|
+| `Task settled` | `info`, `warn` when `failed` or `unknown` | `task_id`, `state`, `caller`, `context`, `backend`, `duration_ms`, `request_id`, `trace_id`, `error` |
+| `Unhandled management API error` | `error` | `method`, `path`, `err` (the caller sees only "Internal request error") |
+| `Plugin hook failed`, `Plugin denied a tool call` | `warn` | `plugin`, `hook` or `detail`, `task_id` |
+| `Telegram update failed`, `Telegram poll failed; retrying`, `Telegram polling stopped` | `warn` / `error` | `account`, `update_id`, `failures`, `err` |
+| `Mattermost post failed`, `Mattermost connection failed; reconnecting`, `Mattermost connection stopped after 10 failures` | `warn` / `error` | `post_id`, `channel_id`, `failures`, `err` |
+| `A2A push delivery failed` | `warn` | `task_id`, `delivery_id`, `attempts`, `http_status`, `err` |
+| `Job window retry`, `Job window failed`, `Job window unknown` | `info` / `warn` | `job_id`, `window_key`, `attempt` |
+| `Job engine tick failed` | `error` | `err` |
+
+A runtime embedded elsewhere is silent unless its host sets `runtime.logger`.
+
 ### Live task streams
 
 `GET /api/v1/tasks/{id}/stream` is a server-sent event stream. It sends:

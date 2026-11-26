@@ -417,6 +417,7 @@ async function main(): Promise<void> {
       let shutdownUnsettled = false;
       try {
         runtime = new ArdentRuntime(dir, loaded.config, env);
+        runtime.logger = ardentLogger({ requestContext: false }).child({ profile: loaded.config.profile });
         await runtime.usePlugins(plugins, env);
         await runtime.prepareGateway(env);
         // Interrupted tasks that recovery left running resume first, ahead of queued work.
@@ -441,6 +442,7 @@ async function main(): Promise<void> {
         const jobRegistry = pluginJobHandlers(plugins, ctx, builtinJobHandlers(runtime, env));
         const ownership = composeOwnershipChecks(plugins.flatMap((plugin: ArdentPlugin) => plugin.jobOwnership ? [plugin.jobOwnership(ctx)] : []));
         const jobEngine = hasJobs ? new JobEngine(runtime.store.db, dir, loaded.config.profile, jobRegistry, ownership) : undefined;
+        if (jobEngine) jobEngine.logger = runtime.logger;
         if (jobEngine) await jobEngine.load();
         if (jobEngine) await jobEngine.recoverAfterRestart();
         // The API reloads rotated credentials from the same file the gateway started from.

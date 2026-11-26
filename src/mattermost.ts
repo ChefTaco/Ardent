@@ -125,6 +125,7 @@ export class MattermostAdapter {
     const event: ChannelEvent = { platform: 'mattermost', channel_type: isDm ? 'mattermost_dm' : 'mattermost_channel',
       account: me.id, user: post.user_id, conversation: post.channel_id, thread: post.root_id || null, update_id: post.id, reply_to: post.id, text, attachments, authorized: true, bot_message: false };
     const operation = this.#core.handle(event, async reply => this.#deliver({ channel_id: post.channel_id, root_id: post.root_id, id: post.id }, channelType, reply)).catch(error => {
+      this.runtime.logger.warn('Mattermost post failed', { post_id: post.id, channel_id: post.channel_id, err: error });
       this.runtime.store.setCursor(`mattermost:${me.id}:last_error`, error instanceof Error ? error.message.slice(0, 500) : 'unknown');
     });
     // A live post never moves an existing boundary: posts missed before it are
@@ -400,7 +401,8 @@ export class MattermostAdapter {
       catch (error: unknown) {
         if (signal.aborted) break;
         failures++;
-        if (failures >= 10) throw error;
+        if (failures >= 10) { this.runtime.logger.error('Mattermost connection stopped after 10 failures', { err: error }); throw error; }
+        this.runtime.logger.warn('Mattermost connection failed; reconnecting', { failures, err: error });
       }
       if (!signal.aborted) await sleep(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)), undefined, { signal }).catch(() => {});
     }
