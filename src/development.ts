@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ArdentConfig } from './config.js';
 import { identityHistory, readIdentity } from './identity.js';
 import type { TaskStore } from './store.js';
+import { invalidRequest } from './errors.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 /** A short machine-readable category, such as `self_understanding`, `method`, `lesson` or `skill_change`. */
@@ -84,7 +85,7 @@ export function decodeDevelopmentCursor(value: string): DevelopmentCursor {
   try {
     const [ms, id] = z.tuple([z.number().int().min(0), z.string().max(160)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown);
     return { ms, id };
-  } catch { throw new Error('Invalid development cursor'); }
+  } catch { throw invalidRequest('Invalid development cursor'); }
 }
 
 type Dated = DevelopmentRecord & { created_ms: number };

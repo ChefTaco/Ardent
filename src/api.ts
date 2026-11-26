@@ -1,6 +1,9 @@
 import { timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
+import { readBearerToken } from '@hivemagnus/hive-common/secrets';
+import { liveness, readiness, type HealthCheck } from '@hivemagnus/hive-common/health';
 import { z } from 'zod';
 import { ARDENT_VERSION } from './version.js';
 import { ardentLogger, type Logger } from './log.js';
@@ -35,7 +38,7 @@ import { ExecutionContextSchema, ExecutionInput, type ExecutionAcceptance } from
 import { TaskLineageSchema, taskLineage } from './lineage.js';
 import { readExecutionHeader } from '@hivemagnus/hive-common/execution';
 import { RecoveryDecisionInput, RecoveryViewSchema, recoveryView, type RecoveryView } from './recovery.js';
-import { RecoveryConflictError } from './runtime.js';
+import { dependency, dependencyUnavailable, ErrorCode, invalidRequest, isHiveError, legacyPluginError, SessionMismatchError, TaskTerminalError } from './errors.js';
 
 const Submit = z.object({ prompt: z.string().trim().min(1).max(16000), session_id: z.string().guid().optional(), idempotency_key: z.string().min(1).max(128).optional(),
   execution: ExecutionInput.optional() }).strict();
@@ -56,9 +59,15 @@ const ConfigEdit = z.object({ text: z.string().min(1).max(200000), revision: z.s
 const SkillEdit = z.object({ enabled: z.boolean(), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const IdentityEdit = z.object({ text: z.string().min(1).max(128 * 1024), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const IdentityRestore = z.object({ history_name: z.string().min(1).max(128), revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+/** How long a Codex account status stays fresh for readiness and GET /providers. */
+const CODEX_PROBE_CACHE_MS = 30_000;
 const PageLimit = z.coerce.number().int().min(1).max(100);
 /** A HiveMem agent credential is a JWT: three base64url segments. */
 const HiveMemCredential = z.string().max(16384).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+const HealthCheckReport = z.object({ status: z.enum(['up', 'down']), critical: z.boolean(), latencyMs: z.number(), error: z.string().optional(), details: z.record(z.string(), z.unknown()).optional() });
+const LiveBody = z.object({ status: z.literal('live'), service: z.string(), version: z.string(), time: z.string() });
+const ReadyBody = z.object({ status: z.enum(['ready', 'degraded']), service: z.string(), version: z.string(), time: z.string(),
+  checks: z.record(z.string(), HealthCheckReport).describe('configuration, and codex or llamacpp when probed'), problems: z.array(z.string()) });
 const CredentialReload = z.object({ reloaded: z.literal(true), token_env: z.string(), changed: z.boolean() });
 const EventCursor = z.coerce.number().int().min(0);
 function authEqual(actual: string, expected: string): boolean {
@@ -66,16 +75,24 @@ function authEqual(actual: string, expected: string): boolean {
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-/** Like parseJson, but a validation failure always reads as an invalid request (HTTP 400). */
+/** Request bodies of the core management routes, as for plugin routes. */
+export const MANAGEMENT_BODY_LIMIT_BYTES = 1_048_576;
+const issues = (error: z.ZodError) => error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ');
+/** Like parseJson, but the message starts with "Invalid request:". Both answer 400. */
 function parseInput<T extends z.ZodTypeAny>(body: unknown, schema: T): z.infer<T> {
   const result = schema.safeParse(body);
-  if (!result.success) throw new Error(`Invalid request: ${result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  if (!result.success) throw invalidRequest(`Invalid request: ${issues(result.error)}`);
   return result.data;
 }
 function parseJson<T extends z.ZodTypeAny>(body: unknown, schema: T): z.infer<T> {
   const result = schema.safeParse(body);
-  if (!result.success) throw new Error(result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; '));
+  if (!result.success) throw invalidRequest(issues(result.error));
   return result.data;
+}
+/** The JSON request body; a body that is not JSON is an invalid request (400). */
+async function readBody(c: Context): Promise<unknown> {
+  try { return await c.req.json() as unknown; }
+  catch { throw invalidRequest('Invalid request: the body must be JSON'); }
 }
 const jsonSchema = (schema: z.ZodType) => toJsonSchema(schema, 'openapi-3.0');
 const jsonResponse = (description: string, schema: z.ZodTypeAny) => ({ description, content: { 'application/json': { schema: jsonSchema(schema) } } });
@@ -117,8 +134,8 @@ export function ardentOpenApi(): object {
       Error: { type: 'object', required: ['error'], properties: { error: { type: 'object', required: ['code', 'message'], properties: { code: { type: 'string' }, message: { type: 'string' } } } } }
     } },
     paths: {
-      '/health/live': { get: { operationId: 'getLiveness', responses: { '200': { description: 'Process is running' } } } },
-      '/health/ready': { get: { operationId: 'getReadiness', responses: { '200': { description: 'Configured runtime ready' }, '503': { description: 'Runtime dependency unavailable' } } } },
+      '/health/live': { get: { operationId: 'getLiveness', responses: { '200': jsonResponse('Process is running (HiveCommon liveness body)', LiveBody) } } },
+      '/health/ready': { get: { operationId: 'getReadiness', description: 'HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded.', responses: { '200': jsonResponse('Configured runtime ready', ReadyBody), '503': jsonResponse('Runtime dependency unavailable', ReadyBody) } } },
       '/a2a/rest/extendedAgentCard': { get: { operationId: 'a2aGetExtendedAgentCard', description: 'Authenticated A2A v1 extended Agent Card on the separate A2A listener.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], responses: a2aResult } },
       '/a2a/rest/message:send': { post: { operationId: 'a2aSendMessage', description: 'Canonical A2A v1 HTTP+JSON send operation on the separate A2A listener.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], requestBody: a2aBody, responses: a2aResult } },
       '/a2a/rest/message:stream': { post: { operationId: 'a2aStreamMessage', description: 'Canonical A2A v1 HTTP+JSON streaming send.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], requestBody: a2aBody, responses: { ...a2aResult, '200': { description: 'A2A task/status/artifact SSE events', content: { 'text/event-stream': { schema: { type: 'string' } } } } } } },
@@ -171,7 +188,7 @@ export function ardentOpenApi(): object {
       '/api/v1/identity/{kind}': { get: { operationId: 'getIdentity', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'kind', required: true, schema: { type: 'string', enum: ['soul', 'identity'] } }], responses: { '200': { description: 'Identity text and revision' } } }, put: { operationId: 'saveIdentity', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'kind', required: true, schema: { type: 'string', enum: ['soul', 'identity'] } }], requestBody: { required: true, content: { 'application/json': { schema: toJsonSchema(IdentityEdit, 'openapi-3.0') } } }, responses: { '200': { description: 'Saved identity revision' }, '409': { description: 'Revision conflict' } } } },
       '/api/v1/identity/{kind}/history': { get: { operationId: 'getIdentityHistory', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'kind', required: true, schema: { type: 'string', enum: ['soul', 'identity'] } }], responses: { '200': { description: 'Previous versions' } } } },
       '/api/v1/identity/{kind}/restore': { post: { operationId: 'restoreIdentity', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'kind', required: true, schema: { type: 'string', enum: ['soul', 'identity'] } }], requestBody: { required: true, content: { 'application/json': { schema: toJsonSchema(IdentityRestore, 'openapi-3.0') } } }, responses: { '200': { description: 'Restored identity revision' }, '409': { description: 'Revision conflict' } } } },
-      '/api/v1/providers': { get: { operationId: 'getProviders', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Configured providers and Codex account mode' } } } },
+      '/api/v1/providers': { get: { operationId: 'getProviders', description: 'Configured providers. codex.auth_mode is the Codex account status (or the probe error) for a Codex profile, and not_selected for a llama.cpp profile unless probe=codex is given. The Codex probe is shared with readiness and cached for 30 seconds.', security: [{ bearerAuth: [] }], parameters: [{ in: 'query', name: 'probe', required: false, description: 'codex: probe the Codex account although llama.cpp is selected', schema: { type: 'string', enum: ['codex'] } }], responses: { '200': { description: 'Configured providers and Codex account mode' } } } },
       '/api/v1/providers/test': { post: { operationId: 'testProvider', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Selected provider probe' }, '503': { description: 'Provider unavailable' } } } },
       '/api/v1/channels': { get: { operationId: 'getChannels', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Channel configuration and credential presence' } } } },
       '/api/v1/channels/{name}/test': { post: { operationId: 'testChannel', security: [{ bearerAuth: [] }], parameters: [{ in: 'path', name: 'name', required: true, schema: { type: 'string', enum: ['telegram', 'mattermost'] } }], responses: { '200': { description: 'Read-only channel connection probe' }, '503': { description: 'Channel unavailable' } } } },
@@ -203,70 +220,89 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   // A saved configuration requires activation; it must not rotate the live
   // management credential before the gateway restarts with it.
   const apiTokenEnv = loaded.config.api.token_env;
-  // Readiness spawns Codex. Cache one result briefly and share an in-flight probe.
-  let codexReadiness: { at: number; problem: string | null } | undefined;
-  let codexProbe: Promise<string | null> | undefined;
-  const probeCodex = async (): Promise<string | null> => {
+  // Readiness and GET /providers spawn a Codex App Server. Cache one account
+  // status briefly and share an in-flight probe between them.
+  let codexAccount: { at: number; auth: string | null; error: string | null } | undefined;
+  let codexProbe: Promise<{ auth: string | null; error: string | null }> | undefined;
+  const probeCodex = async (): Promise<{ auth: string | null; error: string | null }> => {
     try {
       await assertCodexProtocol(runtime.config.providers.codex.command, env);
       const server = new CodexAppServer(runtime.config.providers.codex.command, runtime.profileDir, env);
       try {
         await server.initialize();
-        const auth = await server.accountStatus();
-        return auth === runtime.config.providers.codex.auth_mode ? null : auth === 'login-required' ? 'Codex login required' : 'Codex account uses the wrong auth mode';
+        return { auth: await server.accountStatus(), error: null };
       } finally { server.close(); }
-    } catch (error: unknown) { return error instanceof Error ? error.message : 'Codex App Server unavailable'; }
+    } catch (error: unknown) { return { auth: null, error: error instanceof Error ? error.message : 'Codex App Server unavailable' }; }
   };
-  const codexReadinessProblem = async (): Promise<string | null> => {
-    if (codexReadiness && Date.now() - codexReadiness.at < 30_000) return codexReadiness.problem;
-    codexProbe ??= probeCodex().then(problem => { codexReadiness = { at: Date.now(), problem }; return problem; })
+  const codexAccountStatus = async (): Promise<{ auth: string | null; error: string | null }> => {
+    if (codexAccount && Date.now() - codexAccount.at < CODEX_PROBE_CACHE_MS) return codexAccount;
+    codexProbe ??= probeCodex().then(result => { codexAccount = { at: Date.now(), ...result }; return result; })
       .finally(() => { codexProbe = undefined; });
     return codexProbe;
   };
+  const codexReadinessProblem = async (): Promise<string | null> => {
+    const { auth, error } = await codexAccountStatus();
+    if (error !== null) return error;
+    return auth === runtime.config.providers.codex.auth_mode ? null : auth === 'login-required' ? 'Codex login required' : 'Codex account uses the wrong auth mode';
+  };
+  // Errors map to a status by their type: a HiveError (src/errors.ts) keeps its
+  // status and code, a Zod validation error is a 400, and anything else is an
+  // internal error whose message the caller never sees.
   app.onError((error, c) => {
-    const message = error instanceof Error ? error.message : 'Request failed';
-    const status = /revision conflict|Idempotency key reused|already in progress/i.test(message) ? 409
-      : /not found|absent/i.test(message) ? 404
-      : /unavailable|stale|unconfigured|missing|login required|wrong auth mode|CODEX_LOGIN_REQUIRED|CODEX_WRONG_AUTH_MODE|fetch failed|ECONNREFUSED|ETIMEDOUT|timeout/i.test(message) ? 503
-      : error instanceof z.ZodError || error instanceof SyntaxError || /invalid|must be|exceeds|requires/i.test(message) ? 400 : 500;
-    const code = status === 409 ? 'CONFLICT' : status === 404 ? 'NOT_FOUND' : status === 503 ? 'DEPENDENCY_UNAVAILABLE' : status === 400 ? 'INVALID_REQUEST' : 'INTERNAL_ERROR';
-    // The caller sees only a generic message; record what failed so the operator can find it.
-    if (status === 500) logger.error('Unhandled management API error', { method: c.req.method, path: c.req.path, err: error });
-    return c.json({ error: { code, message: status === 500 ? 'Internal request error' : message.slice(0, 500) } }, status);
+    const typed = isHiveError(error) ? error : error instanceof z.ZodError ? invalidRequest(issues(error)) : undefined;
+    if (!typed || typed.status >= 500 && typed.status !== 503) {
+      // The caller sees only a generic message; record what failed so the operator can find it.
+      logger.error('Unhandled management API error', { method: c.req.method, path: c.req.path, err: error });
+      return c.json({ error: { code: ErrorCode.internal, message: 'Internal request error' } }, 500);
+    }
+    // A finished task's refusal kept its historical code on the wire.
+    const code = typed instanceof TaskTerminalError ? ErrorCode.conflict : typed.code;
+    return new Response(JSON.stringify({ error: { code, message: typed.message.slice(0, 500) } }), { status: typed.status, headers: { ...typed.headers, 'Content-Type': 'application/json' } });
   });
-  app.get('/health/live', c => c.json({ status: 'live' }));
+  const health = { service: 'ardent', version: ARDENT_VERSION } as const;
+  app.get('/health/live', c => c.json(liveness(health).body));
   app.get('/health/ready', async c => {
     // Advisory notices (such as a deprecated key) never make a profile unready.
     const problems = runtimeProblems(runtime.config, env).filter(problem => !isConfigNotice(problem));
-    if (!problems.length && runtime.config.execution.backend === 'codex') {
+    const checks: HealthCheck[] = [{ name: 'configuration', check: () => problems.length === 0 }];
+    // A backend is probed only once its configuration is complete.
+    if (!problems.length && runtime.config.execution.backend === 'codex') checks.push({ name: 'codex', timeoutMs: 30_000, check: async () => {
       const problem = await codexReadinessProblem();
       if (problem) problems.push(problem);
-    }
-    if (!problems.length && runtime.config.execution.backend === 'llamacpp') {
-      const base = resolveReference(runtime.config.providers.llamacpp.base_url, env);
-      if (base) {
-        try {
-          const token = env[runtime.config.providers.llamacpp.api_key_env];
-          const response = await fetch(llamaEndpoint(base, 'models'), { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(2000), redirect: 'manual' });
-          if (!response.ok) problems.push(`llama.cpp model discovery HTTP ${response.status}`);
-        } catch { problems.push('llama.cpp model endpoint is unavailable'); }
-      }
-    }
-    return c.json({ status: problems.length ? 'degraded' : 'ready', problems }, problems.length ? 503 : 200);
+      return !problem;
+    } });
+    const base = runtime.config.execution.backend === 'llamacpp' ? resolveReference(runtime.config.providers.llamacpp.base_url, env) : undefined;
+    if (!problems.length && base) checks.push({ name: 'llamacpp', timeoutMs: 3000, check: async signal => {
+      try {
+        const token = env[runtime.config.providers.llamacpp.api_key_env];
+        const response = await fetch(llamaEndpoint(base, 'models'), { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]), redirect: 'manual' });
+        if (!response.ok) problems.push(`llama.cpp model discovery HTTP ${response.status}`);
+        return response.ok;
+      } catch { problems.push('llama.cpp model endpoint is unavailable'); return false; }
+    } });
+    const result = await readiness({ ...health, checks });
+    for (const [name, report] of Object.entries(result.body.checks))
+      if (report.status === 'down' && report.error === 'timeout' && name !== 'configuration') problems.push(`${name} readiness check timed out`);
+    // The HiveCommon readiness body, plus `problems`; a 503 keeps the status `degraded` it always had.
+    return c.json({ ...result.body, status: problems.length ? 'degraded' : 'ready', problems }, problems.length ? 503 : 200);
   });
   app.get('/openapi.json', c => c.json(ardentOpenApi()));
   app.use('/api/v1/*', async (c, next) => {
     const expected = env[apiTokenEnv];
-    const supplied = c.req.header('Authorization')?.replace(/^Bearer /, '') ?? '';
+    // Only `Authorization: Bearer <token>` (scheme case-insensitive) authenticates; a bare token does not.
+    const supplied = readBearerToken(c.req.header('Authorization')) ?? '';
     if (!expected || !authEqual(supplied, expected)) return c.json({ error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } }, 401);
     return next();
   });
+  // Plugin routes have their own limit of the same size (src/plugin-http.ts).
+  app.use('/api/v1/*', bodyLimit({ maxSize: MANAGEMENT_BODY_LIMIT_BYTES,
+    onError: c => c.json({ error: { code: ErrorCode.tooLarge, message: `Request body exceeds ${MANAGEMENT_BODY_LIMIT_BYTES} bytes` } }, 413) }));
   app.get('/api/v1/status', c => { const tasks = runtime.store.taskCounts(); return c.json({ version: ARDENT_VERSION, profile: runtime.config.profile, backend: runtime.config.execution.backend,
     tasks: tasks.total, task_states: tasks.by_state,
     channels: { mattermost: { catchup: runtime.store.catchup.status('mattermost') } }, jobs: { last_tick_error: runtime.store.jobTickError() },
     capabilities: { artifact_transfer: 2 }, recovery: runtime.store.executionState.counts() }); });
   app.get('/api/v1/jobs/definitions/status', async c => {
-    if (!jobEngine) throw new Error('Job engine is unavailable');
+    if (!jobEngine) throw dependencyUnavailable('Job engine is unavailable');
     const status = await jobEngine.status();
     return c.json({ profile: runtime.config.profile, revision: status.active_revision,
       sha256: status.active_sha256, ...status, last_tick_error: runtime.store.jobTickError() });
@@ -275,12 +311,12 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   app.get('/api/v1/config', c => c.json({ revision: current.revision, text: current.text }));
   app.get('/api/v1/config/schema', c => c.json(toJsonSchema(ConfigSchema)));
   app.post('/api/v1/config/validate', async c => {
-    const input = parseJson(await c.req.json() as unknown, z.object({ text: z.string().min(1).max(200000) }).strict());
+    const input = parseJson(await readBody(c), z.object({ text: z.string().min(1).max(200000) }).strict());
     const config = parseConfig(input.text);
     return c.json({ valid: true, profile: config.profile, runtime_problems: runtimeProblems(config, env) });
   });
   app.put('/api/v1/config', async c => {
-    const edit = parseJson(await c.req.json() as unknown, ConfigEdit);
+    const edit = parseJson(await readBody(c), ConfigEdit);
     const revision = await saveConfig(runtime.profileDir, edit.text, edit.revision);
     current = await loadConfig(runtime.profileDir);
     return c.json({ revision, activation_required: true });
@@ -292,7 +328,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   app.put('/api/v1/identity/:kind', async c => {
     const kind = z.enum(['soul', 'identity']).parse(c.req.param('kind'));
-    const edit = parseJson(await c.req.json() as unknown, IdentityEdit);
+    const edit = parseJson(await readBody(c), IdentityEdit);
     return c.json(await writeIdentity(runtime.profileDir, runtime.config, kind, edit.text, edit.revision));
   });
   app.get('/api/v1/identity/:kind/history', async c => {
@@ -301,20 +337,19 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   app.post('/api/v1/identity/:kind/restore', async c => {
     const kind = z.enum(['soul', 'identity']).parse(c.req.param('kind'));
-    const input = parseJson(await c.req.json() as unknown, IdentityRestore);
+    const input = parseJson(await readBody(c), IdentityRestore);
     return c.json(await restoreIdentity(runtime.profileDir, runtime.config, kind, input.history_name, input.revision));
   });
   app.get('/api/v1/providers', async c => {
-    let codex: string = 'unconfigured';
-    try {
-      await assertCodexProtocol(runtime.config.providers.codex.command, env);
-      const server = new CodexAppServer(runtime.config.providers.codex.command, runtime.profileDir, env);
-      try { await server.initialize(); codex = await server.accountStatus(); }
-      finally { server.close(); }
-    } catch (error: unknown) { codex = error instanceof Error ? error.message : 'unavailable'; }
+    // A llama.cpp profile does not start Codex; ?probe=codex asks for its account status anyway (cached like readiness).
+    let codex = 'not_selected';
+    if (runtime.config.execution.backend === 'codex' || c.req.query('probe') === 'codex') {
+      const { auth, error } = await codexAccountStatus();
+      codex = error ?? auth ?? 'unavailable';
+    }
     return c.json({ selected: runtime.config.execution.backend, llamacpp: { base_url: runtime.config.providers.llamacpp.base_url, model: runtime.config.providers.llamacpp.model }, codex: { model: runtime.config.providers.codex.model, auth_mode: codex } });
   });
-  app.post('/api/v1/providers/test', async c => {
+  app.post('/api/v1/providers/test', async c => dependency(async () => {
     if (runtime.config.execution.backend === 'codex') {
       await assertCodexProtocol(runtime.config.providers.codex.command, env);
       const server = new CodexAppServer(runtime.config.providers.codex.command, runtime.profileDir, env);
@@ -322,52 +357,53 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
         await server.initialize();
         const auth = await server.accountStatus();
         // Match readiness: the account must use the configured auth mode (ChatGPT sign-in or API key).
-        if (auth !== runtime.config.providers.codex.auth_mode) throw new Error(auth === 'login-required' ? 'Codex login required' : 'Codex account uses the wrong auth mode');
+        if (auth !== runtime.config.providers.codex.auth_mode) throw dependencyUnavailable(auth === 'login-required' ? 'Codex login required' : 'Codex account uses the wrong auth mode');
         return c.json({ backend: 'codex', auth_mode: auth });
       }
       finally { server.close(); }
     }
     const result = await new LlamaCppBackend(runtime.config.providers.llamacpp, env).complete([{ role: 'user', content: 'Reply with READY.' }], [], AbortSignal.timeout(20000), false);
     return c.json({ backend: 'llamacpp', answer: result.content, usage: result.usage ?? null });
-  });
+  }, 'Provider unavailable'));
   app.get('/api/v1/channels', c => c.json({ telegram: { enabled: runtime.config.channels.telegram.enabled, token_configured: Boolean(env[runtime.config.channels.telegram.token_env]), allowed_user_count: runtime.config.channels.telegram.allowed_user_ids.length, allowed_chat_count: runtime.config.channels.telegram.allowed_chat_ids.length }, mattermost: { enabled: runtime.config.channels.mattermost.enabled, token_configured: Boolean(env[runtime.config.channels.mattermost.token_env]), allowed_user_count: runtime.config.channels.mattermost.allowed_user_ids.length, allowed_channel_count: runtime.config.channels.mattermost.allowed_channel_ids.length } }));
   app.post('/api/v1/channels/:name/test', async c => {
     const name = z.enum(['telegram', 'mattermost']).parse(c.req.param('name'));
-    if (name === 'telegram') {
-      const result = await new TelegramAdapter(runtime, runtime.config.channels.telegram, env).initialize(AbortSignal.timeout(10000));
-      return c.json({ name, status: 'reachable', bot: result, receive_mode: 'polling', polling_started: false });
-    }
-    const result = await new MattermostAdapter(runtime, runtime.config.channels.mattermost, env).initialize();
-    return c.json({ name, status: 'reachable', bot: result, socket_started: false });
+    return dependency(async () => {
+      if (name === 'telegram') {
+        const result = await new TelegramAdapter(runtime, runtime.config.channels.telegram, env).initialize(AbortSignal.timeout(10000));
+        return c.json({ name, status: 'reachable', bot: result, receive_mode: 'polling', polling_started: false });
+      }
+      const result = await new MattermostAdapter(runtime, runtime.config.channels.mattermost, env).initialize();
+      return c.json({ name, status: 'reachable', bot: result, socket_started: false });
+    }, 'Channel unavailable');
   });
   app.get('/api/v1/peers', async c => c.json({ peers: (await listPeers(runtime.profileDir, runtime.config)).map(peer => ({ ...peer,
     inbound_credential_configured: Boolean(env[inboundTokenEnv(peer)]), outbound_credential_configured: Boolean(env[outboundTokenEnv(peer)]),
     credential_configured: Boolean(env[inboundTokenEnv(peer)] && env[outboundTokenEnv(peer)]) })) }));
   app.get('/api/v1/peers/config', async c => c.json(await readPeersConfig(runtime.profileDir, runtime.config)));
   app.post('/api/v1/peers/validate', async c => {
-    const input = parseJson(await c.req.json() as unknown, z.object({ text: z.string().min(1).max(200000) }).strict());
+    const input = parseJson(await readBody(c), z.object({ text: z.string().min(1).max(200000) }).strict());
     return c.json({ valid: true, peers: parsePeersConfig(input.text).length });
   });
   app.put('/api/v1/peers/config', async c => {
-    const input = parseJson(await c.req.json() as unknown, ConfigEdit);
+    const input = parseJson(await readBody(c), ConfigEdit);
     return c.json({ revision: await savePeersConfig(runtime.profileDir, runtime.config, input.text, input.revision), activation_required: true });
   });
   app.post('/api/v1/peers/:id/test', async c => {
-    const { card } = await new ArdentA2AClient(runtime.profileDir, runtime.config, env).open(c.req.param('id'));
+    const { card } = await dependency(() => new ArdentA2AClient(runtime.profileDir, runtime.config, env).open(c.req.param('id')), 'Peer unavailable');
     return c.json({ peer: c.req.param('id'), status: 'reachable', card });
   });
   app.put('/api/v1/skills/:name', async c => {
-    const edit = parseJson(await c.req.json() as unknown, SkillEdit);
+    const edit = parseJson(await readBody(c), SkillEdit);
     const revision = await setSkillEnabled(runtime.profileDir, c.req.param('name'), edit.enabled, edit.revision);
     current = await loadConfig(runtime.profileDir);
     recordSkillChange(runtime.development, c.req.param('name'), edit.enabled, edit.revision, revision);
     return c.json({ revision, activation_required: true });
   });
   app.post('/api/v1/memory/search', async c => {
-    const input = parseJson(await c.req.json() as unknown, z.object({ query: z.string().trim().min(1).max(1000) }).strict());
-    if (runtime.config.memory.provider !== 'hivemem') throw new Error('Memory provider is unconfigured');
-    const client = new HiveMemClient(runtime.config.memory, env);
-    return c.json({ results: await client.search(input.query, 'private') });
+    const input = parseJson(await readBody(c), z.object({ query: z.string().trim().min(1).max(1000) }).strict());
+    if (runtime.config.memory.provider !== 'hivemem') throw dependencyUnavailable('Memory provider is unconfigured');
+    return c.json({ results: await dependency(() => new HiveMemClient(runtime.config.memory, env).search(input.query, 'private'), 'HiveMem unavailable') });
   });
   app.get('/api/v1/memory/status', async c => {
     const memory = runtime.config.memory;
@@ -403,7 +439,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const text = await c.req.text();
     if (text.trim()) {
       let body: unknown;
-      try { body = JSON.parse(text) as unknown; } catch { throw new Error('Invalid request: body must be empty or an empty JSON object'); }
+      try { body = JSON.parse(text) as unknown; } catch { throw invalidRequest('Invalid request: body must be empty or an empty JSON object'); }
       parseInput(body, z.object({}).strict());
     }
     const memory = runtime.config.memory;
@@ -417,7 +453,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   app.get('/api/v1/sessions', c => c.json({ sessions: runtime.store.listSessions('management', SessionContext.parse(c.req.query('context') ?? 'direct')) }));
   app.post('/api/v1/sessions', async c => {
-    const input = parseJson(await c.req.json() as unknown, SessionOpen);
+    const input = parseJson(await readBody(c), SessionOpen);
     const context = input.context ?? 'direct';
     return c.json(input.reset ? runtime.store.resetSession('management', context, input.key) : runtime.store.session('management', context, input.key));
   });
@@ -429,17 +465,17 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   const view = (task: z.infer<typeof TaskSchema>, execution = runtime.store.executionFor(task.id), recovery: RecoveryView | undefined = recoveryView(runtime.store, task)) =>
     ({ ...task, ...(execution ? { execution } : {}), ...(recovery ? { recovery } : {}) });
   app.post('/api/v1/tasks', async c => {
-    const input = parseJson(await c.req.json() as unknown, Submit);
+    const input = parseJson(await readBody(c), Submit);
     const task = runtime.accept(input.prompt, 'management', 'direct', input.idempotency_key, input.session_id, undefined, undefined, acceptance(c, input.execution));
     if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
     return c.json({ task_id: task.id, state: task.state }, 202);
   });
   app.post('/api/v1/missions', async c => {
-    const input = parseInput(await c.req.json() as unknown, MissionSubmit);
+    const input = parseInput(await readBody(c), MissionSubmit);
     let task;
     try { task = runtime.acceptMission(input, 'management', acceptance(c, input.execution)); }
     catch (error: unknown) {
-      if (error instanceof Error && /Session caller or context mismatch/.test(error.message)) throw new Error('Invalid session: open it with context mission');
+      if (error instanceof SessionMismatchError) throw new SessionMismatchError('Invalid session: open it with context mission');
       throw error;
     }
     if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
@@ -466,13 +502,9 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   app.post('/api/v1/tasks/:id/recovery', async c => {
     const id = c.req.param('id');
     if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
-    const input = parseInput(await c.req.json() as unknown, RecoveryDecisionInput);
-    let decided: Awaited<ReturnType<typeof runtime.decideRecovery>>;
-    try { decided = await runtime.decideRecovery(id, input, env, 'management'); }
-    catch (error: unknown) {
-      if (error instanceof RecoveryConflictError) return c.json({ error: { code: 'CONFLICT', message: error.message.slice(0, 500) } }, 409);
-      throw error;
-    }
+    const input = parseInput(await readBody(c), RecoveryDecisionInput);
+    // A RecoveryConflictError answers 409 CONFLICT.
+    const decided = await runtime.decideRecovery(id, input, env, 'management');
     if (decided.continuation?.state === 'queued') void runtime.run(decided.continuation.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
     return c.json(decided.recovery);
   });
@@ -529,21 +561,16 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   for (const action of ['pause', 'resume'] as const) app.post(`/api/v1/tasks/:id/${action}`, c => {
     const id = c.req.param('id');
     if (!runtime.store.get(id)) return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
-    try {
-      const { task, admission } = action === 'pause' ? runtime.pause(id) : runtime.resume(id);
-      return c.json({ task_id: task.id, state: task.state, admission });
-    } catch (error: unknown) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'TASK_TERMINAL')
-        return c.json({ error: { code: 'CONFLICT', message: error instanceof Error ? error.message : 'Task already finished' } }, 409);
-      throw error;
-    }
+    // A finished task throws TaskTerminalError: 409 CONFLICT.
+    const { task, admission } = action === 'pause' ? runtime.pause(id) : runtime.resume(id);
+    return c.json({ task_id: task.id, state: task.state, admission });
   });
   app.post('/api/v1/preview/tasks', async c => {
-    const input = parseInput(await c.req.json() as unknown, PreviewSubmit);
+    const input = parseInput(await readBody(c), PreviewSubmit);
     let task;
     try { task = runtime.acceptPreview(input, 'management', acceptance(c, input.execution)); }
     catch (error: unknown) {
-      if (error instanceof Error && /Session caller or context mismatch/.test(error.message)) throw new Error('Invalid session: open it with context preview');
+      if (error instanceof SessionMismatchError) throw new SessionMismatchError('Invalid session: open it with context preview');
       throw error;
     }
     if (task.state === 'queued') void runtime.run(task.id, env).catch(() => { /* Task failure is recorded in SQLite. */ });
@@ -557,7 +584,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     return c.json(await developmentPage({ records: runtime.development, profileDir: runtime.profileDir, config: runtime.config }, query));
   });
   app.post('/api/v1/development', async c => {
-    const { author, ...note } = parseInput(await c.req.json() as unknown, DevelopmentPost);
+    const { author, ...note } = parseInput(await readBody(c), DevelopmentPost);
     return c.json(runtime.development.add({ ...note, author: author ?? 'operator', epistemic: author === 'agent' ? 'agent_reported' : 'operator_reported' }), 201);
   });
   app.get('/api/v1/tasks/:id/artifacts', c => {
@@ -572,7 +599,7 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   });
   // Imports register before /artifacts/:id so their static segment is not read as a digest.
   app.post('/api/v1/artifacts/imports', async c => {
-    const record = transfers.start(parseInput(await c.req.json(), ArtifactImportRequestSchema), 'management');
+    const record = transfers.start(parseInput(await readBody(c), ArtifactImportRequestSchema), 'management');
     return c.json({ import_id: record.import_id }, 202);
   });
   app.get('/api/v1/artifacts/imports', c => c.json({ imports: transfers.list(PageLimit.parse(c.req.query('limit') ?? 50)) }));
@@ -618,6 +645,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
   for (const plugin of runtime.plugins) {
     if (!plugin.routes) continue;
     const sub = new Hono();
+    // A plugin error without a type answers as it did before typed errors.
+    sub.onError(error => { throw legacyPluginError(error); });
     plugin.routes(sub, ctx);
     app.route(`/api/v1/plugins/${plugin.name}`, sub);
   }

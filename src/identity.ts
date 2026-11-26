@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArdentConfig } from './config.js';
+import { conflict, invalidRequest, notFound } from './errors.js';
 
 export type IdentityKind = 'soul' | 'identity';
 export type IdentityFile = { kind: IdentityKind; name: string; text: string; revision: string };
@@ -13,19 +14,19 @@ const historyNamePattern = /^\d+-[a-f0-9]{12}-([a-f0-9]{64})\.md$/;
 export async function readIdentity(dir: string, config: ArdentConfig, kind: IdentityKind): Promise<IdentityFile> {
   const filename = name(config, kind);
   const text = await readFile(join(dir, filename), 'utf8');
-  if (Buffer.byteLength(text) > 128 * 1024) throw new Error('Identity file exceeds 128 KiB');
+  if (Buffer.byteLength(text) > 128 * 1024) throw invalidRequest('Identity file exceeds 128 KiB');
   return { kind, name: filename, text, revision: digest(text) };
 }
 
 export async function writeIdentity(dir: string, config: ArdentConfig, kind: IdentityKind, nextText: string, expectedRevision: string): Promise<IdentityFile> {
-  if (!nextText.trim() || Buffer.byteLength(nextText) > 128 * 1024) throw new Error('Identity text must be 1 to 128 KiB');
+  if (!nextText.trim() || Buffer.byteLength(nextText) > 128 * 1024) throw invalidRequest('Identity text must be 1 to 128 KiB');
   const history = historyDir(dir, kind);
   await mkdir(history, { recursive: true, mode: 0o700 });
   const lockPath = join(history, '.write.lock');
-  const lock = await open(lockPath, 'wx', 0o600).catch(() => { throw new Error('Identity edit is already in progress'); });
+  const lock = await open(lockPath, 'wx', 0o600).catch(() => { throw conflict('Identity edit is already in progress'); });
   try {
     const previous = await readIdentity(dir, config, kind);
-    if (previous.revision !== expectedRevision) throw new Error('Identity revision conflict');
+    if (previous.revision !== expectedRevision) throw conflict('Identity revision conflict');
     await writeFile(join(history, `${Date.now()}-${randomUUID().replaceAll('-', '').slice(0, 12)}-${previous.revision}.md`), previous.text, { mode: 0o600, flag: 'wx' });
     const temporary = join(dir, `.${previous.name}.${randomUUID()}.tmp`);
     await writeFile(temporary, nextText, { mode: 0o600, flag: 'wx' });
@@ -43,8 +44,11 @@ export async function identityHistory(dir: string, kind: IdentityKind): Promise<
 
 export async function restoreIdentity(dir: string, config: ArdentConfig, kind: IdentityKind, historyName: string, expectedRevision: string): Promise<IdentityFile> {
   const revision = historyNamePattern.exec(historyName)?.[1];
-  if (!revision) throw new Error('Invalid identity history entry');
-  const text = await readFile(join(historyDir(dir, kind), historyName), 'utf8');
+  if (!revision) throw invalidRequest('Invalid identity history entry');
+  const text = await readFile(join(historyDir(dir, kind), historyName), 'utf8').catch((error: unknown) => {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') throw notFound('Identity history entry not found');
+    throw error;
+  });
   if (digest(text) !== revision) throw new Error('Identity history checksum mismatch');
   return writeIdentity(dir, config, kind, text, expectedRevision);
 }

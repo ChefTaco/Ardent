@@ -480,6 +480,43 @@ Codex model and reasoning effort and configures context compaction for all
 profiles under that home. [`model-policy.default.json`](model-policy.default.json)
 is a starting point; compaction is disabled until you enable it.
 
+### Management API
+
+The management API listens on loopback (`api.port`) and serves its OpenAPI
+document at `/openapi.json` (pinned in `openapi/ardent.json`). Every
+`/api/v1/` route needs `Authorization: Bearer <token>` with the value of the
+variable `api.token_env` names; the scheme is case-insensitive, and a bare
+token without it is refused. Request bodies are limited to 1 MiB (`413
+BODY_TOO_LARGE`).
+
+Errors use the suite envelope `{ "error": { "code", "message" } }`. The status
+comes from the error's type, never from its message:
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | The body is not JSON or fails validation, or a value is not allowed |
+| 401 | `UNAUTHORIZED` | No valid bearer token |
+| 404 | `NOT_FOUND` | The task, session, skill, peer, import or history entry does not exist |
+| 409 | `CONFLICT` | A revision or idempotency-key conflict, an edit in progress, a finished task, a recovery decision that is not valid now |
+| 413 | `BODY_TOO_LARGE` | The body is over 1 MiB |
+| 503 | `DEPENDENCY_UNAVAILABLE` | A provider, channel, peer or HiveMem probe failed, or the dependency is not configured |
+| 503 | `NOT_ACCEPTING_WORK` | The gateway is draining for shutdown, or its admission is fenced for a rollback |
+| 500 | `INTERNAL_ERROR` | Anything else; the message is always "Internal request error" and the gateway logs the cause |
+
+Plugins throw `HiveError`s (`invalidRequest`, `notFound`, `conflict`,
+`dependencyUnavailable` from `@hivemagnus/ardent/plugin-sdk`) to choose a
+status. A plugin route error without a type is still classified by its message,
+as before 3.4, so existing plugins answer as they did.
+
+`/health/live` and `/health/ready` need no token and answer with the HiveCommon
+health bodies (`status`, `service`, `version`, `time`, and for readiness
+`checks`). Readiness also lists `problems`, and its status stays `degraded` when
+it answers 503. It probes the selected backend only once the configuration is
+complete. `GET /api/v1/providers` starts the Codex App Server only for a Codex
+profile (`?probe=codex` asks a llama.cpp profile too; `auth_mode` is
+`not_selected` otherwise); readiness and `/providers` share one Codex account
+probe for 30 seconds.
+
 ### Live task streams
 
 `GET /api/v1/tasks/{id}/stream` is a server-sent event stream. It sends:

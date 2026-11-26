@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { z } from 'zod';
 import { instanceRefProblem } from './execution.js';
+import { conflict, invalidRequest } from './errors.js';
 
 const envName = /^[A-Z][A-Z0-9_]*$/;
 const pathName = /^[A-Za-z0-9._-]+\.md$/;
@@ -119,10 +120,10 @@ export function revision(text: string): string { return createHash('sha256').upd
 
 export function parseConfig(text: string): ArdentConfig {
   const doc = YAML.parseDocument(text, { uniqueKeys: true });
-  if (doc.errors.length) throw new Error(`Invalid YAML: ${doc.errors[0]?.message ?? 'unknown error'}`);
+  if (doc.errors.length) throw invalidRequest(`Invalid YAML: ${doc.errors[0]?.message ?? 'unknown error'}`);
   const value: unknown = doc.toJS();
   const parsed = ConfigSchema.safeParse(value);
-  if (!parsed.success) throw new Error(`Invalid Ardent config: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  if (!parsed.success) throw invalidRequest(`Invalid Ardent config: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   return parsed.data;
 }
 
@@ -249,13 +250,13 @@ export async function saveConfig(dir: string, nextText: string, expectedRevision
   const path = join(dir, 'config.yaml');
   const lockPath = join(dir, '.config.write.lock');
   const lock = await open(lockPath, 'wx', 0o600).catch((error: unknown) => {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw new Error('Configuration edit is already in progress');
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw conflict('Configuration edit is already in progress');
     throw error;
   });
   let tmp: string | undefined;
   try {
     const current = await loadConfig(dir);
-    if (current.revision !== expectedRevision) throw new Error('Configuration revision conflict');
+    if (current.revision !== expectedRevision) throw conflict('Configuration revision conflict');
     parseConfig(nextText);
     tmp = join(dirname(path), `.config.${randomUUID()}.tmp`);
     await writeFile(tmp, nextText, { mode: 0o600, flag: 'wx' });

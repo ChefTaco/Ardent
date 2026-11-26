@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { HiveMemConfig } from './config.js';
 import { resolveReference } from './config.js';
+import { dependencyUnavailable } from './errors.js';
 
 const Memory = z.object({ id: z.string(), agent_id: z.string(), content: z.string(), scope: z.enum(['private', 'shared']), workspace_id: z.string().optional(),
   created_at: z.string().optional(), metadata: z.object({ project_id: z.string().optional() }).passthrough().optional() }).passthrough();
@@ -15,11 +16,11 @@ export class HiveMemClient {
   readonly workspaceId: string;
   readonly agentId: string;
   constructor(config: HiveMemConfig | { provider: 'none' }, env: NodeJS.ProcessEnv = process.env) {
-    if (config.provider !== 'hivemem') throw new Error('Memory provider is not configured (memory.provider: none)');
+    if (config.provider !== 'hivemem') throw dependencyUnavailable('Memory provider is not configured (memory.provider: none)');
     const base = resolveReference(config.base_url, env);
     const workspace = resolveReference(config.workspace_id, env);
     const token = env[config.token_env];
-    if (!base || !workspace || !token) throw new Error('HiveMem URL, workspace, or scoped token is unconfigured');
+    if (!base || !workspace || !token) throw dependencyUnavailable('HiveMem URL, workspace, or scoped token is unconfigured');
     const url = new URL(base);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('HiveMem URL is invalid');
     this.base = url.toString();

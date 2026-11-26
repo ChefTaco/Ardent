@@ -7,6 +7,7 @@ import { CatchupJournal } from './channel-catchup.js';
 import { TaskExecutions, type ExecutionContext, type TaskExecution } from './execution.js';
 import { ExecutionStates } from './execution-state.js';
 import { planRecovery, type RecoveryPlanOptions } from './recovery.js';
+import { SessionMismatchError, TaskTerminalError, conflict, invalidRequest, notAcceptingWork, notFound } from './errors.js';
 
 export const TaskState = z.enum(['queued', 'running', 'input_required', 'completed', 'partial', 'failed', 'cancelled', 'unknown']);
 export type TaskState = z.infer<typeof TaskState>;
@@ -142,7 +143,7 @@ export class TaskStore {
     z.string().guid().parse(releaseId);
     return this.db.transaction(() => {
       const prior = this.admissionFence();
-      if (prior && prior.release_id !== releaseId) throw new Error('Admission is already fenced by another release');
+      if (prior && prior.release_id !== releaseId) throw conflict('Admission is already fenced by another release');
       if (!prior) this.db.prepare('INSERT INTO admission_fence(singleton,release_id,closed_ms) VALUES (1,?,?)').run(releaseId, Date.now());
       const state = this.admissionFence()!;
       const count = (sql: string) => z.object({ count: z.number().int() }).parse(this.db.prepare(sql).get()).count;
@@ -158,7 +159,7 @@ export class TaskStore {
     })();
   }
   session(caller: string, context: TaskContext, key: string): Session {
-    if (!caller || caller.length > 128 || !key || key.length > 256) throw new Error('Invalid session identity');
+    if (!caller || caller.length > 128 || !key || key.length > 256) throw invalidRequest('Invalid session identity');
     return this.db.transaction(() => {
       const previous = this.db.prepare('SELECT * FROM sessions WHERE caller=? AND context=? AND key=?').get(caller, context, key);
       if (previous) return SessionSchema.parse(previous);
@@ -180,7 +181,7 @@ export class TaskStore {
   }
   sessionMessages(sessionId: string, caller: string, limit = 100): SessionMessage[] {
     const session = this.db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId);
-    if (!session || SessionSchema.parse(session).caller !== caller) throw new Error('Session not found');
+    if (!session || SessionSchema.parse(session).caller !== caller) throw notFound('Session not found');
     return this.db.prepare('SELECT * FROM (SELECT * FROM session_messages WHERE session_id=? ORDER BY sequence DESC LIMIT ?) ORDER BY sequence').all(sessionId, Math.max(1, Math.min(limit, 500))).map(row => SessionMessageSchema.parse(row));
   }
   /**
@@ -194,21 +195,21 @@ export class TaskStore {
    */
   accept(input: { caller: string; context: TaskContext; sessionId?: string; prompt: string; idempotencyKey?: string; backend: 'llamacpp' | 'codex'; deadlineMs: number;
     content?: unknown; onAccepted?: (task: Task) => void; execution?: (task: Task) => TaskExecution; suppressSessionUserMessage?: boolean }): Task {
-    if (!input.caller || input.caller.length > 128 || !input.prompt.trim() || input.prompt.length > 16000 || (input.idempotencyKey && input.idempotencyKey.length > 128)) throw new Error('Invalid task input');
+    if (!input.caller || input.caller.length > 128 || !input.prompt.trim() || input.prompt.length > 16000 || (input.idempotencyKey && input.idempotencyKey.length > 128)) throw invalidRequest('Invalid task input');
     const hash = createHash('sha256').update(JSON.stringify(input.content === undefined ? [input.prompt, input.backend] : [input.prompt, input.backend, input.content])).digest('hex');
     return this.db.transaction(() => {
-      if (this.admissionFence()) throw new Error('Profile admission is fenced for rollback');
+      if (this.admissionFence()) throw notAcceptingWork('Profile admission is fenced for rollback');
       if (input.sessionId) {
         const session = this.db.prepare('SELECT * FROM sessions WHERE id=?').get(input.sessionId);
-        if (!session) throw new Error('Session not found');
+        if (!session) throw notFound('Session not found');
         const scoped = SessionSchema.parse(session);
-        if (scoped.caller !== input.caller || scoped.context !== input.context) throw new Error('Session caller or context mismatch');
+        if (scoped.caller !== input.caller || scoped.context !== input.context) throw new SessionMismatchError();
       }
       if (input.idempotencyKey) {
         const previous = this.db.prepare('SELECT * FROM tasks WHERE caller=? AND context=? AND idempotency_key=?').get(input.caller, input.context, input.idempotencyKey);
         if (previous) {
           const task = TaskSchema.parse(previous);
-          if (task.content_hash !== hash) throw new Error('Idempotency key reused with different task content');
+          if (task.content_hash !== hash) throw conflict('Idempotency key reused with different task content');
           return task;
         }
       }
@@ -264,7 +265,7 @@ export class TaskStore {
           'mattermost_dm', 'mattermost_channel', 'chattermost_dm', 'chattermost_channel'].includes(channelType))
       throw new Error('Inbound channel type differs from platform');
     return this.db.transaction(() => {
-      if (this.admissionFence()) throw new Error('Profile admission is fenced for rollback');
+      if (this.admissionFence()) throw notAcceptingWork('Profile admission is fenced for rollback');
       const row = this.db.prepare('SELECT task_id,channel_type FROM channel_inbound WHERE platform=? AND account=? AND update_id=?').get(platform, account, updateId);
       if (row) {
         const prior = z.object({ task_id: z.string().nullable(), channel_type: z.string() }).parse(row);
@@ -331,12 +332,12 @@ export class TaskStore {
   setTaskAdmission(id: string, admission: 'open' | 'paused'): { task: Task; admission: 'open' | 'paused'; changed: boolean } {
     return this.db.transaction(() => {
       const task = this.get(id);
-      if (!task) throw new Error('Task not found');
+      if (!task) throw notFound('Task not found');
       const prior = this.taskAdmission(id);
       if (prior === admission) return { task, admission, changed: false };
       if (!['queued', 'running'].includes(task.state)) {
         if (admission === 'open') return { task, admission: prior, changed: false };
-        throw Object.assign(new Error(`Task is ${task.state}; only queued or running tasks can be paused`), { code: 'TASK_TERMINAL' });
+        throw new TaskTerminalError(`Task is ${task.state}; only queued or running tasks can be paused`);
       }
       this.db.prepare(`INSERT INTO task_admission(task_id,admission,updated_ms) VALUES (?,?,?)
         ON CONFLICT(task_id) DO UPDATE SET admission=excluded.admission,updated_ms=excluded.updated_ms`).run(id, admission, Date.now());
@@ -373,7 +374,7 @@ export class TaskStore {
   }
   startQueued(id: string): void {
     this.db.transaction(() => {
-      if (this.admissionFence()) throw new Error('Profile admission is fenced for rollback');
+      if (this.admissionFence()) throw notAcceptingWork('Profile admission is fenced for rollback');
       const task = this.get(id);
       if (!task || task.state !== 'queued') throw new Error('Task is no longer queued');
       this.db.prepare('UPDATE tasks SET state=?,updated_ms=? WHERE id=?').run('running', Date.now(), id);

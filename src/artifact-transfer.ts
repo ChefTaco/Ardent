@@ -16,6 +16,7 @@ import type { ArdentRuntime } from './runtime.js';
 import { buildTaskExecution } from './execution.js';
 import { TeamArtifactDescriptorSchema, TeamArtifactDescriptorV2Schema, TeamArtifactRequiresV2Schema } from './team-artifacts.js';
 import { ProvenNoEffectError } from './tools.js';
+import { notFound } from './errors.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = z.string().regex(/^[a-f0-9]{32}$/);
@@ -136,7 +137,7 @@ export class ArtifactTransfers {
    */
   request(input: ArtifactImportRequest, caller = 'management'): ArtifactImport {
     const request = ArtifactImportRequestSchema.parse(input);
-    if (request.task_id && !this.runtime.store.get(request.task_id)) throw new Error('Local task not found');
+    if (request.task_id && !this.runtime.store.get(request.task_id)) throw notFound('Local task not found');
     const db = this.runtime.store.db;
     return db.transaction(() => {
       const existing = db.prepare('SELECT * FROM artifact_transfers WHERE peer_id=? AND a2a_task_id=? AND artifact_id=?')
@@ -455,7 +456,7 @@ export class ArtifactTransfers {
 
   #row(id: string): ImportRow {
     const raw = this.runtime.store.db.prepare('SELECT * FROM artifact_transfers WHERE id=?').get(id);
-    if (!raw) throw new Error('Artifact import not found');
+    if (!raw) throw notFound('Artifact import not found');
     return Row.parse(raw);
   }
 
