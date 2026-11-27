@@ -96,9 +96,11 @@ export const ConfigSchema = z.object({
   artifacts: z.object({ max_bytes: z.number().int().min(1024).max(64 * 1024 * 1024).default(2 * 1024 * 1024) }).strict().default({ max_bytes: 2 * 1024 * 1024 }),
   /**
    * Scheduled journal retention, off unless enabled: the gateway runs `ardent prune` once a day for
-   * finished tasks older than `older_than_days`.
+   * finished tasks older than `older_than_days`. With `min_profile_mb`, a run prunes only while the
+   * profile holds more than that many MiB (used journal pages plus artifact files).
    */
-  retention: z.object({ enabled: z.boolean().default(false), older_than_days: z.number().int().min(1).max(3650).default(90) }).strict()
+  retention: z.object({ enabled: z.boolean().default(false), older_than_days: z.number().int().min(1).max(3650).default(90),
+    min_profile_mb: z.number().int().min(1).max(1_048_576).optional() }).strict()
     .default({ enabled: false, older_than_days: 90 }),
   /** Plugin modules loaded by the gateway (npm package names, absolute paths, or file:// URLs). */
   plugins: z.array(pluginSpecifier).max(32).default([]),

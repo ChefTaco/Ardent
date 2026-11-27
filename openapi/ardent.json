@@ -413,7 +413,7 @@
     "/health/ready": {
       "get": {
         "operationId": "getReadiness",
-        "description": "HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded.",
+        "description": "HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 answers status not_ready, as HiveCommon readiness does.",
         "responses": {
           "200": {
             "description": "Configured runtime ready",
@@ -426,7 +426,7 @@
                       "type": "string",
                       "enum": [
                         "ready",
-                        "degraded"
+                        "not_ready"
                       ]
                     },
                     "service": {
@@ -502,7 +502,7 @@
                       "type": "string",
                       "enum": [
                         "ready",
-                        "degraded"
+                        "not_ready"
                       ]
                     },
                     "service": {

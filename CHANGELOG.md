@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Upgrade notes
+
+- `GET /health/ready` now answers `status: not_ready` with its 503, the HiveCommon readiness word for a service that cannot serve; Ardent 3.5.1 and earlier said `degraded`. The HTTP status codes, `problems` and `checks` are unchanged, and `GET /api/v1/memory/status` still says `degraded` when HiveMem is unavailable (the runtime keeps serving). A monitor that matched the body's `degraded` should match the 503, or `not_ready`. No journal migration and no configuration change; downgrading is safe.
+
+### Added
+
+- `retention.min_profile_mb`: scheduled retention prunes only while the profile holds more than that many MiB (used journal pages plus artifact files), so pruning can be on for every profile and act only on the large ones. `ardent prune --min-size-mb N` does the same by hand, and prune output now includes `profile_bytes` when a threshold is given, plus `skipped: below_min_size` when the profile was under it. Unset, retention behaves as before.
+
+### Changed
+
+- `/health/ready` reports `not_ready` instead of `degraded` when it answers 503.
+
 ## 3.5.1 - 2026-11-26
 
 ### Upgrade notes

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, cp, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifacts.js';
@@ -33,6 +33,8 @@ export type PruneOptions = {
   /** Tasks per pass; the prune runs passes until none is left. Default 500. */
   batch?: number;
   now?: number;
+  /** Prune only while the profile holds more than this many bytes (see `profileSize`); below it nothing is deleted. */
+  minProfileBytes?: number;
 };
 export type PruneResult = {
   dry_run: boolean;
@@ -40,7 +42,34 @@ export type PruneResult = {
   tasks: number;
   rows: Record<string, number>;
   artifacts: { deleted: number; retained: number };
+  /** The profile's size before the prune, when a size threshold was given. */
+  profile_bytes?: number;
+  /** `below_min_size` when the profile was under the threshold and nothing was looked at. */
+  skipped?: 'below_min_size';
 };
+
+export type ProfileSize = { journal_bytes: number; artifact_bytes: number; total_bytes: number };
+
+/**
+ * What a profile holds: the journal's used pages (pages a prune freed are left
+ * out, since SQLite keeps the file size until a vacuum) plus the stored
+ * artifact files. Temporary and partial uploads are not counted.
+ */
+export async function profileSize(store: TaskStore, artifacts: ArtifactStore): Promise<ProfileSize> {
+  const pragma = (name: 'page_count' | 'freelist_count' | 'page_size') => z.object({ [name]: z.number().int() }).parse(store.db.prepare(`PRAGMA ${name}`).get())[name] ?? 0;
+  const journal = Math.max(0, pragma('page_count') - pragma('freelist_count')) * pragma('page_size');
+  let artifact = 0;
+  const names = await readdir(artifacts.directory).catch((error: unknown) => {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return [] as string[];
+    throw error;
+  });
+  for (const name of names) {
+    if (name.startsWith('.')) continue;
+    const info = await lstat(join(artifacts.directory, name)).catch(() => undefined);
+    if (info?.isFile()) artifact += info.size;
+  }
+  return { journal_bytes: journal, artifact_bytes: artifact, total_bytes: journal + artifact };
+}
 
 const ids = z.array(z.object({ id: z.string() }));
 
@@ -107,6 +136,13 @@ export async function pruneJournal(store: TaskStore, artifacts: ArtifactStore, o
   if (!Number.isSafeInteger(options.olderThanMs) || options.olderThanMs < MIN_RETENTION_MS) throw invalidRequest('Retention must be at least one day');
   const now = options.now ?? Date.now();
   const cutoff = now - options.olderThanMs;
+  let profileBytes: number | undefined;
+  if (options.minProfileBytes !== undefined) {
+    if (!Number.isSafeInteger(options.minProfileBytes) || options.minProfileBytes < 0) throw invalidRequest('The size threshold must be a whole number of bytes');
+    profileBytes = (await profileSize(store, artifacts)).total_bytes;
+    if (profileBytes <= options.minProfileBytes)
+      return { dry_run: options.dryRun ?? false, cutoff: new Date(cutoff).toISOString(), tasks: 0, rows: {}, artifacts: { deleted: 0, retained: 0 }, profile_bytes: profileBytes, skipped: 'below_min_size' };
+  }
   const db = store.db;
   const rows: Record<string, number> = {};
   const add = (table: string, count: number) => { rows[table] = (rows[table] ?? 0) + count; };
@@ -142,7 +178,7 @@ export async function pruneJournal(store: TaskStore, artifacts: ArtifactStore, o
     await artifacts.delete(sha).catch(() => undefined);
     result.deleted++;
   }
-  return { dry_run: options.dryRun ?? false, cutoff: new Date(cutoff).toISOString(), tasks, rows, artifacts: result };
+  return { dry_run: options.dryRun ?? false, cutoff: new Date(cutoff).toISOString(), tasks, rows, artifacts: result, ...(profileBytes === undefined ? {} : { profile_bytes: profileBytes }) };
 }
 
 /** `90d`, `36h` or `45m`. */

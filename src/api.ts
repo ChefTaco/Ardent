@@ -68,7 +68,7 @@ const PageLimit = z.coerce.number().int().min(1).max(100);
 const HiveMemCredential = z.string().max(16384).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
 const HealthCheckReport = z.object({ status: z.enum(['up', 'down']), critical: z.boolean(), latencyMs: z.number(), error: z.string().optional(), details: z.record(z.string(), z.unknown()).optional() });
 const LiveBody = z.object({ status: z.literal('live'), service: z.string(), version: z.string(), time: z.string() });
-const ReadyBody = z.object({ status: z.enum(['ready', 'degraded']), service: z.string(), version: z.string(), time: z.string(),
+const ReadyBody = z.object({ status: z.enum(['ready', 'not_ready']), service: z.string(), version: z.string(), time: z.string(),
   checks: z.record(z.string(), HealthCheckReport).describe('configuration, and codex or llamacpp when probed'), problems: z.array(z.string()) });
 /** How long a replaced inbound credential stays valid after a rotation, unless the request says otherwise. */
 const DEFAULT_CREDENTIAL_OVERLAP_SECONDS = 300;
@@ -159,7 +159,7 @@ export function ardentOpenApi(): object {
     } },
     paths: {
       '/health/live': { get: { operationId: 'getLiveness', responses: { '200': jsonResponse('Process is running (HiveCommon liveness body)', LiveBody) } } },
-      '/health/ready': { get: { operationId: 'getReadiness', description: 'HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded.', responses: { '200': jsonResponse('Configured runtime ready', ReadyBody), '503': jsonResponse('Runtime dependency unavailable', ReadyBody) } } },
+      '/health/ready': { get: { operationId: 'getReadiness', description: 'HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 answers status not_ready, as HiveCommon readiness does.', responses: { '200': jsonResponse('Configured runtime ready', ReadyBody), '503': jsonResponse('Runtime dependency unavailable', ReadyBody) } } },
       '/a2a/rest/extendedAgentCard': { get: { operationId: 'a2aGetExtendedAgentCard', description: 'Authenticated A2A v1 extended Agent Card on the separate A2A listener.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], responses: a2aResult } },
       '/a2a/rest/message:send': { post: { operationId: 'a2aSendMessage', description: 'Canonical A2A v1 HTTP+JSON send operation on the separate A2A listener.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], requestBody: a2aBody, responses: a2aResult } },
       '/a2a/rest/message:stream': { post: { operationId: 'a2aStreamMessage', description: 'Canonical A2A v1 HTTP+JSON streaming send.', servers: a2aServer, security: [{ bearerAuth: [] }], parameters: [a2aVersion], requestBody: a2aBody, responses: { ...a2aResult, '200': { description: 'A2A task/status/artifact SSE events', content: { 'text/event-stream': { schema: { type: 'string' } } } } } } },
@@ -328,8 +328,8 @@ export function createArdentApi(runtime: ArdentRuntime, loaded: LoadedConfig, en
     const result = await readiness({ ...health, checks });
     for (const [name, report] of Object.entries(result.body.checks))
       if (report.status === 'down' && report.error === 'timeout' && name !== 'configuration') problems.push(`${name} readiness check timed out`);
-    // The HiveCommon readiness body, plus `problems`; a 503 keeps the status `degraded` it always had.
-    return c.json({ ...result.body, status: problems.length ? 'degraded' : 'ready', problems }, problems.length ? 503 : 200);
+    // The HiveCommon readiness body, plus `problems`; a 503 answers `not_ready`, the HiveCommon word for a service that cannot serve.
+    return c.json({ ...result.body, status: problems.length ? 'not_ready' : 'ready', problems }, problems.length ? 503 : 200);
   });
   app.get('/openapi.json', c => c.json(ardentOpenApi()));
   // After POST /api/v1/credentials/management/reload the replaced token stays valid until its overlap ends.

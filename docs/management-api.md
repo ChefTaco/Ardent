@@ -39,12 +39,12 @@ on the last one). Filters combine: `state` (comma-separated, for example
 
 `/health/live` and `/health/ready` need no token and answer with the HiveCommon
 health bodies (`status`, `service`, `version`, `time`, and for readiness
-`checks`). Readiness also lists `problems`, and its status stays `degraded` when
-it answers 503. It probes the selected backend only once the configuration is
-complete. `GET /api/v1/providers` starts the Codex App Server only for a Codex
-profile (`?probe=codex` asks a llama.cpp profile too; `auth_mode` is
-`not_selected` otherwise); readiness and `/providers` share one Codex account
-probe for 30 seconds.
+`checks`). Readiness also lists `problems`, and its status is `not_ready` when
+it answers 503 (Ardent 3.5.1 and earlier said `degraded`). It probes the
+selected backend only once the configuration is complete. `GET /api/v1/providers`
+starts the Codex App Server only for a Codex profile (`?probe=codex` asks a
+llama.cpp profile too; `auth_mode` is `not_selected` otherwise); readiness and
+`/providers` share one Codex account probe for 30 seconds.
 
 ## Metrics
 

@@ -27,7 +27,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 keeps the status degraded. */
+        /** @description HiveCommon readiness body plus problems. The configuration check runs first; the selected backend (codex or llamacpp) is probed only when the configuration is complete. A 503 answers status not_ready, as HiveCommon readiness does. */
         get: operations["getReadiness"];
         put?: never;
         post?: never;
@@ -1093,7 +1093,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         /** @enum {string} */
-                        status: "ready" | "degraded";
+                        status: "ready" | "not_ready";
                         service: string;
                         version: string;
                         time: string;
@@ -1122,7 +1122,7 @@ export interface operations {
                 content: {
                     "application/json": {
                         /** @enum {string} */
-                        status: "ready" | "degraded";
+                        status: "ready" | "not_ready";
                         service: string;
                         version: string;
                         time: string;

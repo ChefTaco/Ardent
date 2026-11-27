@@ -63,7 +63,19 @@ to (A2A, team, job or plugin tables). The shortest retention is one day.
 retention:
   enabled: false        # default; the gateway then prunes once a day
   older_than_days: 90
+  min_profile_mb: 512   # optional: prune only while the profile holds more than 512 MiB
 ```
+
+With `min_profile_mb`, each daily run first measures the profile: the
+journal's used pages plus the stored artifact files. Pages an earlier prune
+freed are not counted, because SQLite keeps the file at its size until a
+vacuum, and temporary or partial uploads are not counted either. A profile at
+or under the threshold is left alone that day. Over it, the run prunes
+finished tasks older than `older_than_days` as usual; it does not keep
+deleting until the profile is under the threshold, so a profile that is mostly
+session transcripts (which are kept) can stay over it. `ardent prune
+--min-size-mb N` applies the same check by hand, and its output shows
+`profile_bytes`, plus `skipped: below_min_size` when it did nothing.
 
 ## Journal quiescence
 

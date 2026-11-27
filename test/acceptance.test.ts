@@ -21,7 +21,7 @@ async function fixture(options: { version?: string; profile?: string; ready?: bo
     if (request.url === '/api/v1/status') {
       if (request.headers.authorization !== 'Bearer synthetic-management-token') { response.writeHead(401).end('{}'); return; }
       response.end(JSON.stringify({ version: options.version ?? ARDENT_VERSION, profile: options.profile ?? config.profile, backend: config.execution.backend }));
-    } else if (request.url === '/health/ready') response.end(JSON.stringify(options.ready === false ? { status: 'degraded', problems: ['synthetic private upstream diagnostic'] } : { status: 'ready', problems: [] }));
+    } else if (request.url === '/health/ready') response.end(JSON.stringify(options.ready === false ? { status: 'not_ready', problems: ['synthetic private upstream diagnostic'] } : { status: 'ready', problems: [] }));
     else response.writeHead(404).end('{}');
   });
   server.listen(0, '127.0.0.1');
