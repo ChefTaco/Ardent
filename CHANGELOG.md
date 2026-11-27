@@ -13,6 +13,7 @@
 ### Changed
 
 - `/health/ready` reports `not_ready` instead of `degraded` when it answers 503.
+- The native image installs Debian security fixes published after its pinned base (currently the PAM fix for CVE-2025-6020), so the image scan passes while the upstream digest lags.
 
 ## 3.5.1 - 2026-11-26
 
