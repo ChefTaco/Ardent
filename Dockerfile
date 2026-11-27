@@ -19,6 +19,12 @@ RUN npm ci --no-audit --no-fund --ignore-scripts \
     && tar -xzf /packages/hivemagnus-ardent-*.tgz --strip-components=1 -C /opt/ardent/node_modules/@hivemagnus/ardent
 
 FROM ${NODE_IMAGE} AS runtime
+# Debian security fixes published after the pinned base image (the base digest
+# lags them), then the package lists go. Native exports copy only the Node binary
+# and the application, so these packages stay in the image.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 # Native exports and the CLI run on node alone. Package managers are build-only
 # tools; retaining their bundled dependencies would ship avoidable vulnerabilities.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \

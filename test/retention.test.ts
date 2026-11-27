@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, parseConfig } from '../src/config.js';
 import { inspectJournal } from '../src/journal.js';
-import { backupProfile, parseDuration, pruneJournal } from '../src/retention.js';
+import { backupProfile, parseDuration, profileSize, pruneJournal } from '../src/retention.js';
 import { ArdentRuntime } from '../src/runtime.js';
 import { initTestProfile } from './helpers.js';
 
@@ -99,6 +99,44 @@ describe('journal retention (ardent prune)', () => {
     const { dir } = await setup();
     const config = parseConfig(await readFile(join(dir, 'config.yaml'), 'utf8'));
     expect(config.retention).toEqual({ enabled: false, older_than_days: 90 });
+  });
+
+  it('prunes only while the profile is over its size threshold', async () => {
+    const { runtime } = await setup();
+    let now = T0;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const old = runtime.accept('Old report', 'management');
+    await runtime.artifactManifests.registerStream({ taskId: old.id, name: 'report.pdf', mime: 'application/pdf', stream: Readable.from([pdf('x'.repeat(4096))]), source: 'fixture' });
+    runtime.store.setState(old.id, 'completed', 'done');
+    now = T0 + 100 * DAY;
+    // A partial upload or temporary file is not part of the profile's size.
+    await writeFile(join(runtime.artifacts.directory, '.leftover.tmp'), Buffer.alloc(8192));
+    const size = await profileSize(runtime.store, runtime.artifacts);
+    expect(size.artifact_bytes).toBeGreaterThan(4096);
+    expect(size.artifact_bytes).toBeLessThan(8192);
+    expect(size.journal_bytes).toBeGreaterThan(0);
+    expect(size.total_bytes).toBe(size.journal_bytes + size.artifact_bytes);
+
+    const under = await pruneJournal(runtime.store, runtime.artifacts, { olderThanMs: 30 * DAY, minProfileBytes: size.total_bytes });
+    expect(under).toMatchObject({ tasks: 0, skipped: 'below_min_size', profile_bytes: size.total_bytes });
+    expect(runtime.store.get(old.id)).toBeDefined();
+
+    const over = await pruneJournal(runtime.store, runtime.artifacts, { olderThanMs: 30 * DAY, minProfileBytes: size.total_bytes - 1 });
+    expect(over).toMatchObject({ tasks: 1, profile_bytes: size.total_bytes, artifacts: { deleted: 1 } });
+    expect(over.skipped).toBeUndefined();
+    expect(runtime.store.get(old.id)).toBeUndefined();
+    // Freed pages are not counted, so the next run sees the smaller profile even though SQLite kept the file size.
+    expect((await profileSize(runtime.store, runtime.artifacts)).total_bytes).toBeLessThan(size.total_bytes);
+    await expect(pruneJournal(runtime.store, runtime.artifacts, { olderThanMs: 30 * DAY, minProfileBytes: -1 })).rejects.toThrow(/whole number of bytes/);
+  });
+
+  it('takes a size threshold in MiB from configuration', async () => {
+    const { dir } = await setup();
+    const text = await readFile(join(dir, 'config.yaml'), 'utf8');
+    const withRetention = (block: string) => `${text.trimEnd()}\nretention:\n${block}\n`;
+    expect(parseConfig(withRetention('  enabled: true\n  min_profile_mb: 512')).retention).toEqual({ enabled: true, older_than_days: 90, min_profile_mb: 512 });
+    expect(() => parseConfig(withRetention('  enabled: true\n  min_profile_mb: 0'))).toThrow();
+    expect(() => parseConfig(withRetention('  enabled: true\n  min_profile_mb: 1.5'))).toThrow();
   });
 });
 

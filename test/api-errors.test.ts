@@ -145,7 +145,7 @@ describe('health and providers', () => {
     const ready = await app.request('/health/ready');
     expect(ready.status).toBe(503);
     const readyBody = await ready.json() as { status: string; service: string; problems: string[]; checks: Record<string, { status: string }> };
-    expect(readyBody).toMatchObject({ status: 'degraded', service: 'ardent', checks: { configuration: { status: 'down' } } });
+    expect(readyBody).toMatchObject({ status: 'not_ready', service: 'ardent', checks: { configuration: { status: 'down' } } });
     expect(readyBody.problems).toContain('providers.llamacpp.base_url is unresolved');
   });
 
