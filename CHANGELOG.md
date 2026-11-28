@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.6.0 - 2026-11-28
+
 ### Upgrade notes
 
 - `GET /health/ready` now answers `status: not_ready` with its 503, the HiveCommon readiness word for a service that cannot serve; Ardent 3.5.1 and earlier said `degraded`. The HTTP status codes, `problems` and `checks` are unchanged, and `GET /api/v1/memory/status` still says `degraded` when HiveMem is unavailable (the runtime keeps serving). A monitor that matched the body's `degraded` should match the 503, or `not_ready`. No journal migration and no configuration change; downgrading is safe.
