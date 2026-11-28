@@ -52,8 +52,8 @@ The journal keeps every task unless you prune it. `ardent prune --older-than
 90d [--dry-run]` deletes finished tasks (`completed`, `partial`, `failed`,
 `cancelled`) last changed before then, with their events, execution state,
 settled tool invocations and recovery, settled channel deliveries and their
-inbound updates, and artifact manifests; artifact bytes go once no manifest or
-remaining journal event names them. It keeps queued, running, paused,
+inbound updates, and artifact manifests; artifact bytes go once no record
+still names them. It keeps queued, running, paused,
 `unknown` and held tasks, tasks whose channel reply is not settled, tasks with
 session messages (transcripts are immutable and context checkpoints rest on
 them), tasks another task's lineage names, and any task another record refers
@@ -64,6 +64,7 @@ retention:
   enabled: false        # default; the gateway then prunes once a day
   older_than_days: 90
   min_profile_mb: 512   # optional: prune only while the profile holds more than 512 MiB
+  peer_sessions: true   # optional: also delete whole finished peer (A2A) sessions
 ```
 
 With `min_profile_mb`, each daily run first measures the profile: the
@@ -76,6 +77,43 @@ deleting until the profile is under the threshold, so a profile that is mostly
 session transcripts (which are kept) can stay over it. `ardent prune
 --min-size-mb N` applies the same check by hand, and its output shows
 `profile_bytes`, plus `skipped: below_min_size` when it did nothing.
+
+### Peer sessions
+
+Work other agents send in over A2A runs in peer sessions, one per A2A context,
+and each one keeps a transcript, so the rule above keeps all of it. With
+`peer_sessions: true` (or `ardent prune --peer-sessions`), a prune also
+deletes a peer session whole: the session, its transcript, its context
+checkpoints, its tasks with everything that belongs to them, and the A2A
+records of those tasks (the A2A task, its operation mapping, team mission and
+admission, request receipt, push configuration and deliveries, recovery
+publication and published team artifacts, whose bytes go once nothing else
+names them). A session goes only when all of this holds:
+
+- the session and every task in it last changed before the cutoff, and every
+  task is finished and passes the rules above, apart from having a transcript;
+- every A2A task it maps to is in a final state (completed, failed, canceled or
+  rejected), its push deliveries are `sent` or `failed`, its recovery
+  publication is final, and its published team artifacts are expired or
+  revoked;
+- no child claim (this profile leading a team) and no other record names its
+  tasks, the session or one of its checkpoints.
+
+A session never loses only part of its transcript: either the whole session
+goes or none of it does. Direct, scheduled and mission sessions are not
+affected. The trigger that makes transcripts immutable is dropped and recreated
+from its own stored text inside the same transaction, so no other connection
+sees the journal without it. After a peer task is pruned, a peer asking for it
+by id gets "task not found", and a resent A2A message with an old message id
+is a new request. Ardent's own A2A client retries a send for seconds, and the
+shortest retention is one day; keep the default 90 days unless a peer of yours
+resends much later.
+
+Pruning frees pages inside the journal, which SQLite reuses, but the file keeps
+its size. `ardent prune ... --vacuum` rewrites the journal afterwards so the
+file shrinks, and adds `vacuum: { before_bytes, after_bytes }` to the output.
+The rewrite needs the journal to itself and about its size again in temporary
+space: stop the gateway first. The scheduled prune never vacuums.
 
 ## Journal quiescence
 
