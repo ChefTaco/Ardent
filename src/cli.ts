@@ -39,7 +39,7 @@ import { developmentQuery, missionSubmitInput, previewInput } from './cli-comman
 import { developmentPage, DevelopmentRecords, recordSkillChange } from './development.js';
 import { ArtifactTransfers } from './artifact-transfer.js';
 import { inspectJournal, journalPolicy } from './journal.js';
-import { backupProfile, parseDuration, pruneJournal } from './retention.js';
+import { backupProfile, parseDuration, pruneJournal, vacuumJournal } from './retention.js';
 import { ArtifactStore } from './artifacts.js';
 
 type Parsed = { words: string[]; options: Map<string, string | true> };
@@ -117,9 +117,11 @@ Commands:
   journal status [--db FILE] [--json]      Report whether the journal holds active, unknown or unsupported work (read-only)
   journal policy                           Print the journal table classification
   backup <dir> [--artifacts]               Copy the journal (online, consistent) and optionally the artifacts
-  prune --older-than 90d [--min-size-mb N] [--dry-run]
+  prune --older-than 90d [--min-size-mb N] [--peer-sessions] [--vacuum] [--dry-run]
                                            Delete finished tasks older than that and what belongs only to them
-                                           (with --min-size-mb, only while the profile holds more than N MiB)
+                                           (with --min-size-mb, only while the profile holds more than N MiB;
+                                           with --peer-sessions, also whole finished peer sessions and transcripts;
+                                           with --vacuum, then shrink the journal file: stop the gateway first)
   a2a discover <peer> | call <peer>        Talk to a configured A2A peer
   a2a team-card                            Print the Hermes team card (a2a.hermes_compat)
   openapi export                           Print the management OpenAPI document
@@ -175,14 +177,17 @@ async function main(): Promise<void> {
   }
   if (command === 'prune') {
     const olderThan = value(parsed.options, 'older-than');
-    if (!olderThan) throw new Error('Use prune --older-than 90d [--min-size-mb N] [--dry-run]');
+    if (!olderThan) throw new Error('Use prune --older-than 90d [--min-size-mb N] [--peer-sessions] [--vacuum] [--dry-run]');
     const minSize = value(parsed.options, 'min-size-mb');
     if (minSize !== undefined && !/^[1-9]\d{0,6}$/.test(minSize)) throw new Error('--min-size-mb takes a whole number of MiB');
     const loadedForPrune = await loadConfig(dir);
     const store = new TaskStore(join(dir, 'state', 'ardent.sqlite'));
     try {
-      print(await pruneJournal(store, new ArtifactStore(join(dir, 'artifacts'), loadedForPrune.config.artifacts.max_bytes),
-        { olderThanMs: parseDuration(olderThan), dryRun: parsed.options.has('dry-run'), ...(minSize ? { minProfileBytes: Number(minSize) * 1_048_576 } : {}) }));
+      const dryRun = parsed.options.has('dry-run');
+      const result = await pruneJournal(store, new ArtifactStore(join(dir, 'artifacts'), loadedForPrune.config.artifacts.max_bytes),
+        { olderThanMs: parseDuration(olderThan), dryRun, peerSessions: parsed.options.has('peer-sessions'), ...(minSize ? { minProfileBytes: Number(minSize) * 1_048_576 } : {}) });
+      // A dry run or a prune the size threshold skipped leaves nothing to give back.
+      print(parsed.options.has('vacuum') && !dryRun && !result.skipped ? { ...result, vacuum: vacuumJournal(store) } : result);
     } finally { store.close(); }
     return;
   }
@@ -461,10 +466,10 @@ async function main(): Promise<void> {
         const prune = () => {
           if (!runtime || retentionRun) return;
           retentionRun = pruneJournal(runtime.store, runtime.artifacts, { olderThanMs: retention.older_than_days * 86_400_000,
-            ...(retention.min_profile_mb ? { minProfileBytes: retention.min_profile_mb * 1_048_576 } : {}) })
+            peerSessions: retention.peer_sessions === true, ...(retention.min_profile_mb ? { minProfileBytes: retention.min_profile_mb * 1_048_576 } : {}) })
             .then(result => {
               if (result.skipped) logger.debug('Journal retention skipped: the profile is under its size threshold', { profile_bytes: result.profile_bytes, min_profile_mb: retention.min_profile_mb });
-              else if (result.tasks) logger.info('Journal retention pruned tasks', { tasks: result.tasks, rows: result.rows, artifacts: result.artifacts, cutoff: result.cutoff, profile_bytes: result.profile_bytes });
+              else if (result.tasks) logger.info('Journal retention pruned tasks', { tasks: result.tasks, peer_sessions: result.peer_sessions, rows: result.rows, artifacts: result.artifacts, cutoff: result.cutoff, profile_bytes: result.profile_bytes });
             })
             .catch((error: unknown) => { logger.error('Journal retention failed', { err: error }); })
             .finally(() => { retentionRun = undefined; });

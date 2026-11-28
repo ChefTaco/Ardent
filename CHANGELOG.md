@@ -8,11 +8,15 @@
 
 ### Added
 
+- `retention.peer_sessions` and `ardent prune --peer-sessions`: retention can also delete whole peer (A2A) sessions whose work is all finished and older than the cutoff, with their transcript, context checkpoints, tasks and A2A records (A2A task, operation mapping, team mission and admission, request receipt, push configuration and deliveries, recovery publication and expired team artifacts, plus their bytes). A session goes whole or not at all, and only when its A2A tasks are final, its push deliveries settled and nothing else names it; direct, scheduled and mission sessions keep their transcripts as before. Off unless set. Prune output gains `peer_sessions`. A peer that asks for a pruned task gets "task not found".
+- `ardent prune --vacuum`: rewrite the journal after the prune so the file gives freed pages back (run with the gateway stopped); the output gains `vacuum: { before_bytes, after_bytes }`.
 - `retention.min_profile_mb`: scheduled retention prunes only while the profile holds more than that many MiB (used journal pages plus artifact files), so pruning can be on for every profile and act only on the large ones. `ardent prune --min-size-mb N` does the same by hand, and prune output now includes `profile_bytes` when a threshold is given, plus `skipped: below_min_size` when the profile was under it. Unset, retention behaves as before.
 
 ### Changed
 
 - `/health/ready` reports `not_ready` instead of `degraded` when it answers 503.
+- Retention is much faster on large journals: each rule that keeps a task scans its table once per batch instead of once per task, freed artifact bytes are checked against the journal events in one pass, and batches delete with foreign key enforcement off and then check, inside the same transaction, that nothing points at a deleted row (a batch that would leave one is rolled back with an error). On a copy of a 1.1 GB journal with 48,000 peer sessions the prune went from about 11 minutes to under a minute. The scheduled prune yields between batches, so the gateway keeps serving while it runs.
+- Retention frees artifact bytes only when no record names them, now including A2A team artifacts and artifact transfers, not only manifests, renditions and journal events.
 - The native image installs Debian security fixes published after its pinned base (currently the PAM fix for CVE-2025-6020), so the image scan passes while the upstream digest lags.
 
 ## 3.5.1 - 2026-11-26
