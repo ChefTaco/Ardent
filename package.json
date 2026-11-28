@@ -89,7 +89,7 @@
     "@grpc/grpc-js": "1.14.7",
     "@hivemagnus/canvas-word-codec": "1.1.0",
     "@hivemagnus/emberfold": "0.4.0",
-    "@hivemagnus/hive-common": "0.6.0",
+    "@hivemagnus/hive-common": "0.6.1",
     "@hono/node-server": "^2.1.11",
     "@photostructure/sqlite": "3.3.1",
     "dotenv": "^18.0.9",
